@@ -60,6 +60,8 @@ class Store:
         self.env.close()
 
     def _scan(self, workspace: str) -> list[dict]:
+        if not workspace:
+            return []
         prefix = _ws_prefix(workspace)
         out: list[dict] = []
         with self.env.begin() as txn:
@@ -73,6 +75,20 @@ class Store:
                 if isinstance(rec, dict):
                     out.append(rec)
         return out
+
+    def get(self, workspace: str, atom_id: str) -> dict | None:
+        if not workspace or not atom_id:
+            return None
+        key = _atom_key(workspace, atom_id)
+        with self.lock:
+            with self.env.begin() as txn:
+                raw = txn.get(key)
+        if raw is None:
+            return None
+        rec = json.loads(raw)
+        if not isinstance(rec, dict):
+            return None
+        return rec
 
     def current(self, workspace: str, set_name: str | None = None) -> list[dict]:
         with self.lock:
@@ -391,6 +407,18 @@ def make_handler(store: Store):
                 if not workspace:
                     return self._err(400, "workspace required")
                 self._send(200, {"atoms": store.current(workspace)})
+                return
+            if parsed.path.startswith("/v1/atoms/"):
+                atom_id = parsed.path[len("/v1/atoms/") :]
+                if not atom_id or "/" in atom_id:
+                    return self._err(404, "not found")
+                workspace = (qs.get("workspace") or [""])[0]
+                if not workspace:
+                    return self._err(400, "workspace required")
+                atom = store.get(workspace, atom_id)
+                if atom is None or not inside_memory.is_live(atom):
+                    return self._err(404, "no atom")
+                self._send(200, atom)
                 return
             if parsed.path == "/v1/search":
                 workspace = (qs.get("workspace") or [""])[0]

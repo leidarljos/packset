@@ -486,6 +486,48 @@ class MemdTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, 400)
 
+    def test_get_atom_by_id(self):
+        _, posted = self.json_req(
+            "POST",
+            "/v1/atoms",
+            {
+                "workspace": self.ws,
+                "text": "Reviews open with a reproducibility check.",
+                "kind": "voice",
+                "level": "explicit",
+                "about_peer": "rgoswami",
+                "by_peer": "hermes",
+            },
+        )
+        status, raw = self.get(f"/v1/atoms/{posted['id']}?workspace={self.ws}")
+        self.assertEqual(status, 200)
+        got = json.loads(raw.decode())
+        self.assertEqual(got["id"], posted["id"])
+        self.assertEqual(got["text"], posted["text"])
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.get(f"/v1/atoms/missing-id?workspace={self.ws}")
+        self.assertEqual(ctx.exception.code, 404)
+        self.store.delete(self.ws, posted["id"])
+        with self.assertRaises(urllib.error.HTTPError) as gone:
+            self.get(f"/v1/atoms/{posted['id']}?workspace={self.ws}")
+        self.assertEqual(gone.exception.code, 404)
+
+    def test_scan_empty_workspace_is_empty(self):
+        self.json_req(
+            "POST",
+            "/v1/atoms",
+            {
+                "workspace": self.ws,
+                "text": "Reviews open with a reproducibility check.",
+                "kind": "voice",
+                "level": "explicit",
+                "about_peer": "rgoswami",
+                "by_peer": "hermes",
+            },
+        )
+        self.assertEqual(self.store._scan(""), [])
+        self.assertEqual(self.store.get("", "any"), None)
+
 
 if __name__ == "__main__":
     unittest.main()
