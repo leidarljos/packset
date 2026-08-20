@@ -63,11 +63,38 @@ impl PacksetClient {
     pub fn from_env() -> Result<Self, Error> {
         let url = env::var("PACKSET_URL")
             .or_else(|_| env::var("INSIDE_MEMORY_URL"))
+            .or_else(|_| env::var("GROK_INSIDE_MEMORY_URL"))
             .map_err(|_| Error::NoUrl)?;
         if url.is_empty() || url == "off" {
             return Err(Error::NoUrl);
         }
         Ok(Self::new(url))
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    pub fn workspace(&self) -> String {
+        if let Ok(w) = env::var("PACKSET_WORKSPACE")
+            && !w.is_empty()
+        {
+            return w;
+        }
+        let cwd = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let url = format!("{}/v1/identity", self.base);
+        if let Ok(body) = ureq::get(&url)
+            .query("cwd", cwd.to_string_lossy().as_ref())
+            .timeout(TIMEOUT)
+            .call()
+            .and_then(|r| r.into_string().map_err(ureq::Error::from))
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(ws) = val.get("workspace").and_then(|v| v.as_str())
+            && !ws.is_empty()
+        {
+            return ws.to_string();
+        }
+        "global".to_string()
     }
 
     pub fn health(&self) -> Result<String, Error> {
