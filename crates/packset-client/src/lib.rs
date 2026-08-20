@@ -1,12 +1,26 @@
 //! Loopback HTTP client for packsetd.
 //!
-//! Reads `PACKSET_URL` or `INSIDE_MEMORY_URL`. Does not open LMDB.
+//! Reads `PACKSET_URL` or `INSIDE_MEMORY_URL`. search/get against packsetd; no SQLite.
+//! Does not open LMDB.
 
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+fn path_seg(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for b in id.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -66,24 +80,20 @@ impl PacksetClient {
     }
 
     pub fn get_atom(&self, workspace: &str, id: &str) -> Result<serde_json::Value, Error> {
-        let url = format!("{}/v1/atoms", self.base);
-        let body: serde_json::Value = ureq::get(&url)
+        let encoded = path_seg(id);
+        let url = format!("{}/v1/atoms/{encoded}", self.base);
+        let resp = match ureq::get(&url)
             .query("workspace", workspace)
             .timeout(TIMEOUT)
             .call()
-            .map_err(|e| Error::Http(Box::new(e)))?
-            .into_json()?;
-        let atoms = body
-            .get("atoms")
-            .and_then(|a| a.as_array())
-            .cloned()
-            .unwrap_or_default();
-        for atom in atoms {
-            if atom.get("id").and_then(|v| v.as_str()) == Some(id) {
-                return Ok(atom);
+        {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(404, _)) => {
+                return Err(Error::Bad(format!("no atom {id}")));
             }
-        }
-        Err(Error::Bad(format!("no atom {id}")))
+            Err(e) => return Err(Error::Http(Box::new(e))),
+        };
+        Ok(resp.into_json()?)
     }
 
     pub fn search(&self, workspace: &str, q: &str, limit: u32) -> Result<Vec<Hit>, Error> {
