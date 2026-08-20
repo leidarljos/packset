@@ -76,23 +76,27 @@ impl PacksetClient {
     }
 
     pub fn workspace(&self) -> String {
-        if let Ok(w) = env::var("PACKSET_WORKSPACE")
-            && !w.is_empty()
-        {
-            return w;
+        if let Ok(w) = env::var("PACKSET_WORKSPACE") {
+            if !w.is_empty() {
+                return w;
+            }
         }
         let cwd = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let url = format!("{}/v1/identity", self.base);
-        if let Ok(body) = ureq::get(&url)
+        let body = ureq::get(&url)
             .query("cwd", cwd.to_string_lossy().as_ref())
             .timeout(TIMEOUT)
             .call()
-            .and_then(|r| r.into_string().map_err(ureq::Error::from))
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&body)
-            && let Some(ws) = val.get("workspace").and_then(|v| v.as_str())
-            && !ws.is_empty()
-        {
-            return ws.to_string();
+            .ok()
+            .and_then(|r| r.into_string().ok());
+        if let Some(body) = body {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(ws) = val.get("workspace").and_then(|v| v.as_str()) {
+                    if !ws.is_empty() {
+                        return ws.to_string();
+                    }
+                }
+            }
         }
         "global".to_string()
     }
