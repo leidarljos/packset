@@ -1,6 +1,6 @@
 //! Loopback HTTP client for packsetd.
 //!
-//! Reads `PACKSET_URL` or `INSIDE_MEMORY_URL`. Search/get against packsetd; no SQLite.
+//! Reads `PACKSET_URL` or `INSIDE_MEMORY_URL`. search/get against packsetd; no SQLite.
 //! Does not open LMDB.
 
 use serde::{Deserialize, Serialize};
