@@ -127,6 +127,21 @@ impl PacksetClient {
         Ok(resp.into_json()?)
     }
 
+    pub fn list_atoms(&self, workspace: &str) -> Result<Vec<serde_json::Value>, Error> {
+        let url = format!("{}/v1/atoms", self.base);
+        let body: serde_json::Value = ureq::get(&url)
+            .query("workspace", workspace)
+            .timeout(TIMEOUT)
+            .call()
+            .map_err(|e| Error::Http(Box::new(e)))?
+            .into_json()?;
+        let atoms = body
+            .get("atoms")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        Ok(serde_json::from_value(atoms)?)
+    }
+
     pub fn search(&self, workspace: &str, q: &str, limit: u32) -> Result<Vec<Hit>, Error> {
         let url = format!("{}/v1/search", self.base);
         let body: serde_json::Value = ureq::get(&url)
