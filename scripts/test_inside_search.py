@@ -340,6 +340,43 @@ class SearchTests(unittest.TestCase):
             self.assertIn(review["id"], atom_ids)
             self.assertNotIn(debug["id"], atom_ids)
 
+    def test_borda_two_lists_of_three(self):
+        left = [("f", "x"), ("f", "y"), ("f", "z")]
+        right = [("f", "y"), ("f", "x"), ("f", "z")]
+        self.assertEqual(inside_search.borda_merge([left, right], 3), left)
+        left = [("f", "a"), ("f", "b"), ("f", "c")]
+        right = [("f", "b"), ("f", "c"), ("f", "a")]
+        self.assertEqual(
+            inside_search.borda_merge([left, right], 3),
+            [("f", "b"), ("f", "a"), ("f", "c")],
+        )
+
+    def test_merge_is_borda_not_primary_dedupe(self):
+        primary = [
+            {"field": "atom", "id": "a", "text": "alpha one", "score": 1.0},
+            {"field": "atom", "id": "b", "text": "beta two", "score": 0.5},
+            {"field": "atom", "id": "c", "text": "gamma three", "score": 0.1},
+        ]
+        secondary = [
+            {"field": "atom", "id": "b", "text": "beta two", "score": 0.9},
+            {"field": "atom", "id": "c", "text": "gamma three", "score": 0.4},
+            {"field": "atom", "id": "a", "text": "alpha one", "score": 0.2},
+        ]
+        ids = [h["id"] for h in inside_search._merge_hits(primary, secondary, 3)]
+        self.assertEqual(ids[0], "b")
+        self.assertEqual(set(ids), {"a", "b", "c"})
+
+    def test_mmr_after_borda_splits_near_duplicates(self):
+        items = [
+            (("f", "keep"), 1.0, {"review", "open", "repro"}),
+            (("f", "dup"), 0.55, {"review", "open", "repro"}),
+            (("f", "other"), 0.5, {"pin", "zircon", "index"}),
+        ]
+        order = inside_search.mmr_rerank(items, 0.7)
+        self.assertEqual(order[0], ("f", "keep"))
+        self.assertEqual(order[1], ("f", "other"))
+        self.assertEqual(order[2], ("f", "dup"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -595,23 +595,112 @@ def dense_hits(
     return hits[: max(0, int(limit))]
 
 
+def _hit_key(hit: dict[str, Any]) -> tuple[str, str]:
+    return (str(hit.get("field") or ""), str(hit.get("id") or ""))
+
+
+def _ballot_keys(hits: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for hit in hits:
+        key = _hit_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def borda_scores(
+    ballots: list[list[tuple[str, str]]], k: int
+) -> tuple[list[tuple[str, str]], dict[tuple[str, str], int]]:
+    """k-position Borda. Score is k - position. Ties keep first-seen order."""
+    if not ballots or k <= 0:
+        return [], {}
+    scores: dict[tuple[str, str], int] = {}
+    first_seen: list[tuple[str, str]] = []
+    for ballot in ballots:
+        for pos, key in enumerate(ballot[:k]):
+            if key not in scores:
+                first_seen.append(key)
+            scores[key] = scores.get(key, 0) + (k - pos)
+    ranked = list(first_seen)
+    ranked.sort(key=lambda key: (-scores.get(key, 0), first_seen.index(key)))
+    return ranked, scores
+
+
+def borda_merge(ballots: list[list[tuple[str, str]]], k: int) -> list[tuple[str, str]]:
+    ranked, _scores = borda_scores(ballots, k)
+    return ranked
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    uni = len(a | b)
+    if uni == 0:
+        return 0.0
+    return len(a & b) / uni
+
+
+def mmr_rerank(
+    items: list[tuple[tuple[str, str], float, set[str]]],
+    lambda_rel: float = 0.7,
+) -> list[tuple[str, str]]:
+    """MMR after Borda. lambda in (0, 1); otherwise keep Borda order."""
+    if len(items) < 2 or not (0.0 < lambda_rel < 1.0):
+        return [key for key, _rel, _toks in items]
+    rels = [rel for _key, rel, _toks in items]
+    lo = min(rels)
+    hi = max(rels)
+    span = max(hi - lo, 1e-9)
+
+    def rel_p(rel: float) -> float:
+        return (rel - lo) / span
+
+    selected: list[int] = []
+    rest = list(range(len(items)))
+    while rest:
+        best = rest[0]
+        best_s = float("-inf")
+        for i in rest:
+            novelty = 0.0
+            if selected:
+                novelty = max(
+                    _jaccard(items[i][2], items[j][2]) for j in selected
+                )
+            score = lambda_rel * rel_p(items[i][1]) - (1.0 - lambda_rel) * novelty
+            if score > best_s:
+                best_s = score
+                best = i
+        selected.append(best)
+        rest.remove(best)
+    return [items[i][0] for i in selected]
+
+
 def _merge_hits(
     primary: list[dict[str, Any]],
     secondary: list[dict[str, Any]],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Stable de-dupe: primary order first, then secondary, up to limit."""
-    seen: set[tuple[str, str]] = set()
-    out: list[dict[str, Any]] = []
-    for hit in primary + secondary:
-        key = (str(hit.get("field") or ""), str(hit.get("id") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(hit)
-        if len(out) >= limit:
-            break
-    return out
+    """Host Borda then MMR. Not de-dupe."""
+    if limit <= 0:
+        return []
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for hit in secondary:
+        by_key[_hit_key(hit)] = hit
+    for hit in primary:
+        by_key[_hit_key(hit)] = hit
+    ranked, scores = borda_scores(
+        [_ballot_keys(primary), _ballot_keys(secondary)], limit
+    )
+    items: list[tuple[tuple[str, str], float, set[str]]] = []
+    for key in ranked:
+        hit = by_key[key]
+        toks = set(_TOKEN.findall(str(hit.get("text") or "").lower()))
+        items.append((key, float(scores.get(key, 0)), toks))
+    order = mmr_rerank(items)
+    return [by_key[key] for key in order][:limit]
 
 
 def _merge_dense(
