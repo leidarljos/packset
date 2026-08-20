@@ -1,6 +1,7 @@
 //! Loopback HTTP client for packsetd.
 //!
-//! Reads `PACKSET_URL` or `INSIDE_MEMORY_URL`. Does not open LMDB.
+//! Reads `PACKSET_URL` or `INSIDE_MEMORY_URL`. Search/get against packsetd; no SQLite.
+//! Does not open LMDB.
 
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -81,14 +82,17 @@ impl PacksetClient {
     pub fn get_atom(&self, workspace: &str, id: &str) -> Result<serde_json::Value, Error> {
         let encoded = path_seg(id);
         let url = format!("{}/v1/atoms/{encoded}", self.base);
-        let resp = ureq::get(&url)
+        let resp = match ureq::get(&url)
             .query("workspace", workspace)
             .timeout(TIMEOUT)
             .call()
-            .map_err(|e| Error::Http(Box::new(e)))?;
-        if resp.status() == 404 {
-            return Err(Error::Bad(format!("no atom {id}")));
-        }
+        {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(404, _)) => {
+                return Err(Error::Bad(format!("no atom {id}")));
+            }
+            Err(e) => return Err(Error::Http(Box::new(e))),
+        };
         Ok(resp.into_json()?)
     }
 
