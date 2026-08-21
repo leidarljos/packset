@@ -81,10 +81,23 @@ impl PacksetClient {
                 return w;
             }
         }
-        let cwd = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = env::var("GROKOS_WORKSPACE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        self.workspace_for_cwd(&cwd)
+    }
+
+    /// Workspace id `/v1/identity` returns for `cwd`. Never the literal `global`
+    /// unless identity itself says so.
+    pub fn workspace_for_cwd(&self, cwd: &std::path::Path) -> String {
+        let abs = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let url = format!("{}/v1/identity", self.base);
         let body = ureq::get(&url)
-            .query("cwd", cwd.to_string_lossy().as_ref())
+            .query("cwd", abs.to_string_lossy().as_ref())
             .timeout(TIMEOUT)
             .call()
             .ok()
@@ -98,7 +111,7 @@ impl PacksetClient {
                 }
             }
         }
-        "global".to_string()
+        format!("dir:{}", abs.display())
     }
 
     pub fn health(&self) -> Result<String, Error> {
