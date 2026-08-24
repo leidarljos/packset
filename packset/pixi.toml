@@ -1,0 +1,19 @@
+[workspace]
+name = "packset"
+version = "0.1.0"
+description = "Seat-pack daemon: one writer, HTTP clients"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = ">=3.11,<3.14"
+just = "*"
+ruff = ">=0.16.2, <0.17"
+pytest = ">=9.1.1, <10"
+
+[pypi-dependencies]
+lmdb = ">=2.3.0, <3"
+
+[tasks]
+test = { cmd = "pytest -q scripts" }
+lint = { cmd = "ruff check scripts crates" }

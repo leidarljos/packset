@@ -1,0 +1,42 @@
+/* Tokyo Night Storm tokens. Identical copy in claimdag_tui and packset_tui.
+ * Canvas #24283b (36, 40, 59). Foreground #c0caf5. Blue #7aa2f7.
+ * Resize is widget layout, not finish_line pad.
+ */
+
+$storm-bg: #24283b;
+$storm-fg: #c0caf5;
+$storm-blue: #7aa2f7;
+$storm-comment: #565f89;
+$storm-cyan: #7dcfff;
+$storm-green: #9ece6a;
+$storm-magenta: #bb9af7;
+$storm-red: #f7768e;
+$storm-yellow: #e0af68;
+$storm-bg-dark: #1f2335;
+$storm-select: #3d59a1;
+
+$background: #24283b;
+$foreground: #c0caf5;
+$primary: #7aa2f7;
+$secondary: #565f89;
+$accent: #7dcfff;
+$success: #9ece6a;
+$warning: #e0af68;
+$error: #f7768e;
+$surface: #1f2335;
+
+Screen {
+    layout: vertical;
+    background: #24283b;
+    color: #c0caf5;
+}
+
+Header {
+    background: #1f2335;
+    color: #7aa2f7;
+}
+
+Footer {
+    background: #1f2335;
+    color: #565f89;
+}

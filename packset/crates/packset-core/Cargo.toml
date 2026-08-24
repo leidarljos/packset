@@ -1,0 +1,11 @@
+[package]
+name = "packset-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Atom schema, named fuse/diversify panel, decay, extract filters"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "packset-milli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Embedded milli index for the seat pack"
+
+[[bin]]
+name = "packset-milli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+milli = { git = "https://github.com/meilisearch/milli", tag = "v0.41.3" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lib]
+name = "packset_milli"
+path = "src/lib.rs"
