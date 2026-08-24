@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -537,7 +539,8 @@ def search_pack_linear(
             ]
         )
         relevance = _text_score(qtoks, blob)
-        if not relevance:
+        due = inside_memory.is_due(atom, now)
+        if not relevance and not due:
             continue
         try:
             trust = float(atom.get("trust") if atom.get("trust") is not None else 1.0)
@@ -549,7 +552,12 @@ def search_pack_linear(
                 "id": atom.get("id"),
                 "kind": atom.get("kind"),
                 "text": atom.get("text") or "",
-                "score": relevance + 0.1 * trust + _recency(atom.get("ts")),
+                "score": (
+                    (relevance or 0.0)
+                    + 0.1 * trust
+                    + _recency(atom.get("ts"))
+                    + (2.0 if due else 0.0)
+                ),
             }
         )
     hits.sort(key=lambda h: (-float(h["score"]), str(h.get("field") or ""), str(h.get("id") or "")))
@@ -657,6 +665,83 @@ def rrf_merge(ballots: list[list[tuple[str, str]]], k0: int) -> list[tuple[str, 
     return ranked
 
 
+def dowdall_scores(
+    ballots: list[list[tuple[str, str]]], k: int
+) -> tuple[list[tuple[str, str]], dict[tuple[str, str], float]]:
+    """Dowdall (Nauru) Borda. Score is 1/(position+1). Ties keep first-seen order."""
+    if not ballots or k <= 0:
+        return [], {}
+    scores: dict[tuple[str, str], float] = {}
+    first_seen: list[tuple[str, str]] = []
+    for ballot in ballots:
+        for pos, key in enumerate(ballot[:k]):
+            if key not in scores:
+                first_seen.append(key)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (pos + 1)
+    ranked = list(first_seen)
+    ranked.sort(key=lambda key: (-scores.get(key, 0.0), first_seen.index(key)))
+    return ranked, scores
+
+
+def dowdall_merge(ballots: list[list[tuple[str, str]]], k: int) -> list[tuple[str, str]]:
+    ranked, _scores = dowdall_scores(ballots, k)
+    return ranked
+
+
+KEMENY_EXACT_MAX = 8
+
+
+def kemeny_merge(
+    ballots: list[list[tuple[str, str]]], k: int
+) -> list[tuple[str, str]]:
+    """Kemeny-Young. Exact for n<=8; wider falls back to Borda.
+
+    Ties keep first-seen order.
+    """
+    if not ballots or k <= 0:
+        return []
+    first_seen: list[tuple[str, str]] = []
+    index: dict[tuple[str, str], int] = {}
+    for ballot in ballots:
+        for key in ballot[:k]:
+            if key not in index:
+                index[key] = len(first_seen)
+                first_seen.append(key)
+    n = len(first_seen)
+    if n == 0:
+        return []
+    if n > KEMENY_EXACT_MAX:
+        return borda_merge(ballots, k)
+    pairwise = [[0] * n for _ in range(n)]
+    for ballot in ballots:
+        pos: list[int | None] = [None] * n
+        for p, key in enumerate(ballot[:k]):
+            i = index.get(key)
+            if i is not None and pos[i] is None:
+                pos[i] = p
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                pi, pj = pos[i], pos[j]
+                if pi is not None and pj is not None and pi < pj:
+                    pairwise[i][j] += 1
+                elif pi is not None and pj is None:
+                    pairwise[i][j] += 1
+    best: tuple[int, ...] | None = None
+    best_dist: int | None = None
+    for perm in permutations(range(n)):
+        dist = 0
+        for a in range(n):
+            for b in range(a + 1, n):
+                dist += pairwise[perm[b]][perm[a]]
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = perm
+    assert best is not None
+    return [first_seen[i] for i in best]
+
+
 def _jaccard(a: set[str], b: set[str]) -> float:
     if not a and not b:
         return 0.0
@@ -703,63 +788,141 @@ def mmr_rerank(
 
 DEFAULT_FUSE = "borda"
 DEFAULT_DIVERSIFY = "mmr"
+DEFAULT_DECAY = "off"
+ENV_FUSE = "PACKSET_FUSE"
+ENV_DIVERSIFY = "PACKSET_DIVERSIFY"
+ENV_DECAY = "PACKSET_DECAY"
+_IMPLEMENTED_FUSE = frozenset({"borda", "rrf", "dowdall", "kemeny"})
+_RESERVED_FUSE = frozenset({"combmnz", "schulze", "copeland", "tideman"})
+_IMPLEMENTED_DIVERSIFY = frozenset({"mmr", "none"})
+_RESERVED_DIVERSIFY = frozenset({"dpp"})
 
 
 class UnknownVoter(ValueError):
-    """A fuse or diversify name that is not an implemented voter."""
+    """A fuse, diversify, or decay name that is not an implemented voter."""
 
 
 def parse_fuse(name: str) -> str:
-    if name in {"borda", "rrf"}:
+    if name in _IMPLEMENTED_FUSE:
         return name
+    if name in _RESERVED_FUSE:
+        raise UnknownVoter(f"not implemented fuse {name}")
     raise UnknownVoter(f"unknown fuse {name}")
 
 
 def parse_diversify(name: str) -> str:
-    if name in {"mmr", "none"}:
+    if name in _IMPLEMENTED_DIVERSIFY:
         return name
+    if name in _RESERVED_DIVERSIFY:
+        raise UnknownVoter(f"not implemented diversify {name}")
     raise UnknownVoter(f"unknown diversify {name}")
 
 
+def parse_decay(name: str) -> str:
+    if name in {"on", "off"}:
+        return name
+    raise UnknownVoter(f"unknown decay {name}")
+
+
+def _env_or(key: str, default: str) -> str:
+    if key not in os.environ:
+        return default
+    return os.environ[key]
+
+
 def resolve_panel(
-    fuse: str = DEFAULT_FUSE, diversify: str = DEFAULT_DIVERSIFY
-) -> tuple[str, str]:
-    """Host sequence. Clients do not choose this."""
-    return parse_fuse(fuse), parse_diversify(diversify)
+    fuse: str | None = None,
+    diversify: str | None = None,
+    decay: str | None = None,
+) -> tuple[str, str, str]:
+    """Host sequence from names or PACKSET_* env. Clients do not choose this."""
+    if fuse is None:
+        fuse = _env_or(ENV_FUSE, DEFAULT_FUSE)
+    if diversify is None:
+        diversify = _env_or(ENV_DIVERSIFY, DEFAULT_DIVERSIFY)
+    if decay is None:
+        decay = _env_or(ENV_DECAY, DEFAULT_DECAY)
+    return parse_fuse(fuse), parse_diversify(diversify), parse_decay(decay)
 
 
-def _merge_hits(
-    primary: list[dict[str, Any]],
-    secondary: list[dict[str, Any]],
+def bind_host_panel(
+    fuse: str | None = None,
+    diversify: str | None = None,
+    decay: str | None = None,
+) -> tuple[str, str, str]:
+    """Resolve and publish the host panel into PACKSET_* env."""
+    fuse, diversify, decay = resolve_panel(fuse, diversify, decay)
+    os.environ[ENV_FUSE] = fuse
+    os.environ[ENV_DIVERSIFY] = diversify
+    os.environ[ENV_DECAY] = decay
+    return fuse, diversify, decay
+
+
+def temporal_decay(
+    source: str, age_days: float, half_life_days: float | None
+) -> float:
+    """Half-life weight. Evergreen sources stay 1.0."""
+    if source in {"global", "workspace", "user", "evergreen"}:
+        return 1.0
+    if half_life_days is None or half_life_days <= 0:
+        return 1.0
+    return math.exp(-math.log(2.0) / half_life_days * max(age_days, 0.0))
+
+
+def _hit_decay_weight(hit: dict[str, Any]) -> float:
+    source = str(hit.get("kind") or hit.get("field") or "")
+    ts = hit.get("ts")
+    if not ts:
+        return 1.0
+    try:
+        when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return 1.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    days = max(0.0, (datetime.now(UTC) - when).total_seconds() / 86400.0)
+    return temporal_decay(source, days, _RECENCY_HALF_LIFE_DAYS)
+
+
+def _merge_ballots(
+    ballots: list[list[dict[str, Any]]],
     limit: int,
     *,
-    fuse: str = DEFAULT_FUSE,
-    diversify: str = DEFAULT_DIVERSIFY,
+    fuse: str | None = None,
+    diversify: str | None = None,
+    decay: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Named fuse then diversify. Default is Borda then MMR. Not de-dupe."""
+    """Named fuse then diversify then decay. Default is Borda then MMR, decay off."""
     if limit <= 0:
         return []
-    fuse, diversify = resolve_panel(fuse, diversify)
+    fuse, diversify, decay = resolve_panel(fuse, diversify, decay)
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for hit in secondary:
-        by_key[_hit_key(hit)] = hit
-    for hit in primary:
-        by_key[_hit_key(hit)] = hit
+    for hits in reversed(ballots):
+        for hit in hits:
+            by_key[_hit_key(hit)] = hit
+    keys = [_ballot_keys(hits) for hits in ballots]
     if fuse == "borda":
-        ranked, scores = borda_scores(
-            [_ballot_keys(primary), _ballot_keys(secondary)], limit
-        )
+        ranked, scores = borda_scores(keys, limit)
     elif fuse == "rrf":
-        ranked, scores = rrf_scores(
-            [_ballot_keys(primary), _ballot_keys(secondary)], 60
-        )
+        ranked, scores = rrf_scores(keys, 60)
+    elif fuse == "dowdall":
+        ranked, scores = dowdall_scores(keys, limit)
+    elif fuse == "kemeny":
+        ranked = kemeny_merge(keys, limit)
+        scores = {key: float(len(ranked) - i) for i, key in enumerate(ranked)}
     else:
         raise UnknownVoter(f"unknown fuse {fuse}")
+    weights = {key: float(scores.get(key, 0)) for key in ranked}
+    if decay == "on":
+        for key in ranked:
+            weights[key] *= _hit_decay_weight(by_key[key])
+        order_index = {key: i for i, key in enumerate(ranked)}
+        ranked = sorted(ranked, key=lambda key: (-weights[key], order_index[key]))
     items: list[tuple[tuple[str, str], float, set[str]]] = []
     for key in ranked:
         hit = by_key[key]
         toks = set(_TOKEN.findall(str(hit.get("text") or "").lower()))
-        items.append((key, float(scores.get(key, 0)), toks))
+        items.append((key, weights[key], toks))
     if diversify == "mmr":
         order = mmr_rerank(items)
     elif diversify == "none":
@@ -767,6 +930,25 @@ def _merge_hits(
     else:
         raise UnknownVoter(f"unknown diversify {diversify}")
     return [by_key[key] for key in order][:limit]
+
+
+def _merge_hits(
+    primary: list[dict[str, Any]],
+    secondary: list[dict[str, Any]],
+    limit: int,
+    *,
+    fuse: str | None = None,
+    diversify: str | None = None,
+    decay: str | None = None,
+) -> list[dict[str, Any]]:
+    """Named fuse then diversify. Default is Borda then MMR. Not de-dupe."""
+    return _merge_ballots(
+        [primary, secondary],
+        limit,
+        fuse=fuse,
+        diversify=diversify,
+        decay=decay,
+    )
 
 
 def _merge_dense(
@@ -794,6 +976,56 @@ def lexical_search(
     return search_pack_linear(pack, query, limit=limit, set_name=set_name), "linear"
 
 
+def due_atom_hits(
+    pack: dict[str, Any],
+    *,
+    set_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Live atoms whose due_at is now. Query overlap is not required."""
+    now = inside_memory.utcnow()
+    hits: list[dict[str, Any]] = []
+    for atom in pack.get("atoms") or []:
+        if not isinstance(atom, dict) or not inside_memory.is_live(atom, now):
+            continue
+        if not _atom_in_set(atom, set_name):
+            continue
+        if not inside_memory.is_due(atom, now):
+            continue
+        try:
+            trust = float(atom.get("trust") if atom.get("trust") is not None else 1.0)
+        except (TypeError, ValueError):
+            trust = 1.0
+        hits.append(
+            {
+                "field": "atom",
+                "id": atom.get("id"),
+                "kind": atom.get("kind"),
+                "text": atom.get("text") or "",
+                "score": 2.0 + 0.1 * trust + _recency(atom.get("ts")),
+            }
+        )
+    hits.sort(key=lambda h: (-float(h["score"]), str(h.get("id") or "")))
+    return hits
+
+
+def _front_due(
+    due: list[dict[str, Any]], ranked: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for hit in due + ranked:
+        key = _hit_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(hit)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def search_pack_with_engine(
     pack: dict[str, Any],
     query: str,
@@ -802,7 +1034,7 @@ def search_pack_with_engine(
     index_dir: Path | None = None,
     set_name: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Ranked hits plus which engine produced them."""
+    """Ranked hits plus which engine produced them. Due atoms lead."""
     if not _tokens(query):
         return [], "linear"
     dense = dense_hits(pack, query, limit=limit, set_name=set_name)
@@ -810,8 +1042,11 @@ def search_pack_with_engine(
         pack, query, limit=limit, index_dir=index_dir, set_name=set_name
     )
     if dense:
-        merged = _merge_dense(ranked, dense, max(0, int(limit)))
-        return merged, f"{engine}+dense"
+        ranked = _merge_dense(ranked, dense, max(0, int(limit)))
+        engine = f"{engine}+dense"
+    due = due_atom_hits(pack, set_name=set_name)
+    if due:
+        ranked = _front_due(due, ranked, max(0, int(limit)))
     return ranked, engine
 
 
