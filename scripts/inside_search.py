@@ -539,7 +539,8 @@ def search_pack_linear(
             ]
         )
         relevance = _text_score(qtoks, blob)
-        if not relevance:
+        due = inside_memory.is_due(atom, now)
+        if not relevance and not due:
             continue
         try:
             trust = float(atom.get("trust") if atom.get("trust") is not None else 1.0)
@@ -551,7 +552,12 @@ def search_pack_linear(
                 "id": atom.get("id"),
                 "kind": atom.get("kind"),
                 "text": atom.get("text") or "",
-                "score": relevance + 0.1 * trust + _recency(atom.get("ts")),
+                "score": (
+                    (relevance or 0.0)
+                    + 0.1 * trust
+                    + _recency(atom.get("ts"))
+                    + (2.0 if due else 0.0)
+                ),
             }
         )
     hits.sort(key=lambda h: (-float(h["score"]), str(h.get("field") or ""), str(h.get("id") or "")))

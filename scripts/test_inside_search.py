@@ -111,6 +111,19 @@ def test_live_atom_prefix_and_typo() -> None:
     assert typo[0]["id"] == atom["id"]
 
 
+def test_due_atom_hits_without_query_overlap() -> None:
+    due = voice(
+        text="Review this lesson on the due clock.",
+        due_at="2000-01-01T00:00:00.000Z",
+    )
+    quiet = voice(text="Unrelated high trust habit.", trust=9.0)
+    pack = {"user": "", "memory": "", "atoms": [due, quiet]}
+    hits = inside_search.search_pack_linear(pack, "zircon")
+    ids = [h["id"] for h in hits]
+    assert due["id"] in ids
+    assert quiet["id"] not in ids
+
+
 def test_expired_atom_absent() -> None:
     stale = inside_memory.make_atom(
         workspace=WS,
