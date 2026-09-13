@@ -161,7 +161,9 @@ fn log_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
         .unwrap_or_else(|| PathBuf::from("."));
-    state.join("packsetd.log")
+    // One log a port, so two writers on one host do not interleave and
+    // a failure's tail is the failing writer's.
+    state.join(format!("packsetd-{}.log", port()))
 }
 
 fn client(port: u16) -> PacksetClient {

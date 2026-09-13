@@ -15,7 +15,10 @@ fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(http::DEFAULT_PORT);
-    let mut root = std::env::var_os("GROKINSIDE_HOME")
+    // `PACKSET_HOME` is the name the rest of the pack's variables share;
+    // the older names still answer.
+    let mut root = std::env::var_os("PACKSET_HOME")
+        .or_else(|| std::env::var_os("GROKINSIDE_HOME"))
         .or_else(|| std::env::var_os("GROK_INSIDE_MEMORY_HOME"))
         .map_or_else(Home::default_root, Into::into);
     let mut fuse = None;
@@ -86,7 +89,7 @@ fn usage() -> String {
              -V, --version       the build this is\n\
              --host <addr>       {} only, which is the contract\n\
              --port <n>          default {}, or PACKSET_PORT\n\
-             --home <dir>        the pack home, or GROKINSIDE_HOME\n\
+             --home <dir>        the pack home, or PACKSET_HOME\n\
              --fuse <name>       host fuse voter, or PACKSET_FUSE\n\
              --diversify <name>  host diversify voter, or PACKSET_DIVERSIFY\n\
              --decay <name>      host decay voter, or PACKSET_DECAY",

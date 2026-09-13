@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The writer reads `PACKSET_HOME` for its home, the name the pack's other
+  variables share; the older names still answer. Two writers on one host
+  with different homes no longer open the same store, and each writes
+  its own log (`packsetd-PORT.log`).
 - A network arm: with `PACKSET_MAB_GNN` naming a directory of inferred
   edges (one JSON a record, from a graph neural network trained to tell
   the record's own edges from non-edges), the second hop is the facts the
