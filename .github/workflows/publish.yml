@@ -25,5 +25,5 @@ jobs:
         run: |
           set -euo pipefail
           for p in packset-core packset-client packset-embed packset packset-daemon packset-mcp; do
-            cargo publish --locked --no-verify -p "$p" || true
+            cargo publish --locked --no-verify -p "$p"
           done
