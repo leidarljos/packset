@@ -70,7 +70,7 @@ Every new claim is due for review after one day. Tomorrow:
    $ packset grade 3f9c... demo
    2026-09-15T08:54:37.394Z
 
-A recalled claim comes back later; ``--lapsed`` brings it back sooner. With
+A recalled claim comes back later; ``--lapsed`` brings it back sooner.
 By default a claim you have not reviewed also sinks
 in the ranking as its retrievability falls.
 
