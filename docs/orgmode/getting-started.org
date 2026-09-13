@@ -10,10 +10,18 @@ It will tell you when to review them, and export them for another seat.
 #+begin_src console
 $ packset ensure
 PACKSET_URL=http://127.0.0.1:8761
+INSIDE_MEMORY_URL=http://127.0.0.1:8761
 $ export PACKSET_URL=http://127.0.0.1:8761
 $ packset status demo
 packset: up on 127.0.0.1:8761 (packsetd ok)
+{
+  "workspace": "demo",
+  "live_by_kind": {}
+}
 #+end_src
+
+=packset ensure= prints two assignment lines. Do not capture it with
+=$(...)=. If a writer is already on 8761, use a scratch port instead.
 
 One process owns the store. A second =packsetd= on the same file refuses
 to start and names the process with the lock.
@@ -26,8 +34,14 @@ each. The pack refuses anything longer, and it refuses a tool dump outright.
 #+begin_src console
 $ packset remember --workspace demo "The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25."
 $ packset prefer --workspace demo "CombMNZ over RRF for fusing two ballots."
-$ packset status demo | jq '.live_by_kind'
-{ "lesson": 1, "preference": 1 }
+$ packset status demo
+packset: up on 127.0.0.1:8761 (packsetd ok)
+{
+  "live_by_kind": {
+    "lesson": 1,
+    "preference": 1
+  }
+}
 #+end_src
 
 Sending the same lesson twice returns the stored atom. Sending a contrary

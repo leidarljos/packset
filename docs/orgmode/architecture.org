@@ -13,18 +13,17 @@ milli is a projection. Every agent is an HTTP client.
 
 * Split
 
-| Crate / script | Role |
+| Crate | Role |
 |---|---|
-| =packsetd.py= | writer |
-| =packset-core= | named fuse/diversify/decay panel, extract filters |
+| =packsetd= | writer (Rust, crate =packset-daemon=) |
+| =packset-core= | named fuse/diversify/decay panel |
+| =packset-client= | HTTP |
+| =packset-embed= | optional dense encoder |
 
 Host panel env: =PACKSET_FUSE= =PACKSET_DIVERSIFY= =PACKSET_DECAY=.
-Default =borda= / =mmr= / =off=. Unknown names fail closed.
+Default =combmnz= / =mmr= / =fsrs=. Unknown names fail closed.
 Cross-encoder second stage: =PACKSET_RERANK= or =/v1/search?rerank=1=,
-off by default. Same =packset-embed --rerank= the locomo arm measured.
-| =packset-client= | HTTP |
-| =packset-milli= | search projection |
-| =packset_tui= | Textual DataTable over GET /v1/atoms |
+off by default.
 
 Clients do not open the LMDB.
 
@@ -37,9 +36,8 @@ reader. A bare prefix and a separator that would split the entity into two are
 both refused; whether the deed exists is a question the pack cannot ask and does
 not try to.
 
-The rule lives twice, once on each side of the port: =packset_core::atom= holds
-=check_entity= and =is_accession=, and =inside_memory.validate_atom= enforces it
-on the writer that runs today. The Rust copy is the one the daemon inherits.
+The rule lives in =packset_core::atom= (=check_entity= and =is_accession=).
+The daemon inherits that copy. There is no Python writer.
 
 #+begin_src console
 $ packset accessions git:github.com/HaoZeke/vissue

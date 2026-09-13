@@ -22,7 +22,9 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 ```console
 $ cargo binstall packset packset-daemon
 # or: cargo install packset packset-daemon
-$ export PACKSET_URL=$(packset ensure)
+$ packset ensure
+PACKSET_URL=http://127.0.0.1:8761
+$ export PACKSET_URL=http://127.0.0.1:8761
 ```
 
 `packset-mcp` is the read-only MCP surface and `packset-embed` the optional

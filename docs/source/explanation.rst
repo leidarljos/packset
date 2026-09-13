@@ -36,8 +36,8 @@ Dirichlet language-model scoring lost to BM25+. SPLADE++ alone scored
 second stage did not beat the free fusion and is off by default. The
 diversify slot made no difference to recall, which is the wrong benchmark
 for it: a diversifier is for not answering the same claim four ways, and
-LoCoMo has nothing to suppress. The full table with every arm is in the
-repository README.
+LoCoMo has nothing to suppress. The table above is the measured excerpt.
+There is no second table on the README.
 
 On LongMemEval\ :sub:`S` (doi:10.48550/arXiv.2410.10813), 470 answerable questions
 over about fifty sessions each, BM25+ alone reaches 0.91 recall@5 at session
@@ -218,8 +218,8 @@ Lexical scoring cannot tell the four apart, so it lands at chance. Recency
 prefers the paraphrase written last week. Retrievability prefers the claim
 the seat kept using, and loses only where a paraphrase written in the last
 day or two carries more retrievability than a kept claim thirty days past
-its last review. The slot stays off by default until a seat has a review
-history worth reading.
+its last review. The recency half-life slot stays off. Retrievability (``fsrs``) is the
+default a seat gets; ``PACKSET_DECAY=off`` turns scaling off.
 
 Islands
 =======
