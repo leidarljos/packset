@@ -236,6 +236,46 @@ struct RowSurvey {
     bridges: BTreeMap<usize, Vec<usize>>,
 }
 
+/// Inferred edges over one record's facts, from `gnn/links.py`: for each
+/// fact the facts a graph neural network believes it links to and the
+/// observed graph does not carry, strongest belief first.
+fn read_gnn(path: &Path, docs: usize) -> Option<BTreeMap<usize, Vec<usize>>> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let index: Vec<usize> = v["index"]
+        .as_array()?
+        .iter()
+        .filter_map(|i| {
+            i.as_u64()
+                .map(|u| u as usize)
+                .or_else(|| i.as_str()?.parse().ok())
+        })
+        .collect();
+    let mut out: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut edges: Vec<(usize, usize, f64)> = v["inferred"]
+        .as_array()?
+        .iter()
+        .filter_map(|e| {
+            let e = e.as_array()?;
+            Some((
+                e[0].as_u64()? as usize,
+                e[1].as_u64()? as usize,
+                e[2].as_f64().unwrap_or(0.0),
+            ))
+        })
+        .collect();
+    edges.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap_or(std::cmp::Ordering::Equal));
+    for (i, j, _) in edges {
+        let (Some(&di), Some(&dj)) = (index.get(i), index.get(j)) else {
+            continue;
+        };
+        if di < docs && dj < docs {
+            out.entry(di).or_default().push(dj);
+            out.entry(dj).or_default().push(di);
+        }
+    }
+    Some(out)
+}
+
 fn read_survey(path: &Path, docs: usize) -> Option<RowSurvey> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let mut core_of = vec![None; docs];
@@ -472,6 +512,7 @@ fn main() -> anyhow::Result<()> {
         fact_arms.push("fused live".into());
         fact_arms.push("fused live hop2".into());
         fact_arms.push("fused live saddle".into());
+        fact_arms.push("fused live gnn".into());
     } else {
         fact_arms.push("lexical latest".into());
         fact_arms.push("lexical live".into());
@@ -505,6 +546,16 @@ fn main() -> anyhow::Result<()> {
             let index = Index::build(row.docs.iter().map(|d| d.tokens.as_slice()));
             let vecs = if encoder { vectors(row) } else { Vec::new() };
             let alive = if facts { live(&row.docs) } else { Vec::new() };
+            let gnn = if facts {
+                std::env::var_os("PACKSET_MAB_GNN").and_then(|dir| {
+                    read_gnn(
+                        &PathBuf::from(dir).join(format!("{split}-{}.json", row.nth)),
+                        row.docs.len(),
+                    )
+                })
+            } else {
+                None
+            };
             let survey = if facts {
                 std::env::var_os("PACKSET_MAB_SURVEY").and_then(|dir| {
                     read_survey(
@@ -634,6 +685,27 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         record(&format!("{base} live saddle"), path);
+                    }
+                    // The network's inferred edges as the second hop.
+                    if let Some(gnn) = gnn.as_ref() {
+                        let mut path: Vec<usize> =
+                            living.iter().take(HOP_LEAD).map(|(i, _)| *i).collect();
+                        for &i in path.clone().iter().take(HOP_SEEDS) {
+                            for &j in gnn.get(&i).map(Vec::as_slice).unwrap_or(&[]) {
+                                if alive.get(j).copied().unwrap_or(true)
+                                    && !path.contains(&j)
+                                    && path.len() < KEEP
+                                {
+                                    path.push(j);
+                                }
+                            }
+                        }
+                        for (j, _) in living.iter().skip(HOP_LEAD) {
+                            if !path.contains(j) && path.len() < KEEP {
+                                path.push(*j);
+                            }
+                        }
+                        record(&format!("{base} live gnn"), path);
                     }
                 }
                 asked_total += 1;

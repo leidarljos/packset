@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A network arm: with `PACKSET_MAB_GNN` naming a directory of inferred
+  edges (one JSON a record, from a graph neural network trained to tell
+  the record's own edges from non-edges), the second hop is the facts the
+  network believes the first hop's facts link to.
 - The two-hop arm keeps the first hop's five strongest facts ahead of
   the second hop's, so a single-hop question keeps its answer in front.
 - A saddle arm: with `PACKSET_MAB_SURVEY` naming a directory of
