@@ -6,7 +6,16 @@ transcript; ranked by a measured panel of scorers; reviewed before it is
 forgotten; faded when it is not; retracted with the deed that showed it
 wrong. One daemon owns one LMDB file and every tool is a client.
 
-Docs, tutorial and the measured tables: https://leidarljos.github.io/packset/
+Docs: https://leidarljos.github.io/packset/
+
+| Page | What it answers |
+|---|---|
+| [Getting started](https://leidarljos.github.io/packset/getting-started.html) | A scratch pack that remembers two claims and ranks them |
+| [How-to](https://leidarljos.github.io/packset/howto.html) | Review, island, handover, one writer |
+| [Reference](https://leidarljos.github.io/packset/reference.html) | Verbs, atoms, the daemon |
+| [Explanation](https://leidarljos.github.io/packset/explanation.html) | Why write on purpose, and what was measured |
+
+The seat that sits on this pack is documented at https://leidarljos.github.io.
 
 ## Install
 
