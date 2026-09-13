@@ -7,7 +7,7 @@ publish.workspace = true
 description = "HTTP client for packsetd"
 
 [dependencies]
-packset-core = { path = "../packset-core", version = "0.8.0" }
+packset-core = { path = "../packset-core", version = "0.9.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

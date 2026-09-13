@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.9.0 (2026-09-13)
 
 - MemoryAgentBench accurate retrieval measured (2000 questions, ten
   chunks, 7B reader): the fused panel 0.675 of the questions, lexical

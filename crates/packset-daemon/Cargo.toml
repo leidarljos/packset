@@ -20,12 +20,12 @@ heed = "0.20"
 # serde_json carries preserve_order, so its map type is the one to keep a
 # proposal log in insertion order without a second sort.
 indexmap = "2"
-packset-core = { path = "../packset-core", version = "0.8.0" }
+packset-core = { path = "../packset-core", version = "0.9.0" }
 serde.workspace = true
 serde_json.workspace = true
 tiny_http = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
-packset-client = { path = "../packset-client", version = "0.8.0" }
+packset-client = { path = "../packset-client", version = "0.9.0" }
 ureq = { version = "2", default-features = false, features = ["json"] }

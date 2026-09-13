@@ -13,9 +13,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 libc = "0.2"
-packset-client = { path = "../packset-client", version = "0.8.0" }
+packset-client = { path = "../packset-client", version = "0.9.0" }
 serde_json.workspace = true
-packset-core = { path = "../packset-core", version = "0.8.0" }
+packset-core = { path = "../packset-core", version = "0.9.0" }
 
 [dev-dependencies]
 tempfile = "3"
