@@ -164,8 +164,8 @@ the reader decides the rest, and a 7B reader is weak on multi-session and
 temporal questions even when handed the right sessions. Zep's LongMemEval rows use frontier readers, so the absolute
 numbers do not compare across papers; the comparison this table supports
 is between retrievers under one reader, which is how the retrieval half of
-those systems is measured too. The interned table lives in
-[[file:results/longmemeval-s-qa.org][results/longmemeval-s-qa]].
+those systems is measured too. The interned table is
+=docs/orgmode/results/longmemeval-s-qa.org= in this repository.
 
 * Forgetting is a feature
 
