@@ -31,6 +31,10 @@ pub struct Attachment {
 const ACTIVATION_SEEDS: usize = 5;
 /// How far activation spreads along the links.
 const ACTIVATION_HOPS: usize = 2;
+/// The most claims one consolidation bucket may hold before it is passed
+/// over; a shared head of three words that a thousand claims open with is
+/// not a rewrite candidate list.
+const CONSOLIDATE_BUCKET_MAX: usize = 64;
 /// How many of an island's strongest claims fire together when asked.
 const FIRE_TOP: usize = 8;
 
@@ -879,9 +883,16 @@ impl Service {
     pub fn islands(&self, workspace: &str) -> anyhow::Result<Value> {
         let atoms = self.store.live(workspace)?;
         let graph = packset_core::island::Graph::from_atoms(&atoms);
-        let islands: Vec<Value> = packset_core::island::islands(&graph)
+        // Communities by modularity; label propagation stands beside it so
+        // the two can be compared on the same pack.
+        let found = packset_core::island::communities(&graph);
+        let modularity = packset_core::island::modularity(&graph, &found);
+        let propagated = packset_core::island::islands(&graph);
+        let propagated_modularity = packset_core::island::modularity(&graph, &propagated);
+        let islands: Vec<Value> = found
             .into_iter()
             .map(|members| {
+                let signature = packset_core::island::signature(&graph, &members);
                 let atoms: Vec<Value> = members
                     .iter()
                     .map(|&i| {
@@ -892,10 +903,16 @@ impl Service {
                         })
                     })
                     .collect();
-                json!({"size": members.len(), "atoms": atoms})
+                json!({"size": members.len(), "signature": format!("{signature:016x}"), "atoms": atoms})
             })
             .collect();
-        Ok(json!({"islands": islands, "atoms": atoms.len()}))
+        Ok(json!({
+            "islands": islands,
+            "atoms": atoms.len(),
+            "method": "modularity",
+            "modularity": modularity,
+            "propagation": {"islands": propagated.len(), "modularity": propagated_modularity},
+        }))
     }
 
     /// The claims the link graph turns on, highest first: a weighted
@@ -997,8 +1014,13 @@ impl Service {
             if head.len() >= record::HEAD_MIN {
                 keys.push(format!("h:{}", head[..record::HEAD_MIN].join(" ")));
             }
-            for entity in record::entities_of(atom) {
-                keys.push(format!("e:{entity}"));
+            // Only entities the claim carries; the ones read off its text
+            // would put every claim that says "the" into one bucket and
+            // make this a pass over every pair.
+            if let Some(Value::Array(items)) = atom.get("entities") {
+                for entity in items.iter().filter_map(Value::as_str) {
+                    keys.push(format!("e:{}", entity.to_lowercase()));
+                }
             }
             for key in &keys {
                 buckets.entry(key.clone()).or_default().push(i);
@@ -1015,6 +1037,8 @@ impl Service {
             let mut candidates: Vec<usize> = keys_of[i]
                 .iter()
                 .filter_map(|key| buckets.get(key))
+                // A bucket the size of the pack is no bucket.
+                .filter(|members| members.len() <= CONSOLIDATE_BUCKET_MAX)
                 .flat_map(|members| members.iter().copied())
                 .filter(|&j| j < i && open[j])
                 .collect();

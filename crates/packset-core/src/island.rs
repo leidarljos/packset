@@ -333,6 +333,199 @@ pub fn islands(graph: &Graph) -> Vec<Vec<usize>> {
     out
 }
 
+/// Newman-Girvan modularity of a partition over the weighted graph: the
+/// weight inside communities beyond what the degrees alone would put
+/// there (doi:10.1103/PhysRevE.69.026113). Zero for one community; one is
+/// the unreachable ideal; label propagation is judged against it.
+#[must_use]
+pub fn modularity(graph: &Graph, communities: &[Vec<usize>]) -> f64 {
+    let degree: Vec<f64> = graph
+        .adjacency
+        .iter()
+        .map(|peers| peers.iter().map(|(_, w)| w).sum())
+        .collect();
+    let m2: f64 = degree.iter().sum();
+    if m2 <= 0.0 {
+        return 0.0;
+    }
+    let mut of = vec![usize::MAX; graph.len()];
+    for (c, members) in communities.iter().enumerate() {
+        for &m in members {
+            if m < of.len() {
+                of[m] = c;
+            }
+        }
+    }
+    let mut q = 0.0;
+    for (i, peers) in graph.adjacency.iter().enumerate() {
+        for &(j, w) in peers {
+            if of[i] == of[j] && of[i] != usize::MAX {
+                q += w - degree[i] * degree[j] / m2;
+            }
+        }
+    }
+    q / m2
+}
+
+/// Communities by greedy modularity optimisation, the Louvain method
+/// (Blondel, Guillaume, Lambiotte and Lefebvre,
+/// doi:10.1088/1742-5468/2008/10/P10008): every node moves to the
+/// neighbouring community that gains most modularity until none does,
+/// the communities become the nodes of a smaller graph, and the two
+/// steps repeat until a level gains nothing. Nodes are visited in index
+/// order, so the result is the same on every run. Largest first, members
+/// sorted, as [`islands`] returns.
+#[must_use]
+pub fn communities(graph: &Graph) -> Vec<Vec<usize>> {
+    let n = graph.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // The current level's graph as weighted adjacency, and which original
+    // nodes each level node stands for.
+    let mut adjacency: Vec<Vec<(usize, f64)>> = graph.adjacency.clone();
+    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    loop {
+        let size = adjacency.len();
+        let degree: Vec<f64> = adjacency
+            .iter()
+            .map(|peers| peers.iter().map(|(_, w)| w).sum())
+            .collect();
+        let m2: f64 = degree.iter().sum();
+        if m2 <= 0.0 {
+            break;
+        }
+        let mut community: Vec<usize> = (0..size).collect();
+        let mut total: Vec<f64> = degree.clone();
+        let mut moved_any = false;
+        loop {
+            let mut moved = false;
+            for i in 0..size {
+                let own = community[i];
+                // Weight from i into each neighbouring community.
+                let mut into: HashMap<usize, f64> = HashMap::new();
+                for &(j, w) in &adjacency[i] {
+                    if j != i {
+                        *into.entry(community[j]).or_insert(0.0) += w;
+                    }
+                }
+                total[own] -= degree[i];
+                let stay = into.get(&own).copied().unwrap_or(0.0) - total[own] * degree[i] / m2;
+                let mut best = (own, stay);
+                let mut candidates: Vec<(&usize, &f64)> = into.iter().collect();
+                candidates.sort_by_key(|(c, _)| **c);
+                for (&c, &w_in) in candidates {
+                    let gain = w_in - total[c] * degree[i] / m2;
+                    if gain > best.1 + 1e-12 {
+                        best = (c, gain);
+                    }
+                }
+                total[best.0] += degree[i];
+                if best.0 != own {
+                    community[i] = best.0;
+                    moved = true;
+                    moved_any = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        if !moved_any {
+            break;
+        }
+        // Aggregate: one node per community, self loops for inside weight.
+        let mut relabel: HashMap<usize, usize> = HashMap::new();
+        for &c in &community {
+            let next = relabel.len();
+            relabel.entry(c).or_insert(next);
+        }
+        let levels = relabel.len();
+        let mut next_adj: Vec<HashMap<usize, f64>> = vec![HashMap::new(); levels];
+        let mut next_members: Vec<Vec<usize>> = vec![Vec::new(); levels];
+        for i in 0..size {
+            let ci = relabel[&community[i]];
+            next_members[ci].extend(members[i].iter().copied());
+            for &(j, w) in &adjacency[i] {
+                let cj = relabel[&community[j]];
+                *next_adj[ci].entry(cj).or_insert(0.0) += w;
+            }
+        }
+        adjacency = next_adj
+            .into_iter()
+            .map(|row| {
+                let mut edges: Vec<(usize, f64)> = row.into_iter().collect();
+                edges.sort_by_key(|e| e.0);
+                edges
+            })
+            .collect();
+        members = next_members;
+        if levels == size {
+            break;
+        }
+    }
+    let mut out = members;
+    for group in &mut out {
+        group.sort_unstable();
+    }
+    out.retain(|g| !g.is_empty());
+    out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a[0].cmp(&b[0])));
+    out
+}
+
+/// Rounds of colour refinement a signature takes.
+pub const WL_ROUNDS: usize = 3;
+
+/// A structural signature of a set of nodes: Weisfeiler-Lehman colour
+/// refinement (doi:10.1007/978-3-030-79087-9_5 surveys it) over the link
+/// graph, starting from each node's degree, [`WL_ROUNDS`] rounds, hashed
+/// over the members' final colours. Two islands with the same shape carry
+/// the same signature whatever their texts, so a seat can recognise a
+/// pattern of memories it holds again after a handover, and the link
+/// predictor can read structure as a feature. Refinement is not a
+/// complete canonical form; graphs it cannot tell apart are the regular
+/// ones, and a canonical labelling (nauty) stands behind it when that
+/// matters.
+#[must_use]
+pub fn signature(graph: &Graph, members: &[usize]) -> u64 {
+    let n = graph.len();
+    let mut colour: Vec<u64> = (0..n)
+        .map(|i| fnv(&[graph.adjacency[i].len() as u64]))
+        .collect();
+    for _ in 0..WL_ROUNDS {
+        let next: Vec<u64> = (0..n)
+            .map(|i| {
+                let mut around: Vec<u64> =
+                    graph.adjacency[i].iter().map(|(j, _)| colour[*j]).collect();
+                around.sort_unstable();
+                let mut words = vec![colour[i]];
+                words.extend(around);
+                fnv(&words)
+            })
+            .collect();
+        colour = next;
+    }
+    let mut own: Vec<u64> = members
+        .iter()
+        .filter(|&&m| m < n)
+        .map(|&m| colour[m])
+        .collect();
+    own.sort_unstable();
+    fnv(&own)
+}
+
+/// FNV-1a over 64-bit words, the same on every build.
+fn fnv(words: &[u64]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for w in words {
+        for b in w.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
 /// How much of a node's activation reaches its neighbours per hop.
 pub const HOP_DECAY: f64 = 0.5;
 
@@ -438,6 +631,47 @@ mod tests {
 
     /// Two cliques joined by one edge are two islands, and a cue in one
     /// activates its own clique above the other.
+    #[test]
+    fn modularity_communities_split_two_cliques_and_beat_propagation() {
+        // Two cliques of five joined by one edge.
+        let mut atoms = Vec::new();
+        for i in 0..10 {
+            let side = if i < 5 { 0..5 } else { 5..10 };
+            let mut links: Vec<String> =
+                side.filter(|&j| j != i).map(|j| format!("n{j}")).collect();
+            if i == 4 {
+                links.push("n5".into());
+            }
+            if i == 5 {
+                links.push("n4".into());
+            }
+            atoms.push(
+                serde_json::json!({"id": format!("n{i}"), "text": "x", "links": links})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+        }
+        let graph = Graph::from_atoms(&atoms);
+        let found = communities(&graph);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0], vec![0, 1, 2, 3, 4]);
+        assert_eq!(found[1], vec![5, 6, 7, 8, 9]);
+        let q = modularity(&graph, &found);
+        assert!(q > 0.4, "modularity {q}");
+        assert!(q >= modularity(&graph, &islands(&graph)) - 1e-9);
+        assert!(
+            modularity(&graph, &[(0..10).collect()]).abs() < 1e-9,
+            "one community is zero"
+        );
+        // Two cliques of the same size share a signature; a different size does not.
+        assert_eq!(signature(&graph, &found[0]), signature(&graph, &found[1]));
+        assert_ne!(
+            signature(&graph, &found[0]),
+            signature(&graph, &found[0][..3])
+        );
+    }
+
     #[test]
     fn two_cliques_are_two_islands() {
         let mut atoms = clique("a", 4);

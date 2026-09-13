@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `GET /v1/islands` returns communities by modularity (the Louvain
+  method) with the partition's modularity and a structural signature per
+  island (Weisfeiler-Lehman refinement over the links), and reports label
+  propagation's count and modularity beside them.
+- `consolidate` buckets only by the entities a claim carries and its
+  first words, and passes over a bucket of more than 64: the entities
+  read off a text made one bucket of every claim and a pass over every
+  pair, 2.7 s at a thousand claims.
 - The writer reads `PACKSET_HOME` for its home, the name the pack's other
   variables share; the older names still answer. Two writers on one host
   with different homes no longer open the same store, and each writes
