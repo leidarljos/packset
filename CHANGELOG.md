@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The two-hop arm measured on conflict resolution, same job and reader:
+  0.576 against 0.535 for the live facts alone (+0.041, interval +0.014
+  to +0.070); multi-hop rows 0.21 to 0.40 against 0.06 to 0.31; single-hop
+  rows give back one to nine points to the second hop's facts.
 - A two-hop arm on the MemoryAgentBench fact lists: the objects of the
   strongest live facts become second queries, and the second hop's live
   facts follow the first's, so a multi-hop question sees the bridge and

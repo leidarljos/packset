@@ -279,9 +279,18 @@ same hits ordered latest first, 0.33 to 0.42 and 0.02 to 0.06; the same
 hits with every superseded fact closed by this rule, 0.76 to 0.86
 single-hop and 0.03 to 0.27 multi-hop, 0.480 over all eight rows. The
 rule more than doubles the single-hop answers, because the reader no
-longer sees the old fact beside the new; the multi-hop rows stay hard, as
-the benchmark's authors found for every system they measured (at most
-0.28). Their retrieval baselines, with a much stronger reader, sit at
+longer sees the old fact beside the new. The multi-hop rows are where
+every system the benchmark's authors measured fails (at most 0.28), and
+where a second hop over the live facts moves them: the objects of the
+strongest live facts are asked about in turn, and the second hop's live
+facts follow the first's, so a question about the spouse of an author
+reaches the author's fact and then, by the name it carries, the spouse's.
+In one job, same reader: live 0.535, two hops 0.576 over the 800
+questions, a paired difference of +0.041 with a bootstrap interval of
++0.014 to +0.070; on the multi-hop rows +0.09 to +0.15 (0.21 to 0.40
+answered, against 0.06 to 0.31), on the single-hop rows -0.01 to -0.09,
+where the second hop's facts displace the first's in a ten-fact prompt.
+The published retrieval baselines, with a much stronger reader, sit at
 0.155 to 0.295 on this split.
 
 The same benchmark's accurate-retrieval split, 2000 questions over
