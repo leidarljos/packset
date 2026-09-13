@@ -46,6 +46,9 @@ First minute
 
 .. code:: console
 
+   $ packset ensure
+   PACKSET_URL=http://127.0.0.1:8761
+   INSIDE_MEMORY_URL=http://127.0.0.1:8761
    $ export PACKSET_URL=http://127.0.0.1:8761
    $ packset remember --workspace demo "BM25+ is the default lexical scorer. It beat BM25 by two points."
    3f9c... lesson  due 2026-09-13T08:54:37.394Z
