@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The two-hop arm keeps the first hop's five strongest facts ahead of
+  the second hop's, so a single-hop question keeps its answer in front.
+- A saddle arm: with `PACKSET_MAB_SURVEY` naming a directory of
+  landscape surveys (one JSON a record: cores with members, saddles with
+  bridges), the second hop is the facts nearest the saddles out of the
+  cores the first hop's facts descended into.
 - The two-hop arm measured on conflict resolution, same job and reader:
   0.576 against 0.535 for the live facts alone (+0.041, interval +0.014
   to +0.070); multi-hop rows 0.21 to 0.40 against 0.06 to 0.31; single-hop

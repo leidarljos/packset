@@ -224,6 +224,67 @@ fn object_of(text: &str) -> Option<String> {
 /// Hops in the two-hop arm: how many first-hop facts lend their object as
 /// a second query.
 const HOP_SEEDS: usize = 3;
+/// First-hop facts kept ahead of the second hop's.
+const HOP_LEAD: usize = 5;
+
+/// A landscape survey of one record's facts: the core each fact descended
+/// into and the bridge facts out of each core, read from the JSON
+/// `landscape` prints (`{"cores": [{"id", "members"}], "saddles": [{"a",
+/// "b", "energy", "bridges"}]}`).
+struct RowSurvey {
+    core_of: Vec<Option<usize>>,
+    bridges: BTreeMap<usize, Vec<usize>>,
+}
+
+fn read_survey(path: &Path, docs: usize) -> Option<RowSurvey> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let mut core_of = vec![None; docs];
+    for c in v["cores"].as_array()? {
+        let id = c["id"].as_u64()? as usize;
+        for m in c["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+        {
+            if let Some(slot) = core_of.get_mut(m as usize) {
+                *slot = Some(id);
+            }
+        }
+    }
+    let mut saddles: Vec<(f64, usize, usize, Vec<usize>)> = v["saddles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some((
+                s["energy"].as_f64()?,
+                s["a"].as_u64()? as usize,
+                s["b"].as_u64()? as usize,
+                s["bridges"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|b| b as usize)
+                    .collect(),
+            ))
+        })
+        .collect();
+    // Lowest pass first, so a core's easiest bridge leads.
+    saddles.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bridges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (_, a, b, bs) in saddles {
+        for core in [a, b] {
+            let list = bridges.entry(core).or_default();
+            for &x in &bs {
+                if !list.contains(&x) {
+                    list.push(x);
+                }
+            }
+        }
+    }
+    Some(RowSurvey { core_of, bridges })
+}
 
 /// Which facts are live once each later fact closes the earlier one it
 /// replaces, by the pack's own rule (`packset_core::record::same_head`):
@@ -410,6 +471,7 @@ fn main() -> anyhow::Result<()> {
         fact_arms.push("fused latest".into());
         fact_arms.push("fused live".into());
         fact_arms.push("fused live hop2".into());
+        fact_arms.push("fused live saddle".into());
     } else {
         fact_arms.push("lexical latest".into());
         fact_arms.push("lexical live".into());
@@ -443,6 +505,16 @@ fn main() -> anyhow::Result<()> {
             let index = Index::build(row.docs.iter().map(|d| d.tokens.as_slice()));
             let vecs = if encoder { vectors(row) } else { Vec::new() };
             let alive = if facts { live(&row.docs) } else { Vec::new() };
+            let survey = if facts {
+                std::env::var_os("PACKSET_MAB_SURVEY").and_then(|dir| {
+                    read_survey(
+                        &PathBuf::from(dir).join(format!("{split}-{}.json", row.nth)),
+                        row.docs.len(),
+                    )
+                })
+            } else {
+                None
+            };
             for (q, question) in row.questions.iter().enumerate() {
                 let answers = row.answers.get(q).cloned().unwrap_or_default();
                 let mut retrieved: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -512,17 +584,57 @@ fn main() -> anyhow::Result<()> {
                             .unwrap_or(std::cmp::Ordering::Equal)
                             .then_with(|| a.0.cmp(&b.0))
                     });
+                    // The first hop's five strongest lead, the second hop's
+                    // facts follow, the first hop's tail fills what is left:
+                    // a single-hop question keeps its answer in front.
+                    for (j, _) in living.iter().skip(HOP_SEEDS).take(HOP_LEAD - HOP_SEEDS) {
+                        if !chain.contains(j) && chain.len() < KEEP {
+                            chain.push(*j);
+                        }
+                    }
                     for (j, _) in second {
                         if !chain.contains(&j) && chain.len() < KEEP {
                             chain.push(j);
                         }
                     }
-                    for (j, _) in living.iter().skip(HOP_SEEDS) {
+                    for (j, _) in living.iter().skip(HOP_LEAD) {
                         if !chain.contains(j) && chain.len() < KEEP {
                             chain.push(*j);
                         }
                     }
                     record(&format!("{base} live hop2"), chain);
+                    // The landscape's bridges as the second hop: the cores
+                    // the first hop's facts descended into, and the facts
+                    // nearest the saddles out of them (`landscape` writes
+                    // the survey, PACKSET_MAB_SURVEY names the directory).
+                    if let Some(survey) = survey.as_ref() {
+                        let mut path: Vec<usize> =
+                            living.iter().take(HOP_LEAD).map(|(i, _)| *i).collect();
+                        let mut seen_cores: Vec<usize> = Vec::new();
+                        for &i in path.clone().iter().take(HOP_SEEDS) {
+                            let Some(core) = survey.core_of.get(i).copied().flatten() else {
+                                continue;
+                            };
+                            if seen_cores.contains(&core) {
+                                continue;
+                            }
+                            seen_cores.push(core);
+                            for &b in survey.bridges.get(&core).map(Vec::as_slice).unwrap_or(&[]) {
+                                if alive.get(b).copied().unwrap_or(true)
+                                    && !path.contains(&b)
+                                    && path.len() < KEEP
+                                {
+                                    path.push(b);
+                                }
+                            }
+                        }
+                        for (j, _) in living.iter().skip(HOP_LEAD) {
+                            if !path.contains(j) && path.len() < KEEP {
+                                path.push(*j);
+                            }
+                        }
+                        record(&format!("{base} live saddle"), path);
+                    }
                 }
                 asked_total += 1;
                 if let Some(file) = dump.as_mut() {
