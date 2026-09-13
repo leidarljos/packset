@@ -1134,6 +1134,29 @@ impl Service {
                     .collect()
             })
             .unwrap_or_default();
+        // Seeds two scorers agreed on, when two or more ran. Activation
+        // from weak seeds flows to the best-connected cluster, whatever
+        // the cue was; an island seeded that way is reported weak and is
+        // not fired, because firing it wires the wrong links tighter.
+        let agreed = seeds["hits"]
+            .as_array()
+            .map(|hits| {
+                hits.iter()
+                    .filter(|hit| {
+                        let of = hit["of"].as_u64().unwrap_or(1);
+                        let named = hit["ballots"].as_u64().unwrap_or(1);
+                        of < 2 || named >= 2
+                    })
+                    .filter(|hit| {
+                        hit["id"]
+                            .as_str()
+                            .and_then(|id| graph.position(id))
+                            .is_some()
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let weak = agreed < 2;
         let lit = packset_core::island::activate(&graph, &weighted, ACTIVATION_HOPS);
         let strongest = lit.first().map_or(1.0, |(_, a)| *a);
         let island: Vec<Value> = lit
@@ -1150,7 +1173,7 @@ impl Service {
                 })
             })
             .collect();
-        let fired = if fire {
+        let fired = if fire && !weak {
             let ids: Vec<String> = lit
                 .iter()
                 .take(FIRE_TOP)
@@ -1164,6 +1187,9 @@ impl Service {
         Ok(json!({
             "island": island,
             "seeds": weighted.len(),
+            "agreed_seeds": agreed,
+            "weak": weak,
+            "dense": crate::embed::binary().is_some(),
             "hops": ACTIVATION_HOPS,
             "fired": fired,
         }))

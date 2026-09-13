@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An island seeded by hits fewer than two scorers agreed on is reported
+  `weak` and is not fired: activation from weak seeds flows to the
+  best-connected cluster whatever the cue, and firing it wires the wrong
+  links tighter. The answer carries `agreed_seeds` and whether the dense
+  ballot ran (`dense`).
 - `GET /v1/islands` returns communities by modularity (the Louvain
   method) with the partition's modularity and a structural signature per
   island (Weisfeiler-Lehman refinement over the links), and reports label

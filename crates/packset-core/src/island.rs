@@ -356,15 +356,26 @@ pub fn modularity(graph: &Graph, communities: &[Vec<usize>]) -> f64 {
             }
         }
     }
-    let mut q = 0.0;
+    // Per community: the weight inside it, and the degree it holds; the
+    // expected inside weight is the square of the held share.
+    let mut inside = vec![0.0; communities.len()];
+    let mut total = vec![0.0; communities.len()];
     for (i, peers) in graph.adjacency.iter().enumerate() {
+        if of[i] == usize::MAX {
+            continue;
+        }
+        total[of[i]] += degree[i];
         for &(j, w) in peers {
-            if of[i] == of[j] && of[i] != usize::MAX {
-                q += w - degree[i] * degree[j] / m2;
+            if of[j] == of[i] {
+                inside[of[i]] += w;
             }
         }
     }
-    q / m2
+    inside
+        .iter()
+        .zip(&total)
+        .map(|(inn, tot)| inn / m2 - (tot / m2) * (tot / m2))
+        .sum()
 }
 
 /// Communities by greedy modularity optimisation, the Louvain method
