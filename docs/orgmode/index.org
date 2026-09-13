@@ -55,8 +55,9 @@ $ packset search --workspace demo lexical scorer
 9.1000	lesson	3f9c...	BM25+ is the default lexical scorer. It beat BM25 by two points.
 #+end_src
 
-The [[file:getting-started.org][tutorial]] does the same through the seat's
-own verbs and ends with a handover another machine can open.
+The [[file:getting-started.org][tutorial]] is this crate's CLI. The seat
+walks the same pack through =ljos remember= and =ljos search=:
+[[https://leidarljos.github.io/docs/start/][first write]].
 
 * Measured
 
@@ -78,4 +79,5 @@ is the source for those rows.
    reference
    explanation
    architecture
+   seat
 #+end_export

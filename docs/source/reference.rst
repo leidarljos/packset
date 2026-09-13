@@ -1,150 +1,95 @@
-=========
-Reference
-=========
-
-
-
 Command line
-------------
+============
 
-.. table::
-
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | Verb                                             | Does                                                                                                   |
-    +==================================================+========================================================================================================+
-    | ``packset ensure``                               | start the writer if it is down, print ``PACKSET_URL``                                                  |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset start`` / ``stop``                     | the writer alone                                                                                       |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset status [WS]``                          | up or down; counts by kind, the pin, the index and dense state                                         |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset port`` / ``url`` / ``which``           | the port, the URL, the daemon binary                                                                   |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset remember [--workspace WS] TEXT``       | one lesson                                                                                             |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset prefer [--workspace WS] TEXT``         | one standing preference                                                                                |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset search [--workspace WS] QUERY``        | ranked claims: score, kind, id, text                                                                   |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset due [WS]``                             | claims whose review clock has run out, soonest first                                                   |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset islands [WS]``                         | the link graph's clusters, largest first: size and first claim                                         |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset island [--workspace WS] [--fire] CUE`` | the memories a cue activates: activation, seed mark, id, text; ``--fire`` wires the top eight together |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset fire [--workspace WS] ID ID...``       | these claims fired together; their links gain weight, their other links lose a little                  |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset grade ID [--lapsed] [WS]``             | mark a review recalled, or lapsed                                                                      |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset pin [NAME]``                           | read or set the pinned set; an empty name clears it                                                    |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset accessions [WS]``                      | deed accessions the live claims cite                                                                   |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset atoms [--as-of TS] [WS]``              | live-now claims, or those live at ``TS``                                                               |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset citers ACCESSION [WS]``                | the live claims citing one accession                                                                   |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
-    | ``packset export --into DIR [WS]``               | claims to ``DIR/<ws>.jsonl``; cited accessions to stdout                                               |
-    +--------------------------------------------------+--------------------------------------------------------------------------------------------------------+
+================================================ ======================================================================================================
+Verb                                             Does
+================================================ ======================================================================================================
+``packset ensure``                               start the writer if it is down, print ``PACKSET_URL``
+``packset start`` / ``stop``                     the writer alone
+``packset status [WS]``                          up or down; counts by kind, the pin, the index and dense state
+``packset port`` / ``url`` / ``which``           the port, the URL, the daemon binary
+``packset remember [--workspace WS] TEXT``       one lesson
+``packset prefer [--workspace WS] TEXT``         one standing preference
+``packset search [--workspace WS] QUERY``        ranked claims: score, kind, id, text
+``packset due [WS]``                             claims whose review clock has run out, soonest first
+``packset islands [WS]``                         the link graph's clusters, largest first: size and first claim
+``packset hubs [WS]``                            the claims the link graph turns on, highest first: a weighted PageRank over the links
+``packset island [--workspace WS] [--fire] CUE`` the memories a cue activates: activation, seed mark, id, text; ``--fire`` wires the top eight together
+``packset fire [--workspace WS] ID ID...``       these claims fired together; their links gain weight, their other links lose a little
+``packset grade ID [--lapsed] [WS]``             mark a review recalled, or lapsed
+``packset pin [NAME]``                           read or set the pinned set; an empty name clears it
+``packset accessions [WS]``                      deed accessions the live claims cite
+``packset atoms [--as-of TS] [WS]``              live-now claims, or those live at ``TS``
+``packset citers ACCESSION [WS]``                the live claims citing one accession
+``packset export --into DIR [WS]``               claims to ``DIR/<ws>.jsonl``; cited accessions to stdout
+================================================ ======================================================================================================
 
 A workspace argument defaults to ``PACKSET_WORKSPACE``, else the git remote of
 the working directory, else ``default``.
 
 HTTP
-----
+====
 
 The writer listens on ``127.0.0.1`` only. Bodies are JSON.
 
-.. table::
-
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | Method and path                                                                 | Does                                                                                                     |
-    +=================================================================================+==========================================================================================================+
-    | ``GET /health``                                                                 | ``packsetd``                                                                                             |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/status?workspace=``                                                   | counts, pin, index and dense state                                                                       |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/workspaces``                                                          | names with live counts                                                                                   |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``POST /v1/atoms``                                                              | store one claim; returns the stored record, or the live duplicate                                        |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/atoms?workspace=&as_of=``                                             | live claims, or those live at ``as_of``                                                                  |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/atoms/<id>?workspace=``                                               | one record, whatever its state                                                                           |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``POST /v1/atoms/update``                                                       | merge fields into one live claim                                                                         |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``POST /v1/atoms/delete``                                                       | tombstone; ``why`` names the deed that withdrew it                                                       |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``POST /v1/grade``                                                              | ``recalled`` true or false; moves ``due_at``                                                             |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/search?workspace=&q=&limit=&as_of=&rerank=``                          | ranked hits, the engine, the stage                                                                       |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/islands?workspace=``                                                  | the link graph's communities, largest first                                                              |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/activate?workspace=&q=&limit=&fire=``                                 | the cluster a cue activates: top hits as seeds, two hops along the links; ``fire=1`` wires the top eight |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``POST /v1/fire``                                                               | ``ids`` that fired together: weights up, missing links made, other links decayed                         |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/accessions?workspace=``                                               | accessions the live claims cite                                                                          |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/citers?workspace=&accession=``                                        | claims citing one accession                                                                              |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET/POST /v1/pin``                                                            | the pinned set                                                                                           |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET/POST /v1/set``                                                            | a set's three cards                                                                                      |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET /v1/pack?workspace=``                                                     | the cards and the atoms as one document                                                                  |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET/POST /v1/user``, ``/v1/memory``                                           | the seat card, the workspace card                                                                        |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``POST /v1/attach``                                                             | hold one body for the next turn                                                                          |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
-    | ``GET/POST /v1/proposals``, ``POST /v1/proposals/accept``, ``POST /v1/compact`` | proposals a person accepts into claims                                                                   |
-    +---------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------+
+=============================================================================== ===========================================================================================================================
+Method and path                                                                 Does
+=============================================================================== ===========================================================================================================================
+``GET /health``                                                                 ``packsetd``
+``GET /v1/status?workspace=``                                                   counts, pin, index and dense state
+``GET /v1/workspaces``                                                          names with live counts
+``POST /v1/atoms``                                                              store one claim; returns the stored record, or the live duplicate
+``GET /v1/atoms?workspace=&as_of=``                                             live claims, or those live at ``as_of``
+``GET /v1/atoms/<id>?workspace=``                                               one record, whatever its state
+``POST /v1/atoms/update``                                                       merge fields into one live claim
+``POST /v1/atoms/delete``                                                       tombstone; ``why`` names the deed that withdrew it
+``POST /v1/grade``                                                              ``recalled`` true or false; moves ``due_at``
+``GET /v1/search?workspace=&q=&limit=&as_of=&rerank=``                          ranked hits, the engine, the stage
+``GET /v1/islands?workspace=``                                                  the link graph's communities, largest first
+``GET /v1/hubs?workspace=&limit=``                                              the claims the link graph turns on, highest first, with their scores
+``GET /v1/activate?workspace=&q=&limit=&fire=``                                 the cluster a cue activates: top hits as seeds, two hops along the links; ``fire=1`` wires the top eight
+``POST /v1/fire``                                                               ``ids`` that fired together: weights up, missing links made, other links decayed
+``POST /v1/consolidate``                                                        the replacement rule over the live set in written order; ``apply`` false reports the pairs, true closes the earlier of each
+``GET /v1/accessions?workspace=``                                               accessions the live claims cite
+``GET /v1/citers?workspace=&accession=``                                        claims citing one accession
+``GET/POST /v1/pin``                                                            the pinned set
+``GET/POST /v1/set``                                                            a set's three cards
+``GET /v1/pack?workspace=``                                                     the cards and the atoms as one document
+``GET/POST /v1/user``, ``/v1/memory``                                           the seat card, the workspace card
+``POST /v1/attach``                                                             hold one body for the next turn
+``GET/POST /v1/proposals``, ``POST /v1/proposals/accept``, ``POST /v1/compact`` proposals a person accepts into claims
+=============================================================================== ===========================================================================================================================
 
 A refusal is a 4xx with ``error`` as one line: the reason a claim was not
 stored, quoted back.
 
 The atom
---------
+========
 
 Schema ``inside.atom/v1``. Fields the writer reads:
 
-.. table::
-
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | Field                                | Meaning                                                                                                                                                                 |
-    +======================================+=========================================================================================================================================================================+
-    | ``kind``                             | one of ``voice``, ``habit``, ``cache-pointer``, ``preference``, ``lesson``, ``goal``, ``conclusion``, ``card_line``, ``summary``, ``correction``, ``belief``, ``trust`` |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``level``                            | ``explicit`` for a claim a person or seat wrote                                                                                                                         |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``text``                             | the claim: at most two sentences of at most twenty-five words                                                                                                           |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``workspace``                        | required                                                                                                                                                                |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``set``                              | optional; a checked name                                                                                                                                                |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``entities``                         | names the claim is about; an entity shaped like an accession must be one                                                                                                |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``ts``, ``valid_from``, ``valid_to`` | written, and the window it was true; ``valid_to`` closes on supersession                                                                                                |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``supersedes``                       | the ids a contrary claim closed                                                                                                                                         |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``due_at``, ``review``               | the review clock: ``stability``, ``difficulty``, ``reps``, ``last``, ``interval_s``                                                                                     |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``links``                            | peers by entity overlap, at most eight, chosen by relative-neighbourhood pruning; ``fire`` adds peers up to eight                                                       |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``link_weights``                     | weight per link in (0, 1], absent meaning 0.5; moved by ``fire``                                                                                                        |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-    | ``from``, ``to``, ``weight``         | a ``trust`` row: one edge of an influence graph, weight in (0, 1]                                                                                                       |
-    +--------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+==================================== ====================================================================================================================================================================================
+Field                                Meaning
+==================================== ====================================================================================================================================================================================
+``kind``                             one of ``voice``, ``habit``, ``cache-pointer``, ``preference``, ``lesson``, ``goal``, ``conclusion``, ``card_line``, ``summary``, ``correction``, ``belief``, ``trust``, ``persona``
+``level``                            ``explicit`` for a claim a person or seat wrote
+``text``                             the claim: at most two sentences of at most twenty-five words
+``workspace``                        required
+``set``                              optional; a checked name
+``entities``                         names the claim is about; an entity shaped like an accession must be one
+``ts``, ``valid_from``, ``valid_to`` written, and the window it was true; ``valid_to`` closes on supersession
+``supersedes``                       the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object
+``due_at``, ``review``               the review clock: ``stability``, ``difficulty``, ``reps``, ``last``, ``interval_s``
+``links``                            peers by entity overlap, at most eight, chosen by relative-neighbourhood pruning; ``fire`` adds peers up to eight
+``link_weights``                     weight per link in (0, 1], absent meaning 0.5; moved by ``fire``
+``from``, ``to``, ``weight``         a ``trust`` row: one edge of an influence graph, weight in (0, 1]; ``entities`` scope it to domains
+``name``, ``anchor``                 a ``persona``: a voter and how far it moves off its own ballot, in [0, 1]; the text is its view, ``entities`` its domains
+==================================== ====================================================================================================================================================================================
 
 Fields the writer does not model round-trip untouched.
 
 The review clock
-----------------
+================
 
 A new claim is due after one day. ``grade`` with ``recalled`` grows stability
 by how overdue the claim was; ``lapsed`` halves it and raises difficulty. The
@@ -153,47 +98,33 @@ retrievability at ``t`` days since the last review with stability ``S`` is
 a search score by ``R``, floored at 0.25; cards are never scaled.
 
 Environment
------------
+===========
 
-.. table::
-
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | Variable                                                   | Read by                   | Meaning                                                      |
-    +============================================================+===========================+==============================================================+
-    | ``PACKSET_URL``                                            | clients                   | the writer; ``INSIDE_MEMORY_URL`` is an alias                |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_PORT``                                           | ``packset``, ``packsetd`` | the port; default 8761                                       |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_WORKSPACE``                                      | clients                   | the workspace when none is given                             |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_FUSE``, ``PACKSET_DIVERSIFY``, ``PACKSET_DECAY`` | writer                    | the panel                                                    |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_STEM``                                           | writer                    | ``off`` turns lexical stemming off                           |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_EMBED``                                          | writer                    | the encoder binary; else beside the writer, else on ``PATH`` |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_EMBED_CACHE``                                    | encoder                   | where models live; default ``$XDG_CACHE_HOME/packset/embed`` |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
-    | ``PACKSET_RERANK``, ``PACKSET_RERANK_MODEL``               | writer, encoder           | the second stage on every search, and its model              |
-    +------------------------------------------------------------+---------------------------+--------------------------------------------------------------+
+========================================================== ========================= =====================================================================================================
+Variable                                                   Read by                   Meaning
+========================================================== ========================= =====================================================================================================
+``PACKSET_URL``                                            clients                   the writer; ``INSIDE_MEMORY_URL`` is an alias
+``PACKSET_PORT``                                           ``packset``, ``packsetd`` the port; default 8761
+``PACKSET_HOME``                                           ``packsetd``              the pack home; default ``~/.grokinside/memory``; two writers on one host want two homes and two ports
+``PACKSET_WORKSPACE``                                      clients                   the workspace when none is given
+``PACKSET_FUSE``, ``PACKSET_DIVERSIFY``, ``PACKSET_DECAY`` writer                    the panel
+``PACKSET_EMBED_QUERY_WORKERS``                            writer                    query encoders kept side by side, default 2; each holds one model in memory
+``PACKSET_STEM``                                           writer                    ``off`` turns lexical stemming off
+``PACKSET_EMBED``                                          writer                    the encoder binary; else beside the writer, else on ``PATH``
+``PACKSET_EMBED_CACHE``                                    encoder                   where models live; default ``$XDG_CACHE_HOME/packset/embed``
+``PACKSET_RERANK``, ``PACKSET_RERANK_MODEL``               writer, encoder           the second stage on every search, and its model
+========================================================== ========================= =====================================================================================================
 
 Crates
-------
+======
 
-.. table::
-
-    +--------------------+-------------------------------------------------------------------------------------------------------+
-    | Crate              | Carries                                                                                               |
-    +====================+=======================================================================================================+
-    | ``packset-core``   | the atom, the prose limit, BM25+, the scan, the panel, decay, review clock                            |
-    +--------------------+-------------------------------------------------------------------------------------------------------+
-    | ``packset-daemon`` | ``packsetd``: the Lightning Memory-Mapped Database (LMDB) store, HTTP, projections, the encoder child |
-    +--------------------+-------------------------------------------------------------------------------------------------------+
-    | ``packset-client`` | the HTTP client every tool uses                                                                       |
-    +--------------------+-------------------------------------------------------------------------------------------------------+
-    | ``packset-cli``    | ``packset``                                                                                           |
-    +--------------------+-------------------------------------------------------------------------------------------------------+
-    | ``packset-mcp``    | the read-only Model Context Protocol (MCP) surface                                                    |
-    +--------------------+-------------------------------------------------------------------------------------------------------+
-    | ``packset-embed``  | dense, late, sparse and cross-encoder models as one child process                                     |
-    +--------------------+-------------------------------------------------------------------------------------------------------+
+================== =====================================================================================================
+Crate              Carries
+================== =====================================================================================================
+``packset-core``   the atom, the prose limit, BM25+, the scan, the panel, decay, review clock
+``packset-daemon`` ``packsetd``: the Lightning Memory-Mapped Database (LMDB) store, HTTP, projections, the encoder child
+``packset-client`` the HTTP client every tool uses
+``packset-cli``    ``packset``
+``packset-mcp``    the read-only Model Context Protocol (MCP) surface
+``packset-embed``  dense, late, sparse and cross-encoder models as one child process
+================== =====================================================================================================
