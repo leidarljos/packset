@@ -192,6 +192,39 @@ fn latest_first(ranked: &[(usize, f64)], docs: &[Document]) -> Vec<usize> {
     top
 }
 
+/// The object of a templated fact: the words after the relation's last
+/// function word (`Roy Rogers is married to | John McVie`, `The capital of
+/// Romania is | Rajanpur`). A multi-hop question chains through it: the
+/// object of the fact about the subject it names is the subject of the
+/// fact that answers it.
+fn object_of(text: &str) -> Option<String> {
+    let body = text.split_once(". ").map_or(text, |(_, rest)| rest);
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let cut = words
+        .iter()
+        .rposition(|w| {
+            let w = w.to_ascii_lowercase();
+            matches!(
+                w.trim_end_matches(','),
+                "is" | "of" | "in" | "to" | "by" | "at" | "for" | "with" | "as"
+            )
+        })
+        .map(|i| i + 1)?;
+    if cut >= words.len() {
+        return None;
+    }
+    Some(
+        words[cut..]
+            .join(" ")
+            .trim_end_matches(['.', ','])
+            .to_string(),
+    )
+}
+
+/// Hops in the two-hop arm: how many first-hop facts lend their object as
+/// a second query.
+const HOP_SEEDS: usize = 3;
+
 /// Which facts are live once each later fact closes the earlier one it
 /// replaces, by the pack's own rule (`packset_core::record::same_head`):
 /// the same opening words, a new object. The list's numbering is dropped
@@ -376,9 +409,11 @@ fn main() -> anyhow::Result<()> {
     if encoder {
         fact_arms.push("fused latest".into());
         fact_arms.push("fused live".into());
+        fact_arms.push("fused live hop2".into());
     } else {
         fact_arms.push("lexical latest".into());
         fact_arms.push("lexical live".into());
+        fact_arms.push("lexical live hop2".into());
     }
     let started = std::time::Instant::now();
     // (source, arm) -> tally
@@ -443,6 +478,51 @@ fn main() -> anyhow::Result<()> {
                         .copied()
                         .collect();
                     record(&format!("{base} live"), latest_first(&living, &row.docs));
+                    // Two hops over the live facts: the objects of the first
+                    // hop's strongest facts are asked about in turn, and the
+                    // second hop's live facts follow the first's. A question
+                    // about the spouse of the author of a book reaches the
+                    // author's fact, then the spouse's, by the object it
+                    // named, with every superseded fact already closed.
+                    let mut chain: Vec<usize> =
+                        living.iter().take(HOP_SEEDS).map(|(i, _)| *i).collect();
+                    let mut second: Vec<(usize, f64)> = Vec::new();
+                    for &i in chain.clone().iter() {
+                        let Some(object) = object_of(&row.docs[i].text) else {
+                            continue;
+                        };
+                        let hop_query = format!("{question} {object}");
+                        let hop_lex = lexical(&hop_query, &index);
+                        let hop = if encoder {
+                            let v =
+                                packset_daemon::embed::encode_query(&hop_query).unwrap_or_default();
+                            fused(&hop_lex, &dense(&v, &vecs))
+                        } else {
+                            hop_lex
+                        };
+                        second.extend(
+                            hop.into_iter()
+                                .filter(|(j, _)| alive.get(*j).copied().unwrap_or(true))
+                                .filter(|(j, _)| !chain.contains(j))
+                                .take(HOP_SEEDS),
+                        );
+                    }
+                    second.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                    for (j, _) in second {
+                        if !chain.contains(&j) && chain.len() < KEEP {
+                            chain.push(j);
+                        }
+                    }
+                    for (j, _) in living.iter().skip(HOP_SEEDS) {
+                        if !chain.contains(j) && chain.len() < KEEP {
+                            chain.push(*j);
+                        }
+                    }
+                    record(&format!("{base} live hop2"), chain);
                 }
                 asked_total += 1;
                 if let Some(file) = dump.as_mut() {

@@ -2,6 +2,13 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A two-hop arm on the MemoryAgentBench fact lists: the objects of the
+  strongest live facts become second queries, and the second hop's live
+  facts follow the first's, so a multi-hop question sees the bridge and
+  the fact it leads to with every superseded fact already closed.
+
 ## 0.9.0 (2026-09-13)
 
 - MemoryAgentBench accurate retrieval measured (2000 questions, ten
