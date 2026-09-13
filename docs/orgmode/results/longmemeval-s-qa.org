@@ -1,0 +1,26 @@
+#+title: LongMemEval_S QA, 470 questions
+#+options: toc:nil num:nil
+
+Interned row for the published answer-accuracy measurement.
+Not a new run. The script is =scripts/longmemeval_qa.py=.
+
+* Protocol
+
+- Benchmark: LongMemEval_S (doi:10.48550/arXiv.2410.10813), 470 answerable questions
+- Retrieval: top five sessions per arm
+- Reader and judge: Qwen2.5-7B-Instruct Q5_K_M, LongMemEval prompts
+- Oracle arm: labelled answer sessions (ceiling for any retriever)
+
+* All 470
+
+| arm | k-update | multi | assistant | preference | user | temporal | all |
+|---+---+---+---+---+---+---+---|
+| labelled sessions (oracle) | 0.778 | 0.405 | 0.982 | 0.467 | 0.938 | 0.504 | 0.634 |
+| sessions, fused panel | 0.792 | 0.355 | 0.911 | 0.300 | 0.891 | 0.323 | 0.549 |
+| sessions, lexical alone | 0.819 | 0.298 | 0.911 | 0.267 | 0.812 | 0.346 | 0.532 |
+
+The fused panel is 0.549 against a 0.634 ceiling. Replay:
+
+#+begin_src console
+$ python3 scripts/longmemeval_qa.py longmemeval_s.json dump.jsonl --arm "sessions fused" --top 5
+#+end_src
