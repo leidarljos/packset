@@ -60,7 +60,7 @@ Measured
 
 LongMemEval\ :sub:`S`, 470 answerable questions, session-level retrieval.
 BM25+ alone is 0.914 recall@5. Fusing BM25+ with a dense ballot is
-0.949 recall@5 (0.889 hit@1, 0.981 recall@10). QA on the same 470
+0.949 recall@5 (0.889 hit@1, 0.981 recall at 10). QA on the same 470
 with a local 7B reader is 0.549 against a labelled-session ceiling of
 0.634. Writes only on Remember: and Prefer:. The :doc:`explanation <explanation>`
 is the source for those rows.
