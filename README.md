@@ -11,7 +11,8 @@ Docs, tutorial and the measured tables: https://leidarljos.github.io/packset/
 ## Install
 
 ```console
-$ cargo install --git https://github.com/leidarljos/packset packset-cli packset-daemon
+$ cargo binstall packset packset-daemon
+# or: cargo install packset packset-daemon
 $ export PACKSET_URL=$(packset ensure)
 ```
 
