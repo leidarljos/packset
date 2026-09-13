@@ -115,7 +115,7 @@ directory. Without the binary the pack answers from the lexical ballots and
 says so in =/v1/status=.
 
 #+begin_src console
-$ cargo install --git https://github.com/leidarljos/packset packset-embed
+$ cargo binstall packset-embed
 $ packset stop && packset ensure
 $ packset status seat | jq .dense
 #+end_src

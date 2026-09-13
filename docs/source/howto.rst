@@ -131,7 +131,7 @@ says so in ``/v1/status``.
 
 .. code:: console
 
-    $ cargo install --git https://github.com/leidarljos/packset packset-embed
+    $ cargo binstall packset-embed
     $ packset stop && packset ensure
     $ packset status seat | jq .dense
 
