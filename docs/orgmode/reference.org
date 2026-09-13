@@ -96,6 +96,7 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 |---+---+---|
 | =PACKSET_URL= | clients | the writer; =INSIDE_MEMORY_URL= is an alias |
 | =PACKSET_PORT= | =packset=, =packsetd= | the port; default 8761 |
+| =PACKSET_HOME= | =packsetd= | the pack home; default =~/.grokinside/memory=; two writers on one host want two homes and two ports |
 | =PACKSET_WORKSPACE= | clients | the workspace when none is given |
 | =PACKSET_FUSE=, =PACKSET_DIVERSIFY=, =PACKSET_DECAY= | writer | the panel |
 | =PACKSET_EMBED_QUERY_WORKERS= | writer | query encoders kept side by side, default 2; each holds one model in memory |
