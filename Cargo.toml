@@ -15,8 +15,10 @@ edition = "2021"
 license = "MIT"
 version = "0.9.0"
 publish = true
+rust-version = "1.85"
 repository = "https://github.com/leidarljos/packset"
 homepage = "https://leidarljos.github.io/packset/"
+readme = "../../README.md"
 
 [workspace.dependencies]
 anyhow = "1"

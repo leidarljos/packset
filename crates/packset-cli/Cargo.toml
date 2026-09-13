@@ -1,10 +1,19 @@
 [package]
-name = "packset-cli"
+name = "packset"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Start, stop and inspect packsetd"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Standing memory: Remember and Prefer only. Binary name packset."
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target }.tar.gz"
+bin-dir = "packset-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
 
 [[bin]]
 name = "packset"

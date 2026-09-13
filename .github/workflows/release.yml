@@ -22,7 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p packset-cli -p packset-daemon -p packset-mcp
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p packset -p packset-daemon -p packset-mcp
       - run: |
           set -eu
           name="packset-${GITHUB_REF_NAME}-${{ matrix.target }}"
