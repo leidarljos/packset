@@ -1,11 +1,5 @@
-===========
-Explanation
-===========
-
-
-
 A pack is not a transcript
---------------------------
+==========================
 
 Most memory layers for agents mine a transcript for facts and index what
 they find. The pack refuses that path. Nothing is extracted on write. A
@@ -16,32 +10,26 @@ every claim has an author, a time, and a window of truth. A wrong claim is
 closed or retracted with the deed that showed it wrong.
 
 What a search ranks
--------------------
+===================
 
 Two lexical ballots always run: a prefix-and-one-edit scan that finds a
 claim through a typo, and BM25+ over an inverted index that weighs a word by
 how much it narrows the pack. A dense ballot runs when an encoder is
 present. The panel fuses the ballots by CombMNZ and diversifies by maximal marginal
 relevance (MMR).
-Each default was measured on LoCoMo (https://doi.org/10.48550/arXiv.2402.17753), 1986
+Each default was measured on LoCoMo (doi:10.48550/arXiv.2402.17753), 1986
 questions over ten conversations with labelled evidence turns, loaded as
 atoms so the scorer is what is measured:
 
-.. table::
-
-    +--------------------------------------+-------+-------+
-    | Arm                                  | hit@1 | hit@5 |
-    +======================================+=======+=======+
-    | BM25, turns                          | 0.615 | 0.716 |
-    +--------------------------------------+-------+-------+
-    | BM25+, turns                         | 0.635 | 0.732 |
-    +--------------------------------------+-------+-------+
-    | BM25+, passage windows of six turns  | 0.668 | 0.771 |
-    +--------------------------------------+-------+-------+
-    | passage BM25+ fused with e5-large-v2 | 0.736 | 0.812 |
-    +--------------------------------------+-------+-------+
-    | published lexical plus dense system  | 0.752 | 0.829 |
-    +--------------------------------------+-------+-------+
+==================================== ===== =====
+Arm                                  hit@1 hit@5
+==================================== ===== =====
+BM25, turns                          0.615 0.716
+BM25+, turns                         0.635 0.732
+BM25+, passage windows of six turns  0.668 0.771
+passage BM25+ fused with e5-large-v2 0.736 0.812
+published lexical plus dense system  0.752 0.829
+==================================== ===== =====
 
 Dirichlet language-model scoring lost to BM25+. SPLADE++ alone scored
 0.637 and fused to 0.714, level with the dense ballot. A cross-encoder
@@ -51,16 +39,145 @@ for it: a diversifier is for not answering the same claim four ways, and
 LoCoMo has nothing to suppress. The full table with every arm is in the
 repository README.
 
-On LongMemEval\_S (https://doi.org/10.48550/arXiv.2410.10813), 470 answerable questions
+On LongMemEval\ :sub:`S` (doi:10.48550/arXiv.2410.10813), 470 answerable questions
 over about fifty sessions each, BM25+ alone reaches 0.91 recall@5 at session
 granularity under all three document protocols, and 0.86 hit@1. Preference
-questions are the weak type at 0.30 to 0.47 hit@1; the dense arm is the
-next measurement there.
+questions are the weak type at 0.30 to 0.47 hit@1. With an encoder, the
+dense ballot alone is worse than the lexical one at session granularity
+(0.63 hit@1 against 0.84 on the first hundred questions) and the fusion
+of the two is better than either: 0.920 hit@1 and 0.968 recall@5, so the
+fused panel is the default a seat with an encoder gets. Over every
+answerable question (470) the fused panel reaches 0.889 hit@1, 0.949
+recall@5 and 0.981 recall@10 against the lexical ballot's 0.855, 0.914
+and 0.952; by type the gain is largest where the lexical ballot is weakest,
+preference questions (0.667 against 0.467 hit@1, thirty of them) and
+multi-session questions (0.934 against 0.851), and knowledge-update
+questions are the one type where lexical alone ranks first slightly more
+often (0.972 against 0.944 hit@1) with the same recall@5. A cross-encoder
+second stage does not help here: bge-reranker-base over the windows of the
+fused top twenty sessions, sessions reordered by their best window, falls
+to 0.780 hit@1 and 0.940 recall@5 on the same hundred questions. A window
+is what fits the reranker's input, and a window without its session is a
+worse witness than the session's own dense vector; the arm stays opt-in
+(``PACKSET_LME_RERANK``) as a measured negative.
+
+Recency by age is the second negative, and it bears on the memory model.
+An arm that scales the fused score by the shipped temporal slot (a
+fourteen-day half-life) for the age of each session at the question's
+date falls from 0.889 to 0.551 hit@1 over the 470 questions, and loses on
+every type but temporal reasoning (0.850 against 0.811). It loses even on
+knowledge-update questions (0.431 against 0.944), where the intuition
+says the latest session should win: the sessions that answer are not the
+newest in the haystack, only newer than the one they supersede. Forgetting
+by age alone throws away what a question needs; the pack's default decay
+is by review, retrievability from the clock of what was recalled and when,
+which a chat log without reviews cannot exercise and which this arm was
+the closest public proxy for.
+
+A window is the right shape of time for retrieval, and it is small here.
+The window arm reads the time a question names (a date, a month, a count
+of units ago, last week or month) into a window over the sessions and
+scores those inside twice: the pack's as-of read over the benchmark, a
+filter the question asks for. Fifteen of the 470 questions name a time
+the parser reads; on temporal-reasoning questions hit@1 moves from 0.811
+to 0.835 and recall@5 from 0.899 to 0.878, the rest are unchanged. Most
+temporal questions in this benchmark ask how long after one event another
+came, which names no time to window on; there the work is the reader's,
+and the answer-accuracy harness can hand it the seat's reading of time
+(every session's distance from the question in days, and the supersession
+rule) rather than raw timestamps. Measured against the raw prompt on the
+same 350 questions of the four types the framing is for, with the 7B
+reader: 0.420 against 0.431 overall; temporal reasoning 0.339 against
+0.315, three questions gained; multi-session 0.331 against 0.372, five
+lost; knowledge-update 0.778 against 0.792; preference 0.267 against
+0.300. Marking distances alone is within noise for this reader. Doing
+the arithmetic for it is not: the same prompt with the days between every
+pair of retrieved sessions listed after them answers 0.460 over the same
+350 questions, temporal reasoning 0.386 against the raw prompt's 0.315,
+knowledge-update 0.819 against 0.792, multi-session and preference
+unchanged. A question that asks how long after one event another came is
+answered by one of those lines once the reader has placed the events; a
+7B reader places them and does not subtract dates. The store knows every
+date, so the store subtracts. This is the reading the harness runs by
+default (\`–no-timeline\` is the benchmark's own prompt) and the rows are
+in the reproduction package.
+
+On LoCoMo at turn granularity, where the unit is the dialogue turn the
+benchmark marks as evidence, the fused panel finds an evidence turn first
+0.414 of the time and within ten 0.759, against 0.318 and 0.647 for the
+lexical ballot over 1986 questions; a turn is a short witness, so the
+answer-accuracy run hands the reader ten or twenty of them. Over the 1540
+questions outside the adversarial category, same 7B reader and judge,
+each turn dated and marked with its distance from the question:
+
+============================ ========= ======== =========== ========== =====
+arm                          multi-hop temporal open-domain single-hop all
+============================ ========= ======== =========== ========== =====
+evidence turns (oracle)      0.759     0.533    0.490       0.854      0.747
+turns, fused panel, top 20   0.525     0.396    0.406       0.793      0.637
+turns, fused panel, top 10   0.422     0.352    0.365       0.738      0.577
+turns, lexical alone, top 10 0.312     0.321    0.344       0.627      0.488
+============================ ========= ======== =========== ========== =====
+
+At the same depth the fused panel answers nine points more than the
+lexical ballot; twenty turns reach 85% of the ceiling. Multi-hop
+questions are where depth buys most, because their evidence is several
+turns apart; the ceiling itself is the reader's, and a 7B reader gets half
+the temporal and open-domain questions even when handed the evidence.
+
+Two systems publish on the same benchmarks and do a different job. Mem0
+(doi:10.48550/arXiv.2504.19413) reports a 26% relative gain in an
+LLM-judged score over a proprietary memory on LoCoMo, with a 91% lower p95
+latency than full context; Zep (doi:10.48550/arXiv.2501.13956) reports
+94.8% against MemGPT's 93.4% on the deep memory retrieval set and up to
+18.5% higher accuracy on LongMemEval. Both numbers are answer accuracy
+through a model over an extracted transcript memory. The pack's rows are
+retrieval recall over claims a person or agent wrote on purpose: same
+benchmark, a different job. The shared metric is answer accuracy, and the
+harness now has the seam for it: ``PACKSET_LME_DUMP`` writes the sessions
+each arm retrieved, and ``scripts/longmemeval_qa.py`` hands the top sessions
+of one arm to a reader model with the benchmark's own reading prompt, then
+to a judge with the benchmark's type-specific question, and reports
+accuracy by type beside an ``oracle`` arm that reads the labelled sessions.
+The reader and judge are any OpenAI-compatible endpoint, named in the
+report; a row there is that model's as much as the retriever's.
+
+The first such row, on the first hundred questions (64 single-session-user,
+36 multi-session), with Qwen2.5-7B-Instruct Q5\ :sub:`KM` as reader and judge on
+one 12 GB GPU and the top five sessions handed to the reader:
+
+========================== =================== ============= =====
+arm                        single-session-user multi-session all
+========================== =================== ============= =====
+labelled sessions (oracle) 0.938               0.250         0.690
+sessions, fused panel      0.875               0.194         0.630
+sessions, lexical alone    0.797               0.167         0.570
+========================== =================== ============= =====
+
+Over every answerable question (470), same reader, same prompts, top five
+sessions:
+
+========================== ======== ===== ========= ========== ===== ======== =====
+arm                        k-update multi assistant preference user  temporal all
+========================== ======== ===== ========= ========== ===== ======== =====
+labelled sessions (oracle) 0.778    0.405 0.982     0.467      0.938 0.504    0.634
+sessions, fused panel      0.792    0.355 0.911     0.300      0.891 0.323    0.549
+sessions, lexical alone    0.819    0.298 0.911     0.267      0.812 0.346    0.532
+========================== ======== ===== ========= ========== ===== ======== =====
+
+The fused panel reaches 87% of the ceiling and beats the lexical ballot
+where retrieval decides (multi-session, single-session-user, preference);
+the reader decides the rest, and a 7B reader is weak on multi-session and
+temporal questions even when handed the right sessions. Zep's LongMemEval rows use frontier readers, so the absolute
+numbers do not compare across papers; the comparison this table supports
+is between retrievers under one reader, which is how the retrieval half of
+those systems is measured too. The full-question run with every type is
+the next row.
 
 Forgetting is a feature
------------------------
+=======================
 
-.. image:: _static/memory.svg
+|image1|
 
 A claim that is never used should not weigh as much as one that is. The
 pack gives every claim a review clock modelled on spaced repetition: a
@@ -68,17 +185,17 @@ stability in days, a difficulty, and a due date. Grading a review recalled
 grows stability by how overdue the claim was; lapsed halves it. This is
 the update rule the Free Spaced Repetition Scheduler (FSRS) fits to millions
 of reviews
-(https://doi.org/10.1145/3534678.3539081), and the retrievability it implies,
+(doi:10.1145/3534678.3539081), and the retrievability it implies,
 ``R = (1 + 19/81 * t/S)^(-1/2)``, is a power law of the kind Wixted and
-Ebbesen found for human forgetting (https://doi.org/10.1111/j.1467-9280.1991.tb00175.x)
+Ebbesen found for human forgetting (doi:10.1111/j.1467-9280.1991.tb00175.x)
 and Anderson and Schooler traced to the statistics of the environment
-(https://doi.org/10.1111/j.1467-9280.1991.tb00174.x). The spacing effect the clock
+(doi:10.1111/j.1467-9280.1991.tb00174.x). The spacing effect the clock
 schedules for is the best replicated result in the memory literature
-(Cepeda et al., https://doi.org/10.1037/0033-2909.132.3.354); Ebbinghaus's own curve
-replicates (https://doi.org/10.1371/journal.pone.0120644).
+(Cepeda et al., doi:10.1037/0033-2909.132.3.354); Ebbinghaus's own curve
+replicates (doi:10.1371/journal.pone.0120644).
 
 Two consequences. ``due`` lists what a seat is about to forget, and a
-sitting starts by reading and grading it. With ``PACKSET_DECAY=fsrs`` the
+sitting starts by reading and grading it. By default (``PACKSET_DECAY=fsrs``) the
 same ``R`` scales a search score, so an unreviewed claim sinks without
 vanishing: it floors at a quarter of its weight, and a claim nothing else
 answers is still found. Trust rows and cards are exempt; they are weighed,
@@ -89,17 +206,13 @@ first thirty days and recalled whenever its clock came due, three
 paraphrases of it written after day 150 and never reviewed, the topic
 asked on day 180. The paraphrases share every word with the kept claim.
 
-.. table::
-
-    +-----------------------------------+------------------+-----------------------------+
-    | decay slot                        | kept claim first | mean rank of the kept claim |
-    +===================================+==================+=============================+
-    | off, lexical only                 |            0.230 |                        2.49 |
-    +-----------------------------------+------------------+-----------------------------+
-    | on, fourteen-day half-life on age |            0.270 |                        3.74 |
-    +-----------------------------------+------------------+-----------------------------+
-    | fsrs, retrievability              |            0.947 |                        1.05 |
-    +-----------------------------------+------------------+-----------------------------+
+================================= ================ ===========================
+decay slot                        kept claim first mean rank of the kept claim
+================================= ================ ===========================
+off, lexical only                 0.230            2.49
+on, fourteen-day half-life on age 0.270            3.74
+fsrs, retrievability              0.947            1.05
+================================= ================ ===========================
 
 Lexical scoring cannot tell the four apart, so it lands at chance. Recency
 prefers the paraphrase written last week. Retrievability prefers the claim
@@ -109,17 +222,17 @@ its last review. The slot stays off by default until a seat has a review
 history worth reading.
 
 Islands
--------
+=======
 
 Every claim links to the claims it shares names with, at most eight,
 chosen by relative-neighbourhood pruning so a neighbourhood spreads over
 the directions a claim is about instead of piling into one. That graph has
 natural clusters. ``packset islands`` lists them by label propagation
-(https://doi.org/10.1103/PhysRevE.76.036106), and ``packset island CUE`` finds the one a
+(doi:10.1103/PhysRevE.76.036106), and ``packset island CUE`` finds the one a
 task activates: the top five search hits seed a spread, half the
 activation crosses each hop divided by fan-out, two hops, strongest first.
 The construction is spreading activation over a semantic network (Collins
-and Loftus, https://doi.org/10.1037/0033-295X.82.6.407). An island is not a set or a
+and Loftus, doi:10.1037/0033-295X.82.6.407). An island is not a set or a
 persona: a set is a slice a person pinned, a persona colours everything,
 an island is what one piece of work touches, found from the work itself.
 
@@ -128,13 +241,26 @@ over it. When the seat uses an island, the claims in it fired together:
 each pair's weight moves a tenth of the way to one, a pair with no link
 gains one, and every other link of a fired claim loses two percent. That is
 Hebb's rule with the forgetting term Oja added so weights stay bounded
-(https://doi.org/10.1007/BF00275687). Activation spreads in proportion to weight, so
+(doi:10.1007/BF00275687). Activation spreads in proportion to weight, so
 the paths a seat walks carry more each time and the ones it never walks
 fade toward nothing without being deleted. Weights sit beside the links on
 the atom and travel in a handover.
 
+Hubs
+====
+
+Islands say what a task touches; hubs say what the pack turns on. A
+weighted PageRank over the links (Brin and Page, Computer Networks 30,
+
+#. gives each claim the share of a random
+
+walk that keeps landing on it, and the claims many well-linked claims link
+to stand highest. That is the graph's own reading of what matters, before
+any query, and the natural list to pin, to review first when the clock is
+crowded, or to carry in a handover when the whole pack is too much.
+
 One writer
-----------
+==========
 
 The store is one Lightning Memory-Mapped Database (LMDB) file and one
 process owns it. Two writers on one
@@ -143,8 +269,61 @@ file is how a pack ends up with two answers to one question, so a second
 and a search runs over an index built once per generation, which is why a
 query over ten thousand atoms costs about two milliseconds.
 
+A later claim closes the earlier one it rewrites
+================================================
+
+A claim that arrives closes the live claim it replaces: one it names in
+``supersedes``, a correction sharing an entity, a rewrite of the same
+sentence (token Jaccard of at least 0.6), or one that opens with the same
+words for at least three and six tenths of the shorter and then says a
+different thing, the shape of a fact whose object changed (``The default
+fuse is Borda`` to ``The default fuse is CombMNZ``, ``Roy Rogers is married to
+Dale Evans`` to ``... John McVie``, which the set measure misses because the
+object is two words). When both claims carry entities they must share
+one; a claim without entities is read by its text, because most claims a
+seat writes name none, and before that reading the pack of one seat had
+closed nothing in a day of lessons. The closed claim keeps its window and
+answers an as-of read. ``POST /v1/consolidate`` runs the same rule over what
+is held, for a pack filled before the rule or by import, and reports the
+pairs before it writes them. The MemoryAgentBench conflict-resolution rows
+measure this rule on public data: a list of facts where a later one
+overwrites an earlier one about the same subject. Over its 800 questions,
+ten facts handed to the 7B reader, the fused panel alone answers the
+single-hop rows 0.33 to 0.55 and the multi-hop rows 0.02 to 0.07; the
+same hits ordered latest first, 0.33 to 0.42 and 0.02 to 0.06; the same
+hits with every superseded fact closed by this rule, 0.76 to 0.86
+single-hop and 0.03 to 0.27 multi-hop, 0.480 over all eight rows. The
+rule more than doubles the single-hop answers, because the reader no
+longer sees the old fact beside the new. The multi-hop rows are where
+every system the benchmark's authors measured fails (at most 0.28), and
+where a second hop over the live facts moves them: the objects of the
+strongest live facts are asked about in turn, and the second hop's live
+facts follow the first's, so a question about the spouse of an author
+reaches the author's fact and then, by the name it carries, the spouse's.
+In one job, same reader: live 0.535, two hops 0.576 over the 800
+questions, a paired difference of +0.041 with a bootstrap interval of
++0.014 to +0.070; on the multi-hop rows +0.09 to +0.15 (0.21 to 0.40
+answered, against 0.06 to 0.31), on the single-hop rows -0.01 to -0.09,
+where the second hop's facts displace the first's in a ten-fact prompt.
+The published retrieval baselines, with a much stronger reader, sit at
+0.155 to 0.295 on this split.
+
+The same benchmark's accurate-retrieval split, 2000 questions over
+records of a quarter to three million characters chunked as it chunks
+them, with the same 7B reader and ten chunks a prompt: the fused panel
+answers 0.675 of the questions (EventQA 0.62 to 0.84 by record length,
+the document QA 0.79 and 0.47, the chat questions 0.39 by the
+benchmark's judge), the lexical ballot alone 0.674, five chunks 0.649;
+averaged by source rather than by question, 0.644 and 0.642. The
+published rows on this split, all with the benchmark's hosted reader, are BM25
+0.605, HippoRAG-v2 0.651, and the memory products 0.28 to 0.34. A reader
+two classes smaller reaches the top of that table, which says where the
+score comes from: the retrieval is the panel's, the ceiling is the
+reader's, and the products that put a model in the write path are behind
+the retrievers on the benchmark built to measure them.
+
 Trust is memory too
--------------------
+===================
 
 A ``trust`` atom is one weighted edge of an influence graph: who listens to
 whom, and how much. It carries the same validity window and supersession
@@ -154,9 +333,12 @@ reweighs voters by what turned out right. The pack stores the rows; it
 settles nothing.
 
 Where the stack joins
----------------------
+=====================
 
 A claim may cite a deed accession. The deed store owns the bytes and the
 proof; the tracker cites the same accession on a node. ``accessions`` and
 ``citers`` are the two directions of that join, and neither store opens the
 other. The seat, ``ljos``, composes them.
+
+.. |image1| image:: _static/memory.svg
+   :width: 100.0%
