@@ -5,6 +5,13 @@ Everything below runs against a scratch workspace and touches nothing else.
 By the end you will have a pack that remembers two claims and ranks them.
 It will tell you when to review them, and export them for another seat.
 
+Install the writer and the encoder together. The tarball from 0.9.1
+ships =packset-embed=; without it search stays lexical.
+
+#+begin_src console
+$ cargo binstall packset packset-daemon packset-embed
+#+end_src
+
 * 1. Start the writer
 
 #+begin_src console
