@@ -11,6 +11,10 @@ use rmcp::{transport::stdio, ServiceExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("packset-mcp {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let running = server::PacksetServer::from_env().serve(stdio()).await?;
     running.waiting().await?;
     Ok(())

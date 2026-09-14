@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.2 (2026-09-14)
+
+- `packset-mcp --version` prints and exits so `ljos doctor` can
+  version it with the rest of the set.
+
 ## 0.9.1 (2026-09-14)
 
 - The GitHub release tarball includes `packset-embed`. Without it the
