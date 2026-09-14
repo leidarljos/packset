@@ -22,12 +22,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p packset -p packset-daemon -p packset-mcp
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p packset -p packset-daemon -p packset-mcp -p packset-embed
       - run: |
           set -eu
           name="packset-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/packset target/${{ matrix.target }}/release/packsetd target/${{ matrix.target }}/release/packset-mcp "dist/$name/"
+          cp target/${{ matrix.target }}/release/packset \
+             target/${{ matrix.target }}/release/packsetd \
+             target/${{ matrix.target }}/release/packset-mcp \
+             target/${{ matrix.target }}/release/packset-embed \
+             "dist/$name/"
           cp README.md CHANGELOG.md LICENSE* "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")

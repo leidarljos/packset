@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.1 (2026-09-14)
+
+- The GitHub release tarball includes `packset-embed`. Without it the
+  writer reports `embedder.available: false` and search stays lexical.
+
 - An island seeded by hits fewer than two scorers agreed on is reported
   `weak` and is not fired: activation from weak seeds flows to the
   best-connected cluster whatever the cue, and firing it wires the wrong
