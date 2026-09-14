@@ -99,7 +99,7 @@ unchanged. A question that asks how long after one event another came is
 answered by one of those lines once the reader has placed the events; a
 7B reader places them and does not subtract dates. The store knows every
 date, so the store subtracts. This is the reading the harness runs by
-default (\`–no-timeline\` is the benchmark's own prompt) and the rows are
+default (``--no-timeline`` is the benchmark's own prompt) and the rows are
 in the reproduction package.
 
 On LoCoMo at turn granularity, where the unit is the dialogue turn the
