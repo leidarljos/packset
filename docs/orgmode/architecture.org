@@ -40,7 +40,7 @@ The rule lives in =packset_core::atom= (=check_entity= and =is_accession=).
 The daemon inherits that copy. There is no Python writer.
 
 #+begin_src console
-$ packset accessions git:github.com/HaoZeke/vissue
+$ packset accessions git:github.com/leidarljos/packset
 deed-patch-overlay
 sha256:aabbccdd
 #+end_src

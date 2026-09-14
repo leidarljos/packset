@@ -25,9 +25,11 @@ reads and deduplication to it.
 .. code:: console
 
    $ packset pin review
+   {"instructions":"","set":"review","workspace":"demo"}
    $ packset pin
-   review
-   $ packset pin ""
+   {"instructions":"","set":"review","workspace":"demo"}
+
+The binary prints a JSON object with ``workspace``, ``set``, and ``instructions``.
 
 Ask what was live on a date
 ===========================

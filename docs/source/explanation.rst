@@ -40,14 +40,14 @@ LoCoMo has nothing to suppress. The table above is the measured excerpt.
 There is no second table on the README.
 
 On LongMemEval\ :sub:`S` (doi:10.48550/arXiv.2410.10813), 470 answerable questions
-over about fifty sessions each, BM25+ alone reaches 0.91 recall@5 at session
-granularity under all three document protocols, and 0.86 hit@1. Preference
-questions are the weak type at 0.30 to 0.47 hit@1. With an encoder, the
-dense ballot alone is worse than the lexical one at session granularity
-(0.63 hit@1 against 0.84 on the first hundred questions) and the fusion
-of the two is better than either: 0.920 hit@1 and 0.968 recall@5, so the
-fused panel is the default a seat with an encoder gets. Over every
-answerable question (470) the fused panel reaches 0.889 hit@1, 0.949
+over about fifty sessions each, BM25+ alone reaches 0.914 recall@5 at
+session granularity and 0.855 hit@1. Preference questions are the weak
+type at 0.30 to 0.47 hit@1. With an encoder, the multilingual-e5-large
+ballot alone is worse than the lexical one at session granularity
+(0.63 hit@1 against 0.84 on the first hundred questions) and CombMNZ
+fusion of the two is better than either. Over every
+answerable question (470) CombMNZ (BM25+ plus multilingual-e5-large)
+reaches 0.889 hit@1, 0.949
 recall@5 and 0.981 recall@10 against the lexical ballot's 0.855, 0.914
 and 0.952; by type the gain is largest where the lexical ballot is weakest,
 preference questions (0.667 against 0.467 hit@1, thirty of them) and

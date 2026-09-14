@@ -43,7 +43,7 @@ The daemon inherits that copy. There is no Python writer.
 
 .. code:: console
 
-   $ packset accessions git:github.com/HaoZeke/vissue
+   $ packset accessions git:github.com/leidarljos/packset
    deed-patch-overlay
    sha256:aabbccdd
 

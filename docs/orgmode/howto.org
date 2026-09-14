@@ -25,10 +25,12 @@ reads and deduplication to it.
 
 #+begin_src console
 $ packset pin review
+{"instructions":"","set":"review","workspace":"demo"}
 $ packset pin
-review
-$ packset pin ""
+{"instructions":"","set":"review","workspace":"demo"}
 #+end_src
+
+The binary prints a JSON object with =workspace=, =set=, and =instructions=.
 
 * Ask what was live on a date
 
