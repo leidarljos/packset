@@ -143,7 +143,7 @@ The reader and judge are any OpenAI-compatible endpoint, named in the
 report; a row there is that model's as much as the retriever's.
 
 The first such row, on the first hundred questions (64 single-session-user,
-36 multi-session), with Qwen2.5-7B-Instruct Q5\ :sub:`KM` as reader and judge on
+36 multi-session), with Qwen2.5-7B-Instruct (``Q5_K_M``) as reader and judge on
 one 12 GB GPU and the top five sessions handed to the reader:
 
 ========================== =================== ============= =====
