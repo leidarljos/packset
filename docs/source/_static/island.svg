@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 460" role="img" aria-labelledby="islandTitle islandDesc">
+  <title id="islandTitle">An island on the pack</title>
+  <desc id="islandDesc">Two basins of linked claims. The cue seeds one basin; activation spreads along the heavier edges. The other basin stays dark. This is spreading activation, not a search ranking.</desc>
+  <rect width="920" height="460" fill="#0B0B0A"/>
+  <!-- folded sheet -->
+  <path d="M70 90 L850 70 L870 390 L90 410 Z" fill="none" stroke="#3A3428" stroke-width="1.4"/>
+  <path d="M180 200 C280 120 360 280 460 230 C560 180 680 320 800 250" fill="none" stroke="#E6A23C" stroke-width="1.8" stroke-linecap="round" opacity="0.7"/>
+  <!-- other basin -->
+  <ellipse cx="250" cy="300" rx="150" ry="88" fill="#141310" stroke="#2A2824" stroke-width="1.2"/>
+  <ellipse cx="250" cy="300" rx="88" ry="48" fill="none" stroke="#2A2824" stroke-width="1"/>
+  <!-- this-task basin -->
+  <ellipse cx="640" cy="220" rx="170" ry="100" fill="rgba(230,162,60,0.08)" stroke="#E6A23C" stroke-width="1.4"/>
+  <ellipse cx="640" cy="220" rx="100" ry="56" fill="none" stroke="#E6A23C" stroke-width="1" opacity="0.55"/>
+  <!-- other-basin neurons -->
+  <circle cx="190" cy="270" r="7" fill="#3A3428"/>
+  <circle cx="240" cy="320" r="7" fill="#3A3428"/>
+  <circle cx="300" cy="280" r="7" fill="#3A3428"/>
+  <circle cx="280" cy="350" r="6" fill="#2A2824"/>
+  <path d="M190 270 L240 320 L300 280 L240 320 L280 350" fill="none" stroke="#2A2824" stroke-width="1.5"/>
+  <!-- this-task neurons + links (weights as stroke) -->
+  <path d="M560 200 L620 170" stroke="#E6A23C" stroke-width="4" stroke-linecap="round"/>
+  <path d="M620 170 L690 190" stroke="#E6A23C" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M620 170 L640 250" stroke="#E6A23C" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M690 190 L740 230" stroke="#C48A2E" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M640 250 L700 280" stroke="#9A6410" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M560 200 L580 260" stroke="#9A6410" stroke-width="1.2" stroke-linecap="round"/>
+  <circle cx="560" cy="200" r="9" fill="#F4F0E6" stroke="#E6A23C" stroke-width="2"/>
+  <circle cx="620" cy="170" r="11" fill="#E6A23C"/>
+  <circle cx="690" cy="190" r="9" fill="#E6A23C"/>
+  <circle cx="640" cy="250" r="8" fill="#C48A2E"/>
+  <circle cx="740" cy="230" r="7" fill="#9A6410"/>
+  <circle cx="700" cy="280" r="6" fill="#6B4A1F"/>
+  <circle cx="580" cy="260" r="6" fill="#6B4A1F"/>
+  <text x="250" y="430" text-anchor="middle" fill="#8D877B" font-family="Georgia, serif" font-size="15">other work</text>
+  <text x="640" y="430" text-anchor="middle" fill="#E6A23C" font-family="Georgia, serif" font-size="15">this task's island</text>
+  <text x="620" y="148" text-anchor="middle" fill="#F4F0E6" font-family="Georgia, serif" font-size="13">seed</text>
+</svg>
