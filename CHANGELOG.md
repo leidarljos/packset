@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.4 (2026-09-15)
+
+- Search no longer prepends the review clock. Due personas were still
+  occupying half of every result list. `ljos due` is the clock.
+
 ## 0.9.3 (2026-09-15)
 
 - A due atom with no query overlap is on the clock, not in search.

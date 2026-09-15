@@ -790,16 +790,8 @@ impl Service {
             "off"
         };
         ranked.truncate(limit);
-        // The review clock is a now-question. A dated retrieve answers the
-        // validity window, not what is due today. Due atoms stay in front of
-        // the second stage, because a review-clock hit is not a relevance
-        // claim the model is allowed to bury.
-        if as_of.is_none() {
-            let due = packset_core::search::due_hits(&atoms, scope, &now);
-            if !due.is_empty() {
-                ranked = packset_core::search::front_due(due, ranked, limit);
-            }
-        }
+        // Due is the clock (`/v1/due`, `ljos due`). Mixing it into search
+        // put 212 due personas at score 3.1 on every query.
         Ok(json!({"hits": ranked, "engine": engine, "as_of": as_of, "rerank": stage}))
     }
 
