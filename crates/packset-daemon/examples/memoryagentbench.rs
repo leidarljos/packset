@@ -525,6 +525,7 @@ fn main() -> anyhow::Result<()> {
     // (source, arm) -> tally
     let mut tallies: BTreeMap<(String, String), Tally> = BTreeMap::new();
     let mut asked_total = 0usize;
+    let mut protocol = packset_core::ProtocolReport::new();
     for split in &splits {
         let mut all = rows(&dir, split)?;
         if let Some(c) = cap {
@@ -539,6 +540,10 @@ fn main() -> anyhow::Result<()> {
                 row.docs.len(),
                 row.questions.len()
             );
+            for doc in &row.docs {
+                protocol.ingest(&doc.text);
+                protocol.ingest(&format!("Remember: {}", doc.text));
+            }
             if let Some(d) = &chunks_dir {
                 let texts: Vec<&str> = row.docs.iter().map(|d| d.text.as_str()).collect();
                 std::fs::write(
@@ -583,7 +588,9 @@ fn main() -> anyhow::Result<()> {
                 let firsts = |r: &[(usize, f64)]| -> Vec<usize> {
                     r.iter().take(KEEP).map(|(i, _)| *i).collect()
                 };
-                record("lexical", firsts(&lex));
+                let lex_top = firsts(&lex);
+                protocol.mark(split, bearing(&lex_top, &row.docs, &answers, 1));
+                record("lexical", lex_top);
                 let best: Vec<(usize, f64)> = if encoder {
                     let query = packset_daemon::embed::encode_query(question).unwrap_or_default();
                     let den = dense(&query, &vecs);
@@ -766,5 +773,7 @@ fn main() -> anyhow::Result<()> {
         asked_total,
         started.elapsed().as_secs_f64()
     );
+    println!("\nwrite protocol (Remember / Prefer / Accept; raw context refuses)\n");
+    print!("{}", protocol.table());
     Ok(())
 }

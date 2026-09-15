@@ -6,6 +6,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - `admit_seat_write`: Remember / Prefer / Accept only. Raw context
   refuses. MemoryAgentBench write-policy gate (`packset-ld29`).
+- `ProtocolReport` names the four competencies and prints `—` when a
+  split was not run. Refusal is a row, not a zero hit rate.
 
 ## 0.9.5 (2026-09-15)
 
