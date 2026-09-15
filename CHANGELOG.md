@@ -4,8 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.6 (2026-09-15)
+
+- Paper A fixture table: LongMemEval_S, MemoryAgentBench, MemConflict.
+  Writes go through `admit_seat_write`. The table is a fixture, not SOTA.
 - `admit_seat_write`: Remember / Prefer / Accept only. Raw context
-  refuses. MemoryAgentBench write-policy gate (`packset-ld29`).
+  refuses. MemoryAgentBench write-policy gate.
 - `ProtocolReport` names the four competencies and prints `—` when a
   split was not run. Refusal is a row, not a zero hit rate.
 
