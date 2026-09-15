@@ -55,6 +55,7 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> anyhow::Result<()> {
+    load_seat_env();
     let args: Vec<String> = env::args().skip(1).collect();
     let (verb, rest) = args
         .split_first()
@@ -175,6 +176,47 @@ fn is_ours(port: u16) -> bool {
     client(port)
         .health()
         .is_ok_and(|body| OURS.iter().any(|name| body.trim_start().starts_with(name)))
+}
+
+/// KEY=VALUE pairs from a seat env file. Comments and blank lines stay out.
+fn env_pairs(text: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() {
+            continue;
+        }
+        pairs.push((k.to_string(), v.trim().to_string()));
+    }
+    pairs
+}
+
+/// Load `~/.config/ljos/env` when the process has not set those keys, so
+/// bare `packset search` speaks the same workspace `ljos doctor` prints.
+fn load_seat_env() {
+    let Some(home) = env::var_os("HOME") else {
+        return;
+    };
+    let path = PathBuf::from(home).join(".config/ljos/env");
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    for (k, v) in env_pairs(&text) {
+        if env::var_os(&k).is_none() {
+            env::set_var(k, v);
+        }
+    }
+}
+
+fn is_all_workspaces(given: Option<&str>) -> bool {
+    given == Some("--all")
 }
 
 /// The workspace a command was given, or the one the environment names.
@@ -318,10 +360,11 @@ fn status(port: u16, given: Option<&str>) -> anyhow::Result<()> {
     let client = client(port);
     let health = client.health().unwrap_or_default();
     println!("packset: up on 127.0.0.1:{port} ({})", health.trim());
-    let scope = given
-        .map(str::to_string)
-        .or_else(|| env::var("PACKSET_WORKSPACE").ok())
-        .filter(|w| !w.is_empty());
+    let scope = if is_all_workspaces(given) {
+        None
+    } else {
+        Some(workspace(given)?)
+    };
     let detail = client.status(scope.as_deref())?;
     println!("{}", serde_json::to_string_pretty(&detail)?);
     Ok(())
@@ -470,6 +513,7 @@ fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("search: pass a question");
     }
     let workspace = workspace(given.as_deref())?;
+    eprintln!("packset: workspace {workspace}");
     for hit in client(port).search(&workspace, &query, 10)? {
         println!(
             "{:.4}\t{}\t{}\t{}",
@@ -630,6 +674,7 @@ fn atoms(port: u16, args: &[String]) -> anyhow::Result<()> {
         at += 1;
     }
     let workspace = workspace(given.as_deref())?;
+    eprintln!("packset: workspace {workspace}");
     for atom in client(port).atoms_as_of(&workspace, as_of.as_deref())? {
         println!("{}", serde_json::to_string(&atom)?);
     }
@@ -658,6 +703,30 @@ mod tests {
         let (ws, rest) = super::split_workspace(&["only".to_string()]);
         assert!(ws.is_none());
         assert_eq!(rest, ["only"]);
+    }
+
+    #[test]
+    fn env_text_skips_comments_and_does_not_invent_keys() {
+        let pairs = super::env_pairs(
+            "# Shared by the seat\nPACKSET_WORKSPACE=git:example.com/seat/notes\n\nPACKSET_URL=http://127.0.0.1:8761\n=novalue\n",
+        );
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "PACKSET_WORKSPACE".into(),
+                    "git:example.com/seat/notes".into()
+                ),
+                ("PACKSET_URL".into(), "http://127.0.0.1:8761".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn status_all_is_the_global_count() {
+        assert!(super::is_all_workspaces(Some("--all")));
+        assert!(!super::is_all_workspaces(None));
+        assert!(!super::is_all_workspaces(Some("seat")));
     }
 
     #[test]

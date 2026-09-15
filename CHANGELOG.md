@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.5 (2026-09-15)
+
+- Bare `packset search` and `atoms` load `~/.config/ljos/env` so they
+  speak the same workspace `ljos doctor` prints. `status` counts that
+  workspace. `status --all` is the old global count.
+
 ## 0.9.4 (2026-09-15)
 
 - Search no longer prepends the review clock. Due personas were still
