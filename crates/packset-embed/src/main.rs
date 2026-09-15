@@ -5,7 +5,7 @@
 //! ```console
 //! $ echo '{"id":"a","text":"Prefer ripgrep for search."}' | packset-embed
 //! {"id":"a","v":[...]}
-//! $ echo '{"id":"q","text":"which search tool"}' | packset-embed --query
+//! $ echo '{"id":"q","text":"which search tool","query":true}' | packset-embed
 //! ```
 //!
 //! Documents and questions take different prefixes per model family (BGE
@@ -25,6 +25,9 @@ use serde::{Deserialize, Serialize};
 struct Item {
     id: String,
     text: String,
+    /// When true, the query prefix. One kept process can encode both sides.
+    #[serde(default)]
+    query: bool,
 }
 
 /// One thing encoded as a single vector.
@@ -79,6 +82,14 @@ struct Choice {
     source: Source,
     query: &'static str,
     passage: &'static str,
+}
+
+fn prefix_of(choice: &Choice, query: bool) -> &'static str {
+    if query {
+        choice.query
+    } else {
+        choice.passage
+    }
 }
 
 /// Where a model's weights come from.
@@ -256,7 +267,6 @@ fn main() -> anyhow::Result<()> {
     let name = std::env::var("PACKSET_EMBED_MODEL").unwrap_or_default();
     let choice = choose(name.trim())
         .ok_or_else(|| anyhow::anyhow!("unknown model `{name}`; known: {KNOWN}"))?;
-    let prefix = if query { choice.query } else { choice.passage };
     let mut model = load(&choice)?;
 
     // A line in, a line out, flushed. Loading the model is the expensive part
@@ -271,6 +281,8 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let item: Item = serde_json::from_str(&line)?;
+        let as_query = query || item.query;
+        let prefix = prefix_of(&choice, as_query);
         let text = if prefix.is_empty() {
             item.text
         } else {
@@ -512,5 +524,20 @@ mod tests {
             Some(PathBuf::from("/home/seat/.cache/packset/embed"))
         );
         assert_eq!(cache_dir_from(None, None, None), None);
+    }
+
+    #[test]
+    fn one_process_picks_query_or_passage_per_line() {
+        let choice = super::choose("").expect("bge-small");
+        assert!(!super::prefix_of(&choice, true).is_empty());
+        assert!(super::prefix_of(&choice, false).is_empty());
+        let e5 = super::choose("e5-base").expect("e5-base");
+        assert_eq!(super::prefix_of(&e5, true), "query: ");
+        assert_eq!(super::prefix_of(&e5, false), "passage: ");
+        let item: super::Item =
+            serde_json::from_str(r#"{"id":"q","text":"which tool","query":true}"#).unwrap();
+        assert!(item.query);
+        let doc: super::Item = serde_json::from_str(r#"{"id":"d","text":"ripgrep"}"#).unwrap();
+        assert!(!doc.query);
     }
 }

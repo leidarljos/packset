@@ -69,10 +69,10 @@ struct Encoder {
 
 impl Encoder {
     fn start(binary: &Path, query: bool) -> Option<Self> {
+        // One child encodes both sides. `--query` is still accepted by the
+        // binary for old callers; this writer sends `query` per line instead.
+        let _ = query;
         let mut command = Command::new(binary);
-        if query {
-            command.arg("--query");
-        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -230,7 +230,11 @@ impl Encoder {
 
     /// Write one request and read its one-line reply.
     fn ask(&mut self, text: &str) -> Option<String> {
-        let line = json!({ "id": "0", "text": text });
+        self.ask_text(text, false)
+    }
+
+    fn ask_text(&mut self, text: &str, query: bool) -> Option<String> {
+        let line = json!({ "id": "0", "text": text, "query": query });
         self.ask_json(&line.to_string())
     }
 
@@ -246,7 +250,11 @@ impl Encoder {
     }
 
     fn encode(&mut self, text: &str) -> Option<Vec<f32>> {
-        let reply = self.ask(text)?;
+        self.encode_as(text, false)
+    }
+
+    fn encode_as(&mut self, text: &str, query: bool) -> Option<Vec<f32>> {
+        let reply = self.ask_text(text, query)?;
         let parsed: Value = serde_json::from_str(reply.trim()).ok()?;
         let vector: Vec<f32> = parsed
             .get("v")?
@@ -274,17 +282,21 @@ impl Drop for Encoder {
 /// much. Ascending by index, so two of them intersect in one pass.
 pub type Sparse = Vec<(u32, f32)>;
 
-/// The two kept encoders, started on first use.
+/// One kept encoder. Query and document share it; the prefix is per line.
 type Slot = Mutex<Option<Encoder>>;
 
-fn slot(query: bool) -> &'static Slot {
-    static DOCUMENTS: OnceLock<Slot> = OnceLock::new();
-    static QUESTIONS: OnceLock<Slot> = OnceLock::new();
-    if query {
-        QUESTIONS.get_or_init(|| Mutex::new(None))
-    } else {
-        DOCUMENTS.get_or_init(|| Mutex::new(None))
+fn slot(_query: bool) -> &'static Slot {
+    dense_slot()
+}
+
+/// The one dense child. `PACKSET_EMBED_QUERY_WORKERS` > 1 is extra models
+/// in RAM for hosts that asked.
+fn dense_slot() -> &'static Slot {
+    if query_workers() <= 1 {
+        static ONE: OnceLock<Slot> = OnceLock::new();
+        return ONE.get_or_init(|| Mutex::new(None));
     }
+    query_slot()
 }
 
 /// Encode one text, or nothing when this seat has no working encoder. A dead
@@ -333,14 +345,14 @@ pub fn encode(text: &str, query: bool) -> Option<Vec<f32>> {
         return None;
     }
     let binary = binary()?;
-    let chosen = if query { query_slot() } else { slot(false) };
+    let chosen = dense_slot();
     let mut held = chosen.lock().ok()?;
     for attempt in 0..2 {
         if held.as_mut().is_none_or(|running| !running.alive()) {
             *held = Encoder::start(&binary, query);
         }
         let running = held.as_mut()?;
-        if let Some(vector) = running.encode(text) {
+        if let Some(vector) = running.encode_as(text, query) {
             return Some(vector);
         }
         *held = None;
@@ -530,13 +542,7 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
 
 #[cfg(test)]
 pub fn reset_for_test() {
-    for slot in [
-        slot(true),
-        slot(false),
-        rerank_slot(),
-        late_slot(),
-        sparse_slot(),
-    ] {
+    for slot in [dense_slot(), rerank_slot(), late_slot(), sparse_slot()] {
         if let Ok(mut held) = slot.lock() {
             *held = None;
         }

@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.8 (2026-09-15)
+
+- One `packset-embed` child encodes query and document. The prefix is
+  per line. Concurrent HTTP searches share that child. Extra models
+  still cost `PACKSET_EMBED_QUERY_WORKERS`.
+
 ## 0.9.7 (2026-09-15)
 
 - packsetd no longer warms a pool of encoder children at start. Default
