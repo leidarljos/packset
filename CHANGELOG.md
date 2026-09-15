@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `admit_seat_write`: Remember / Prefer / Accept only. Raw context
+  refuses. MemoryAgentBench write-policy gate (`packset-ld29`).
+
 ## 0.9.5 (2026-09-15)
 
 - Bare `packset search` and `atoms` load `~/.config/ljos/env` so they

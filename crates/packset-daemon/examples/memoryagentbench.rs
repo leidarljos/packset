@@ -13,6 +13,9 @@
 //!     cargo run --release -p packset-daemon --example memoryagentbench -- data/mab
 //! ```
 //!
+//! Ingest goes through `admit_seat_write`: Remember / Prefer / Accept
+//! only. A raw record is a refusal, not an atom.
+//!
 //! The retrieval number reported here is a proxy: whether one of the answer
 //! strings appears in the retrieved text. It is exact for the fact lists and
 //! the document QA, where the answer is a span, and weak for EventQA and the

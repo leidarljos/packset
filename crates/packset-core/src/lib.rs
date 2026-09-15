@@ -43,7 +43,7 @@ pub use copeland::copeland_merge;
 pub use decay::temporal_decay;
 pub use dowdall::dowdall_merge;
 pub use dpp::dpp_rerank;
-pub use extract::{claim_from_user, is_tool_dump};
+pub use extract::{admit_seat_write, claim_from_user, is_tool_dump, SeatWrite};
 pub use identity::{normalize_remote, workspace_slug};
 pub use kemeny::kemeny_merge;
 pub use mmr::mmr_rerank;
