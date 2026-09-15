@@ -5,7 +5,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - `paper_a_live` example: write-policy table on published LongMemEval_S
-  and MemoryAgentBench json. Measured, not fixture.
+  and MemoryAgentBench json. Measured, not fixture. Live rows in
+  =docs/orgmode/results/paper-a-live.org=.
 
 ## 0.9.6 (2026-09-15)
 

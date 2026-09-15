@@ -1,0 +1,21 @@
+#+title: Paper A live write-policy table
+#+options: toc:nil num:nil
+
+Measured on the published LongMemEval_S json (500 questions, abstention
+types skipped) and MemoryAgentBench Accurate_Retrieval plus
+Conflict_Resolution jsonl. Each session or fact is offered raw (a
+refusal) and as =Remember: …= (an admit). Retrieval is lexical over
+admitted claims only. Hit@1 is answer-span overlap in the top five
+claims.
+
+This is a retrieval number. It is not a reader-model SOTA score and
+not the in-repo fixture table.
+
+| bench | admitted | refused | asked | hit | hit@1 |
+|---+---:|---:|---:|---:|---:|
+| LongMemEval_S | 20262 | 22356 | 468 | 193 | 0.412 |
+| MemoryAgentBench | 11831 | 11862 | 2000 | 260 | 0.130 |
+| MemConflict | 51354 | 51354 | 800 | 430 | 0.537 |
+
+MemConflict here is MemoryAgentBench Conflict_Resolution
+(FactConsolidation). Runner: =paper_a_live=.
