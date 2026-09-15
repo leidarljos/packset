@@ -425,7 +425,7 @@ pub fn search_linear_with(ask: &Ask<'_>, documents: &[Vec<String>]) -> Vec<Value
         };
         let relevance = tokens_score(&qtoks, hay);
         let due = record::is_due(atom, now);
-        if relevance == 0.0 && !due {
+        if relevance == 0.0 {
             continue;
         }
         let ts = atom.get("ts").and_then(Value::as_str);
@@ -750,21 +750,51 @@ fn hit_key(hit: &Value) -> (String, String) {
 }
 
 /// Put the due hits first, then the ranked ones, dropping repeats.
+///
+/// Due leads because a review-clock hit is not a relevance claim the model
+/// is allowed to bury. It does not lead all the way: a due set larger than
+/// the window used to take the whole window, and with 63 atoms due against
+/// the default limit of 10 every query returned the same ten rows at the
+/// same score, the nonsense ones included. The ranked list was computed and
+/// then thrown away.
+///
+/// So due takes at most half the window while there is anything ranked to
+/// put in the other half, and it takes the rest only when relevance has
+/// nothing left to offer.
 #[must_use]
 pub fn front_due(due: Vec<Value>, ranked: Vec<Value>, limit: usize) -> Vec<Value> {
     if limit == 0 {
         return Vec::new();
     }
+    let due_room = if ranked.is_empty() {
+        limit
+    } else {
+        limit.div_ceil(2)
+    };
     let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for hit in due.into_iter().chain(ranked) {
-        if !seen.insert(hit_key(&hit)) {
-            continue;
+    let mut unique_due: Vec<Value> = Vec::new();
+    for hit in due {
+        if seen.insert(hit_key(&hit)) {
+            unique_due.push(hit);
         }
-        out.push(hit);
+    }
+    let spare = unique_due.split_off(due_room.min(unique_due.len()));
+    let mut out = unique_due;
+    for hit in ranked {
         if out.len() >= limit {
             break;
         }
+        if seen.insert(hit_key(&hit)) {
+            out.push(hit);
+        }
+    }
+    // Relevance had its half and did not fill it; the clock takes the rest.
+    // These were deduped on the way in, so they need no second check.
+    for hit in spare {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(hit);
     }
     out
 }
@@ -1102,13 +1132,16 @@ mod tests {
     }
 
     #[test]
-    fn a_due_atom_is_returned_even_with_no_overlap() {
+    fn a_due_atom_with_no_overlap_is_on_the_clock_not_in_search() {
         let atoms = vec![atom(json!({
             "id": "a", "text": "utterly unrelated", "kind": "voice",
             "due_at": "2020-01-01T00:00:00.000Z"
         }))];
-        let hits = search_linear(&ask("", "", &atoms, "ripgrep", 10, None));
-        assert_eq!(hits.len(), 1, "a deadline outranks relevance: {hits:?}");
+        assert!(
+            search_linear(&ask("", "", &atoms, "ripgrep", 10, None)).is_empty(),
+            "due is the clock, not a search hit"
+        );
+        assert_eq!(due_hits(&atoms, None, NOW).len(), 1);
     }
 
     #[test]
@@ -1156,6 +1189,20 @@ mod tests {
     }
 
     #[test]
+    fn a_due_atom_with_no_query_overlap_is_not_a_search_hit() {
+        // 212 due personas were filling every query at score 3.1. Due is
+        // the clock (`due_hits`); search is overlap.
+        let atoms = vec![atom(json!({
+            "id": "persona-a",
+            "kind": "persona",
+            "text": "Apply Ask number strips and the two-lip close.",
+            "due_at": "2020-01-01T00:00:00.000Z"
+        }))];
+        let hits = search_linear(&ask("", "", &atoms, "zzzzqqqq nonsense token", 10, None));
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
     fn due_hits_lead_and_are_not_repeated_behind_themselves() {
         let atoms = vec![atom(json!({
             "id": "due", "text": "ripgrep", "kind": "voice",
@@ -1167,6 +1214,43 @@ mod tests {
         assert_eq!(ranked.len(), 1);
         let merged = front_due(due, ranked, 10);
         assert_eq!(merged.len(), 1, "one atom, one hit: {merged:?}");
+    }
+
+    #[test]
+    fn a_due_set_bigger_than_the_window_still_leaves_room_for_relevance() {
+        // 63 atoms were due against a limit of 10, so every query came back
+        // with the same ten due rows at the same score and the ranked list
+        // was computed and discarded.
+        let due: Vec<Value> = (0..63)
+            .map(|n| json!({"field": "atom", "id": format!("due-{n:02}"), "score": 3.1}))
+            .collect();
+        let ranked: Vec<Value> = (0..10)
+            .map(|n| json!({"field": "atom", "id": format!("hit-{n:02}"), "score": 1.0}))
+            .collect();
+        let merged = front_due(due, ranked, 10);
+        assert_eq!(merged.len(), 10);
+        let ids: Vec<&str> = merged.iter().map(|h| h["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.iter().filter(|i| i.starts_with("due-")).count(), 5);
+        assert_eq!(ids.iter().filter(|i| i.starts_with("hit-")).count(), 5);
+        assert_eq!(ids[0], "due-00", "the review clock still leads");
+    }
+
+    #[test]
+    fn due_takes_the_whole_window_when_nothing_ranked() {
+        let due: Vec<Value> = (0..20)
+            .map(|n| json!({"field": "atom", "id": format!("due-{n:02}"), "score": 3.1}))
+            .collect();
+        assert_eq!(front_due(due, vec![], 10).len(), 10);
+    }
+
+    #[test]
+    fn a_short_ranked_list_lets_due_fill_the_rest() {
+        let due: Vec<Value> = (0..8)
+            .map(|n| json!({"field": "atom", "id": format!("due-{n:02}"), "score": 3.1}))
+            .collect();
+        let ranked = vec![json!({"field": "atom", "id": "hit-00", "score": 1.0})];
+        let merged = front_due(due, ranked, 10);
+        assert_eq!(merged.len(), 9, "{merged:?}");
     }
 
     #[test]

@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.3 (2026-09-15)
+
+- A due atom with no query overlap is on the clock, not in search.
+  Due personas were filling every query at score 3.1.
+
 ## 0.9.2 (2026-09-14)
 
 - `packset-mcp --version` prints and exits so `ljos doctor` can
