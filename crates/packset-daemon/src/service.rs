@@ -1277,7 +1277,7 @@ impl Service {
         let mut tomb: BTreeMap<String, usize> = BTreeMap::new();
         let mut expired: BTreeMap<String, usize> = BTreeMap::new();
         let mut last_write = String::new();
-        for rec in self.store.scan(workspace)? {
+        self.store.for_each(workspace, |rec| {
             let kind = rec
                 .get("kind")
                 .and_then(Value::as_str)
@@ -1299,7 +1299,7 @@ impl Service {
             } else {
                 *expired.entry(kind).or_insert(0) += 1;
             }
-        }
+        })?;
         let milli_dir = self.home.milli_dir();
         let index_ready = crate::milli::index_ready(&milli_dir);
         let pin = workspace.map(|w| self.pin(w)).unwrap_or_default();

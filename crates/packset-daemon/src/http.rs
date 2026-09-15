@@ -23,11 +23,9 @@ pub const LOOPBACK: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 8761;
 /// Workers when the machine will not say how many cores it has.
 pub const DEFAULT_WORKERS: usize = 4;
-/// The ceiling on workers, however many cores there are.
-///
-/// The work is a database read and some scoring, so past this the threads
-/// contend for the same snapshot rather than finishing sooner.
-pub const MAX_WORKERS: usize = 32;
+/// The ceiling on workers. 32 threads each kept a 64 MB malloc arena
+/// (2 GB idle) on a 32-thread laptop.
+pub const MAX_WORKERS: usize = 8;
 
 /// How many requests this writer will answer at once.
 ///
@@ -40,13 +38,11 @@ pub fn worker_count() -> usize {
     if let Some(raw) = std::env::var_os("PACKSET_WORKERS") {
         if let Some(n) = raw.to_str().and_then(|s| s.trim().parse::<usize>().ok()) {
             if n > 0 {
-                return n;
+                return n.min(MAX_WORKERS);
             }
         }
     }
-    std::thread::available_parallelism()
-        .map_or(DEFAULT_WORKERS, std::num::NonZeroUsize::get)
-        .clamp(DEFAULT_WORKERS, MAX_WORKERS)
+    DEFAULT_WORKERS
 }
 
 /// What a route decided to answer.
@@ -722,6 +718,13 @@ fn respond(request: Request, answer: &Answer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[test]
+    fn default_workers_is_four_not_core_count() {
+        assert_eq!(DEFAULT_WORKERS, 4);
+        assert_eq!(MAX_WORKERS, 8);
+    }
 
     #[test]
     fn a_query_splits_and_decodes() {

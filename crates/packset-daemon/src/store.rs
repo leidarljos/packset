@@ -129,6 +129,44 @@ impl Store {
         Ok(out)
     }
 
+    /// Visit each record without collecting them. Status counts 30k expired
+    /// atoms this way instead of holding every JSON value at once.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read transaction does.
+    pub fn for_each(
+        &self,
+        workspace: Option<&str>,
+        mut visit: impl FnMut(&Record),
+    ) -> anyhow::Result<()> {
+        if workspace == Some("") {
+            return Ok(());
+        }
+        let rtxn = self.env.read_txn()?;
+        let mut each = |raw: &[u8]| {
+            if let Ok(Value::Object(record)) = serde_json::from_slice::<Value>(raw) {
+                visit(&record);
+            }
+        };
+        match workspace {
+            Some(name) => {
+                let prefix = workspace_prefix(name);
+                for item in self.db.prefix_iter(&rtxn, &prefix)? {
+                    let (_, raw) = item?;
+                    each(raw);
+                }
+            }
+            None => {
+                for item in self.db.iter(&rtxn)? {
+                    let (_, raw) = item?;
+                    each(raw);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// One record by id, whatever its state.
     ///
     /// # Errors

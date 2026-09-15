@@ -75,10 +75,9 @@ fn main() -> anyhow::Result<()> {
     );
 
     let service = Arc::new(Service::open(Home::new(root))?);
-    // Each encoder loads its model on first use, which costs seconds; pay it
-    // now, for every query encoder in the pool, rather than on the first
-    // agents' asks.
-    std::thread::spawn(packset_daemon::embed::warm_queries);
+    // Do not pre-spawn encoder children. Each one is a model in RAM. The
+    // first search starts one query encoder; a document encoder starts
+    // only if a dense ballot needs it.
     http::serve(service, panel, &host, port)
 }
 

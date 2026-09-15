@@ -290,16 +290,15 @@ fn slot(query: bool) -> &'static Slot {
 /// Encode one text, or nothing when this seat has no working encoder. A dead
 /// child is replaced once and the text retried.
 #[must_use]
-/// How many query encoders the writer keeps. One encoder answers one query
-/// at a time, so with many agents asking at once the second waits behind
-/// the first; a pool answers them side by side at the cost of one model in
-/// memory per encoder. `PACKSET_EMBED_QUERY_WORKERS`, default 2, floor 1.
+/// How many query encoders the writer keeps. One encoder is one model in
+/// RAM. Default 1. `PACKSET_EMBED_QUERY_WORKERS` raises it; a pool of two
+/// was 4 GB on a laptop that also held a document encoder.
 fn query_workers() -> usize {
     std::env::var("PACKSET_EMBED_QUERY_WORKERS")
         .ok()
         .and_then(|raw| raw.trim().parse().ok())
         .filter(|n: &usize| *n >= 1)
-        .unwrap_or(2)
+        .unwrap_or(1)
 }
 
 /// The query encoders: the first one free answers; when all are busy the

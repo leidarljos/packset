@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.7 (2026-09-15)
+
+- packsetd no longer warms a pool of encoder children at start. Default
+  query workers is 1. HTTP workers default to 4 (cap 8), not core count.
+  Status counts atoms without collecting them.
 - `paper_a_live` example: write-policy table on published LongMemEval_S
   and MemoryAgentBench json. Measured, not fixture. Live rows in
   =docs/orgmode/results/paper-a-live.org=.
