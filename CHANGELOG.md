@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `paper_a_live` example: write-policy table on published LongMemEval_S
+  and MemoryAgentBench json. Measured, not fixture.
+
 ## 0.9.6 (2026-09-15)
 
 - Paper A fixture table: LongMemEval_S, MemoryAgentBench, MemConflict.
