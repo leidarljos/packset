@@ -24,7 +24,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize)]
 struct Item {
     id: String,
+    #[serde(default)]
     text: String,
+    /// Several texts, one forward pass. Empty means `text` is the only one.
+    #[serde(default)]
+    texts: Vec<String>,
     /// When true, the query prefix. One kept process can encode both sides.
     #[serde(default)]
     query: bool,
@@ -35,6 +39,13 @@ struct Item {
 struct Vector {
     id: String,
     v: Vec<f32>,
+}
+
+/// Several texts encoded in one forward pass.
+#[derive(Serialize)]
+struct Vectors {
+    id: String,
+    vs: Vec<Vec<f32>>,
 }
 
 /// A question and the candidates to put it against.
@@ -283,18 +294,44 @@ fn main() -> anyhow::Result<()> {
         let item: Item = serde_json::from_str(&line)?;
         let as_query = query || item.query;
         let prefix = prefix_of(&choice, as_query);
-        let text = if prefix.is_empty() {
-            item.text
+        let mut raw = item.texts;
+        if raw.is_empty() && !item.text.is_empty() {
+            raw.push(item.text);
+        }
+        let prepared: Vec<String> = raw
+            .into_iter()
+            .map(|t| {
+                if prefix.is_empty() {
+                    t
+                } else {
+                    format!("{prefix}{t}")
+                }
+            })
+            .collect();
+        let vectors = if prepared.is_empty() {
+            Vec::new()
         } else {
-            format!("{prefix}{}", item.text)
+            model.embed(&prepared, None)?
         };
-        let mut vectors = model.embed(&[text], None)?;
-        let v = vectors.pop().unwrap_or_default();
-        writeln!(
-            out,
-            "{}",
-            serde_json::to_string(&Vector { id: item.id, v })?
-        )?;
+        if vectors.len() == 1 {
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string(&Vector {
+                    id: item.id,
+                    v: vectors.into_iter().next().unwrap_or_default(),
+                })?
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string(&Vectors {
+                    id: item.id,
+                    vs: vectors,
+                })?
+            )?;
+        }
         out.flush()?;
     }
     Ok(())
@@ -539,5 +576,9 @@ mod tests {
         assert!(item.query);
         let doc: super::Item = serde_json::from_str(r#"{"id":"d","text":"ripgrep"}"#).unwrap();
         assert!(!doc.query);
+        let batch: super::Item =
+            serde_json::from_str(r#"{"id":"b","query":true,"texts":["a","b"]}"#).unwrap();
+        assert_eq!(batch.texts.len(), 2);
+        assert!(batch.query);
     }
 }

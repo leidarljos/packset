@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.9 (2026-09-15)
+
+- Concurrent encodes share one forward pass: waiting query lines are
+  batched to the single embed child.
+
 ## 0.9.8 (2026-09-15)
 
 - One `packset-embed` child encodes query and document. The prefix is

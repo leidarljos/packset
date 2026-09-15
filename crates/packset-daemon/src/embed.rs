@@ -6,7 +6,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::mpsc::sync_channel;
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -253,6 +255,31 @@ impl Encoder {
         self.encode_as(text, false)
     }
 
+    fn encode_batch(&mut self, texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Some(Vec::new());
+        }
+        if texts.len() == 1 {
+            return self.encode_as(&texts[0], query).map(|v| vec![v]);
+        }
+        let line = json!({ "id": "b", "query": query, "texts": texts });
+        let reply = self.ask_json(&line.to_string())?;
+        let parsed: Value = serde_json::from_str(reply.trim()).ok()?;
+        let rows = parsed.get("vs")?.as_array()?;
+        let out: Vec<Vec<f32>> = rows
+            .iter()
+            .filter_map(|row| {
+                Some(
+                    row.as_array()?
+                        .iter()
+                        .filter_map(|x| x.as_f64().map(|f| f as f32))
+                        .collect(),
+                )
+            })
+            .collect();
+        (out.len() == texts.len()).then_some(out)
+    }
+
     fn encode_as(&mut self, text: &str, query: bool) -> Option<Vec<f32>> {
         let reply = self.ask_text(text, query)?;
         let parsed: Value = serde_json::from_str(reply.trim()).ok()?;
@@ -340,27 +367,111 @@ pub fn warm_queries() {
     }
 }
 
-pub fn encode(text: &str, query: bool) -> Option<Vec<f32>> {
-    if text.trim().is_empty() {
-        return None;
+struct Pending {
+    text: String,
+    query: bool,
+    tx: std::sync::mpsc::SyncSender<Option<Vec<f32>>>,
+}
+
+fn pending() -> &'static (Mutex<Vec<Pending>>, Condvar) {
+    static Q: OnceLock<(Mutex<Vec<Pending>>, Condvar)> = OnceLock::new();
+    Q.get_or_init(|| (Mutex::new(Vec::new()), Condvar::new()))
+}
+
+fn ensure_pump() {
+    static START: OnceLock<()> = OnceLock::new();
+    START.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("packset-embed-pump".into())
+            .spawn(pump);
+    });
+}
+
+fn pump() {
+    let (lock, cv) = pending();
+    loop {
+        let mut held = match lock.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        while held.is_empty() {
+            held = match cv.wait(held) {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+        }
+        drop(held);
+        std::thread::sleep(Duration::from_millis(2));
+        let batch = match lock.lock() {
+            Ok(mut g) => std::mem::take(&mut *g),
+            Err(_) => return,
+        };
+        dispatch(batch);
     }
+}
+
+fn dispatch(batch: Vec<Pending>) {
+    let mut queries = Vec::new();
+    let mut docs = Vec::new();
+    for job in batch {
+        if job.query {
+            queries.push(job);
+        } else {
+            docs.push(job);
+        }
+    }
+    run_group(queries, true);
+    run_group(docs, false);
+}
+
+fn run_group(jobs: Vec<Pending>, query: bool) {
+    if jobs.is_empty() {
+        return;
+    }
+    let texts: Vec<String> = jobs.iter().map(|j| j.text.clone()).collect();
+    let vecs = encode_now(&texts, query);
+    let mut answers = vecs.unwrap_or_default().into_iter();
+    for job in jobs {
+        let _ = job.tx.send(answers.next());
+    }
+}
+
+fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     let binary = binary()?;
-    let chosen = dense_slot();
-    let mut held = chosen.lock().ok()?;
-    for attempt in 0..2 {
+    let mut held = dense_slot().lock().ok()?;
+    for _ in 0..2 {
         if held.as_mut().is_none_or(|running| !running.alive()) {
             *held = Encoder::start(&binary, query);
         }
         let running = held.as_mut()?;
-        if let Some(vector) = running.encode_as(text, query) {
-            return Some(vector);
+        if let Some(vectors) = running.encode_batch(texts, query) {
+            return Some(vectors);
         }
         *held = None;
-        if attempt == 1 {
-            return None;
-        }
     }
     None
+}
+
+pub fn encode(text: &str, query: bool) -> Option<Vec<f32>> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    if binary().is_none() {
+        return None;
+    }
+    ensure_pump();
+    let (tx, rx) = sync_channel(1);
+    {
+        let (lock, cv) = pending();
+        let mut q = lock.lock().ok()?;
+        q.push(Pending {
+            text: text.to_string(),
+            query,
+            tx,
+        });
+        cv.notify_one();
+    }
+    rx.recv().ok()?
 }
 
 /// Encode one query.
