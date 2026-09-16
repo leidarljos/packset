@@ -2841,19 +2841,20 @@ dependencies = [
 
 [[package]]
 name = "packset"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "libc",
  "packset-client",
  "packset-core",
+ "packset-daemon",
  "serde_json",
  "tempfile",
 ]
 
 [[package]]
 name = "packset-client"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "packset-core",
  "serde",
@@ -2864,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "criterion",
  "rust-stemmers",
@@ -2875,7 +2876,7 @@ dependencies = [
 
 [[package]]
 name = "packset-daemon"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "heed 0.20.5",
@@ -2891,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "packset-embed"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "fastembed",
@@ -2901,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "packset-mcp"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "packset-client",
@@ -2914,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "packset-milli"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "milli",

@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `cargo install packset` installs `packset` and `packsetd`.
+
 ## 0.9.9 (2026-09-15)
 
 - Concurrent encodes share one forward pass: waiting query lines are
