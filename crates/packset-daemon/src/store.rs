@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 /// The map size the environment opens with. Growing it is compatible;
 /// shrinking it below what is stored is not.
-pub const MAP_SIZE: usize = 256 * 1024 * 1024;
+pub const MAP_SIZE: usize = 1024 * 1024 * 1024;
 
 /// One atom record.
 pub type Record = Map<String, Value>;

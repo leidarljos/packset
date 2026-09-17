@@ -238,6 +238,7 @@ impl Service {
         // recalled, it is weighed.
         if record::is_live(&atom, &now)
             && atom.get("kind").and_then(Value::as_str) != Some("trust")
+            && atom.get("kind").and_then(Value::as_str) != Some("persona")
             && atom
                 .get("due_at")
                 .and_then(Value::as_str)
@@ -1616,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn add_seeds_the_review_clock_except_for_trust() {
+    fn add_seeds_the_review_clock_except_for_trust_and_persona() {
         let (_dir, svc) = service();
         let stored = svc.add(atom("Reviews open with a check.")).unwrap();
         let due = stored.get("due_at").and_then(Value::as_str).unwrap_or("");
@@ -1628,6 +1629,13 @@ mod tests {
         row.insert("to".into(), "b".into());
         row.insert("weight".into(), 0.5.into());
         let stored = svc.add(row).unwrap();
+        assert!(stored.get("due_at").is_none(), "{stored:?}");
+        let mut persona = atom("A voter with a view of its own.");
+        persona.insert("kind".into(), "persona".into());
+        persona.insert("name".into(), "rev-honest".into());
+        persona.insert("view".into(), "Reject habitat leaks.".into());
+        persona.insert("anchor".into(), 0.2.into());
+        let stored = svc.add(persona).unwrap();
         assert!(stored.get("due_at").is_none(), "{stored:?}");
     }
 
