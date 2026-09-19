@@ -138,11 +138,6 @@ pub fn tokens(text: &str) -> Vec<String> {
 /// Whether an atom answers to the hints.
 #[must_use]
 pub fn matches_hints(atom: &Record, hints: &Hints) -> bool {
-    let want = tokens(&hints.text);
-    let hay = text_of(atom).to_ascii_lowercase();
-    if !want.is_empty() && want.iter().any(|tok| hay.contains(tok.as_str())) {
-        return true;
-    }
     let entities = record::entities_of(atom);
     if !hints.entities.is_empty()
         && hints
@@ -152,8 +147,19 @@ pub fn matches_hints(atom: &Record, hints: &Hints) -> bool {
     {
         return true;
     }
+    let want = tokens(&hints.text);
+    if want.is_empty() {
+        return false;
+    }
+    // At least half the cue's tokens, in the text or the entities. One
+    // shared word seeded the whole pack when the cue held a common one.
+    let hay = text_of(atom).to_ascii_lowercase();
     let lowered: Vec<String> = entities.iter().map(|e| e.to_ascii_lowercase()).collect();
-    !want.is_empty() && want.iter().any(|tok| lowered.iter().any(|e| e == tok))
+    let matched = want
+        .iter()
+        .filter(|tok| hay.contains(tok.as_str()) || lowered.iter().any(|e| e == *tok))
+        .count();
+    matched * 2 >= want.len()
 }
 
 fn resolve_seeds(live: &[Record], seeds: &[String], hints: &Hints) -> Vec<String> {
@@ -342,6 +348,29 @@ mod tests {
         ];
         let got = sort_atoms(&live, NOW);
         assert_eq!(ids(&got), vec!["late".to_string(), "trusted".to_string()]);
+    }
+
+    #[test]
+    fn one_common_word_does_not_seed_the_whole_pack() {
+        let atom = atom(json!({"id": "a", "text": "The settled answer on the fuse is CombMNZ."}));
+        let common = Hints {
+            text: "the answer".into(),
+            entities: Vec::new(),
+        };
+        assert!(matches_hints(&atom, &common), "both words are in the text");
+        let mostly_other = Hints {
+            text: "answer about a topic nobody wrote of".into(),
+            entities: Vec::new(),
+        };
+        assert!(
+            !matches_hints(&atom, &mostly_other),
+            "one word of six is not a match"
+        );
+        let half = Hints {
+            text: "fuse rewrite".into(),
+            entities: Vec::new(),
+        };
+        assert!(matches_hints(&atom, &half), "half the cue is enough");
     }
 
     #[test]

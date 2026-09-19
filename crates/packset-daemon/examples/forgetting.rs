@@ -194,15 +194,26 @@ fn main() -> anyhow::Result<()> {
         })
         .collect();
     report("lru (newest hit first)", &ranks);
-    // Keep-testing: the recall path as the seat runs it, the due queue
-    // ahead of the cue's neighbourhood, retrievability within each.
+    // Keep-testing: the recall path as the seat runs it, seeded by the
+    // lexical hits the way the writer seeds it, the due queue ahead of the
+    // cue's neighbourhood and the seeds, recency within each.
     let ranks: Vec<usize> = (0..TOPICS)
         .map(|topic| {
+            let cue = atom_tokens(
+                json!({"text": cue_of(topic)})
+                    .as_object()
+                    .expect("an object"),
+            );
+            let seeds: Vec<String> = hits_for(&cue, &index, &atoms)
+                .iter()
+                .take(10)
+                .filter_map(|h| h["id"].as_str().map(str::to_string))
+                .collect();
             let hints = Hints {
                 text: cue_of(topic),
                 entities: Vec::new(),
             };
-            let picked = recall(&atoms, &[], &hints, Some(10), &now);
+            let picked = recall(&atoms, &seeds, &hints, Some(10), &now);
             let ranked: Vec<Value> = picked.into_iter().map(Value::Object).collect();
             rank_of(&ranked, topic)
         })
