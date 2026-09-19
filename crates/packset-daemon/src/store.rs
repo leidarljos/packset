@@ -298,7 +298,7 @@ impl Store {
     pub fn live(&self, workspace: &str) -> anyhow::Result<Arc<Vec<Record>>> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.live.read() {
-            if let Some((seen, _stored, shown)) = cache.get(workspace) {
+            if let Some((seen, _stored, shown, _dangling)) = cache.get(workspace) {
                 if *seen == generation {
                     return Ok(Arc::clone(shown));
                 }
@@ -427,7 +427,7 @@ impl Store {
             .into_iter()
             .filter(|atom| record::is_live_at(atom, &at))
             .collect();
-        Ok(shown_from(&stored))
+        Ok(shown_from(&stored).0)
     }
 
     /// The live and due records in one workspace, as a copy the caller owns.
