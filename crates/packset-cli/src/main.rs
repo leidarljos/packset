@@ -70,6 +70,7 @@ fn run() -> anyhow::Result<()> {
             if !procfs::listening(port) {
                 start(port)?;
             }
+            wait_healthy(port)?;
             print_url(port);
             Ok(())
         }
@@ -302,6 +303,18 @@ fn start(port: u16) -> anyhow::Result<()> {
             return Ok(());
         }
         if let Ok(Some(code)) = child.try_wait() {
+            // Many seats run `ensure` at once when a herd starts; the losers
+            // exit on the port or the store lock while the winner is coming
+            // up. A writer listening on our port is the outcome asked for,
+            // whichever process it is.
+            let sibling = Instant::now() + STARTUP;
+            while Instant::now() < sibling {
+                if procfs::listening(port) {
+                    eprintln!("packset: another seat's writer came up on 127.0.0.1:{port}");
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
             anyhow::bail!(
                 "packsetd exited {code}; see {}{}",
                 log.display(),
@@ -311,6 +324,20 @@ fn start(port: u16) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     anyhow::bail!("did not come up; see {}{}", log.display(), tail(&log))
+}
+
+/// A bound port is not yet an answering writer: the store opens after the
+/// listener, so a seat that asks the moment `ensure` returns can still be
+/// refused. Wait for `/health` to say it is ours, within the startup budget.
+fn wait_healthy(port: u16) -> anyhow::Result<()> {
+    let deadline = Instant::now() + STARTUP;
+    while Instant::now() < deadline {
+        if is_ours(port) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!("127.0.0.1:{port} is bound but /health does not answer as packsetd")
 }
 
 /// The last few log lines, for an error that would otherwise say only a path.

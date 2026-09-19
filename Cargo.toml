@@ -15,7 +15,7 @@ edition = "2021"
 license = "MIT"
 version = "0.9.10"
 publish = true
-rust-version = "1.85"
+rust-version = "1.88"
 repository = "https://github.com/leidarljos/packset"
 homepage = "https://leidarljos.github.io/packset/"
 

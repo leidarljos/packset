@@ -251,10 +251,6 @@ impl Encoder {
         Some(reply)
     }
 
-    fn encode(&mut self, text: &str) -> Option<Vec<f32>> {
-        self.encode_as(text, false)
-    }
-
     fn encode_batch(&mut self, texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Some(Vec::new());
@@ -311,10 +307,6 @@ pub type Sparse = Vec<(u32, f32)>;
 
 /// One kept encoder. Query and document share it; the prefix is per line.
 type Slot = Mutex<Option<Encoder>>;
-
-fn slot(_query: bool) -> &'static Slot {
-    dense_slot()
-}
 
 /// The one dense child. `PACKSET_EMBED_QUERY_WORKERS` > 1 is extra models
 /// in RAM for hosts that asked.
@@ -456,9 +448,7 @@ pub fn encode(text: &str, query: bool) -> Option<Vec<f32>> {
     if text.trim().is_empty() {
         return None;
     }
-    if binary().is_none() {
-        return None;
-    }
+    binary()?;
     ensure_pump();
     let (tx, rx) = sync_channel(1);
     {
