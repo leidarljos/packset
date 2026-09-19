@@ -25,8 +25,33 @@ pub type Record = Map<String, Value>;
 /// into) and as shown (links narrowed to ids present).
 type Snapshot = (u64, Vec<Record>, Arc<Vec<Record>>);
 
-/// A workspace's [`SearchSet`] at one generation.
-type Searchable = (u64, SearchSet);
+/// A workspace's index at one generation: the id and stamp of each atom
+/// the index was built over, in order, beside the index and its tokens.
+/// The atoms themselves are not held here, so the live set stays unshared
+/// between writes and a write edits it in place rather than copying it.
+type Searchable = (
+    u64,
+    (Vec<(String, String)>, Arc<Index>, Arc<Vec<Vec<String>>>),
+);
+
+/// The id and stamp of each atom, the fingerprint an index is keyed on.
+fn fingerprint(atoms: &[Record]) -> Vec<(String, String)> {
+    atoms
+        .iter()
+        .map(|a| {
+            (
+                a.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                a.get("ts")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
 
 /// What a search runs over: the snapshot, the inverted index, and the tokens
 /// the index was built from, all shared.
@@ -315,9 +340,12 @@ impl Store {
     pub fn searchable(&self, workspace: &str) -> anyhow::Result<SearchSet> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.terms.read() {
-            if let Some((seen, (atoms, index, documents))) = cache.get(workspace) {
+            if let Some((seen, (_, index, documents))) = cache.get(workspace) {
                 if *seen == generation {
-                    return Ok((Arc::clone(atoms), Arc::clone(index), Arc::clone(documents)));
+                    let atoms = self.live(workspace)?;
+                    if atoms.len() == index.len() {
+                        return Ok((atoms, Arc::clone(index), Arc::clone(documents)));
+                    }
                 }
             }
         }
@@ -333,15 +361,15 @@ impl Store {
         let (index, documents) = match previous {
             Some((old_atoms, mut index, mut documents))
                 if old_atoms.len() <= atoms.len()
-                    && old_atoms
-                        .iter()
-                        .zip(atoms.iter())
-                        .all(|(a, b)| a.get("id") == b.get("id")) =>
+                    && old_atoms.iter().zip(atoms.iter()).all(|((id, _), b)| {
+                        Some(id.as_str()) == b.get("id").and_then(Value::as_str)
+                    }) =>
             {
                 let idx = Arc::make_mut(&mut index);
                 let docs = Arc::make_mut(&mut documents);
-                for (ordinal, (old, new)) in old_atoms.iter().zip(atoms.iter()).enumerate() {
-                    if old.get("ts") != new.get("ts") {
+                for (ordinal, ((_, old_ts), new)) in old_atoms.iter().zip(atoms.iter()).enumerate()
+                {
+                    if Some(old_ts.as_str()) != new.get("ts").and_then(Value::as_str) {
                         let tokens = packset_core::search::atom_tokens(new);
                         idx.replace(ordinal, &docs[ordinal], &tokens);
                         docs[ordinal] = tokens;
@@ -373,7 +401,7 @@ impl Store {
                     (
                         generation,
                         (
-                            Arc::clone(&atoms),
+                            fingerprint(&atoms),
                             Arc::clone(&index),
                             Arc::clone(&documents),
                         ),
