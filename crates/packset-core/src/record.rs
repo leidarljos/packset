@@ -498,24 +498,9 @@ fn capitalized_runs(text: &str) -> BTreeSet<String> {
                 i += 1;
             }
             // {1,} after the first character means at least two in total, and
-            // the match must end on a word boundary. A run that opens the
-            // text or a sentence is capitalised for that reason alone; it
-            // is a name only when a second capital or a digit says so.
-            let run = &text[start..i];
-            let opens_sentence = text[..start]
-                .trim_end()
-                .chars()
-                .last()
-                .is_none_or(|c| matches!(c, '.' | '!' | '?' | ':' | ';'));
-            let named_anyway = run
-                .chars()
-                .skip(1)
-                .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-            if i - start >= 2
-                && (i == bytes.len() || !is_word_byte(bytes[i]))
-                && (!opens_sentence || named_anyway)
-            {
-                out.insert(run.to_string());
+            // the match must end on a word boundary.
+            if i - start >= 2 && (i == bytes.len() || !is_word_byte(bytes[i])) {
+                out.insert(text[start..i].to_string());
             }
         } else {
             i += 1;
@@ -1362,17 +1347,6 @@ mod tests {
         // mined behind the author's back.
         let empty = atom(json!({"text": "The Parser reads it.", "entities": []}));
         assert!(entities_of(&empty).is_empty());
-        // A sentence-opening capital is not a name; a second capital or a
-        // digit makes it one.
-        let opening: Map<String, Value> =
-            json!({"text": "Read the LMDB page. Snellius is down. GPU nodes wait for K80s."})
-                .as_object()
-                .unwrap()
-                .clone();
-        assert_eq!(
-            entities_of(&opening).into_iter().collect::<Vec<_>>(),
-            vec!["GPU".to_string(), "K80s".to_string(), "LMDB".to_string()]
-        );
         // The writing seat rides in `entities` and is not a topic.
         let stamped: Map<String, Value> = json!({"text": "x", "entities": ["seat:brio", "Cargo"]})
             .as_object()
