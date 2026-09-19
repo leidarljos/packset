@@ -893,6 +893,70 @@ mod snapshot_tests {
         assert_eq!(store.live("one").unwrap().len(), 1, "still correct");
     }
 
+    #[test]
+    fn the_index_follows_appends_rewrites_and_removals() {
+        let (_dir, store) = store();
+        for (id, text) in [
+            ("a", "alpha beta"),
+            ("b", "beta gamma"),
+            ("c", "gamma delta"),
+        ] {
+            store
+                .upsert(&record(json!({"id": id, "workspace": "w", "text": text})))
+                .unwrap();
+            assert_index_matches_a_fresh_build(&store, "w");
+        }
+        // A rewrite keeps its ordinal; the terms it dropped leave the index.
+        store
+            .upsert(&record(json!({
+                "id": "b", "workspace": "w", "text": "epsilon zeta", "ts": "2030-01-01T00:00:00.000Z"
+            })))
+            .unwrap();
+        assert_index_matches_a_fresh_build(&store, "w");
+        // A removal moves the order, so the set is rebuilt.
+        store.delete("w", "a", None).unwrap();
+        assert_index_matches_a_fresh_build(&store, "w");
+        store
+            .upsert(&record(
+                json!({"id": "d", "workspace": "w", "text": "delta eta"}),
+            ))
+            .unwrap();
+        assert_index_matches_a_fresh_build(&store, "w");
+    }
+
+    /// The index served after a write scores every term as an index built
+    /// from scratch over the same atoms would.
+    fn assert_index_matches_a_fresh_build(store: &Store, workspace: &str) {
+        let (atoms, index, documents) = store.searchable(workspace).unwrap();
+        let fresh_docs: Vec<Vec<String>> = atoms
+            .iter()
+            .map(packset_core::search::atom_tokens)
+            .collect();
+        assert_eq!(*documents, fresh_docs, "the cached tokens drifted");
+        let fresh = Index::build(fresh_docs.iter().map(Vec::as_slice));
+        assert_eq!(index.len(), fresh.len());
+        assert!((index.average_length() - fresh.average_length()).abs() < 1e-9);
+        for term in fresh_docs.iter().flatten().chain(
+            ["alpha", "beta", "gamma", "zeta"]
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .iter(),
+        ) {
+            assert!(
+                (index.idf(term) - fresh.idf(term)).abs() < 1e-9,
+                "idf of {term} drifted: {} vs {}",
+                index.idf(term),
+                fresh.idf(term)
+            );
+            assert_eq!(
+                index.occurrences_of(term),
+                fresh.occurrences_of(term),
+                "occurrences of {term} drifted"
+            );
+        }
+    }
+
     /// The whole safety argument for patching: whatever the snapshot says
     /// after a write has to be what a scan of the database would say.
     fn assert_matches_a_fresh_scan(store: &Store, workspace: &str) {

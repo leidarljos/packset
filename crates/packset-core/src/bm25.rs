@@ -162,6 +162,12 @@ impl Index {
         self.lengths.is_empty()
     }
 
+    /// How often a term occurs across the corpus, counting repeats.
+    #[must_use]
+    pub fn occurrences_of(&self, term: &str) -> u64 {
+        self.occurrences.get(term).copied().unwrap_or(0)
+    }
+
     /// Mean document length in tokens.
     #[must_use]
     pub fn average_length(&self) -> f64 {
