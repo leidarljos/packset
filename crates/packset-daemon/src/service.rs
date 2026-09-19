@@ -465,7 +465,8 @@ impl Service {
             // links can be re-selected when it fills; the rest of the pack
             // is not read.
             let narrowed = self.link_peers(&shape, peers);
-            let rewritten = record::apply_links(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
+            let rewritten =
+                record::apply_links_among(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
             for mut peer in rewritten {
                 peer.insert("ts".into(), Value::String(clock::utcnow()));
                 batch.push(peer);
@@ -504,7 +505,7 @@ impl Service {
     /// already link to: the claims sharing an entity with it, closed under
     /// their links, so re-selection sees every candidate it would have seen
     /// over the whole pack.
-    fn link_peers(&self, shape: &record::Shape, peers: &[Record]) -> Vec<Record> {
+    fn link_peers<'p>(&self, shape: &record::Shape, peers: &'p [Record]) -> Vec<&'p Record> {
         if shape.entities.is_empty() {
             return Vec::new();
         }
@@ -531,7 +532,7 @@ impl Service {
         }
         wanted
             .iter()
-            .filter_map(|id| by_id.get(id.as_str()).map(|p| (*p).clone()))
+            .filter_map(|id| by_id.get(id.as_str()).copied())
             .collect()
     }
 

@@ -462,15 +462,20 @@ pub fn is_due(atom: &Map<String, Value>, now: &str) -> bool {
     }
 }
 
-/// The names an atom is about: the declared `entities`, else capitalised runs
-/// and backtick names.
+/// The prefix of an entity that names the seat that wrote a claim rather
+/// than a thing the claim is about. It rides in `entities` so a reader can
+/// say whose claim it is; it is not a topic, so it links and matches nothing.
+pub const PROVENANCE_PREFIX: &str = "seat:";
+
+/// The names an atom is about: the declared `entities` less the provenance
+/// ones, else capitalised runs and backtick names.
 #[must_use]
 pub fn entities_of(atom: &Map<String, Value>) -> BTreeSet<String> {
     if let Some(Value::Array(items)) = atom.get("entities") {
         return items
             .iter()
             .map(|item| value_text(item).trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && !s.starts_with(PROVENANCE_PREFIX))
             .collect();
     }
     let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
@@ -654,6 +659,18 @@ pub fn apply_links(
     threshold: f64,
     now: &str,
 ) -> Vec<Map<String, Value>> {
+    let borrowed: Vec<&Map<String, Value>> = live.iter().collect();
+    apply_links_among(atom, &borrowed, threshold, now)
+}
+
+/// [`apply_links`] over peers already borrowed, so a writer that narrowed
+/// the pack to the peers that can qualify hands them over without a copy.
+pub fn apply_links_among(
+    atom: &mut Map<String, Value>,
+    live: &[&Map<String, Value>],
+    threshold: f64,
+    now: &str,
+) -> Vec<Map<String, Value>> {
     let atom_id = atom
         .get("id")
         .and_then(Value::as_str)
@@ -662,6 +679,7 @@ pub fn apply_links(
     // Borrowed; only the peers that change are cloned.
     let peers: Vec<&Map<String, Value>> = live
         .iter()
+        .copied()
         .filter(|other| {
             other.get("id").and_then(Value::as_str) != Some(atom_id.as_str()) && is_live(other, now)
         })
@@ -1329,6 +1347,15 @@ mod tests {
         // mined behind the author's back.
         let empty = atom(json!({"text": "The Parser reads it.", "entities": []}));
         assert!(entities_of(&empty).is_empty());
+        // The writing seat rides in `entities` and is not a topic.
+        let stamped: Map<String, Value> = json!({"text": "x", "entities": ["seat:brio", "Cargo"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            entities_of(&stamped).into_iter().collect::<Vec<_>>(),
+            vec!["Cargo".to_string()]
+        );
     }
 
     #[test]
