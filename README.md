@@ -43,73 +43,16 @@ $ packset island fusing two ballots     # the memories a task activates
 
 ## What holds
 
-- Writes are `remember` and `prefer`, two sentences at most, stored as
-  given. Nothing is extracted from a transcript. A retraction names the deed
-  that withdrew the claim.
-- A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty
-  thousand unset, `off` for none). The write that crosses the cap forgets
-  the least retrievable lessons, by the review model's own curve, as
-  tombstones marked `forgotten: the live cap`; a preference, a rule, a
-  reading, a goal, a trust row or a persona is never forgotten this way.
-  Many seats writing into one pack cannot grow it without bound, and every
-  claim carries `seat:<name>` among its entities, so a reader sees whose
-  lesson it is.
-- Every claim has a validity window and a review clock (FSRS,
-  doi:10.1145/3534678.3539081). Retrievability scales search by default
-  (`PACKSET_DECAY=off` turns it off): on a longitudinal corpus where one early claim is kept
-  recalled and three late paraphrases never are, it ranks the kept claim
-  first 0.947 of the time against 0.230 for lexical scoring alone and 0.270
-  for a recency half-life (`examples/forgetting.rs`).
-- Search fuses a prefix-and-edit scan, BM25+ over an index, and a dense
-  ballot when an encoder is present. Measured on LoCoMo: 0.736 hit@1 fused
-  against 0.752 published; on LongMemEval_S over every answerable question
-  (470), 0.914 recall@5 at session level with BM25+ alone and 0.949
-  recall@5 (0.889 hit@1, 0.981 recall@10) with the dense ballot fused in
-  over session documents. Mem0 and Zep publish answer accuracy on the same
-  benchmarks (doi:10.48550/arXiv.2504.19413, doi:10.48550/arXiv.2501.13956);
-  the same metric measured here with a local reader (Qwen2.5-7B-Instruct
-  Q5_K_M as reader and judge, LongMemEval's own prompts, top five sessions)
-  over all 470 answerable questions: the fused panel answers 0.549, the
-  lexical ballot alone 0.532, and the labelled sessions (the ceiling for
-  any retriever) 0.634; the fused panel leads where retrieval decides
-  (multi-session, single-session-user, preference) and the reader decides
-  the rest. On LoCoMo at turn granularity, same reader and judge, 1540
-  questions: the fused panel answers 0.637 with twenty turns and 0.577
-  with ten, the lexical ballot 0.488 with ten, the labelled evidence turns
-  0.747. `scripts/longmemeval_qa.py` runs it over the
-  harness's retrieval dump with any OpenAI-compatible reader and judge; the
-  explanation page says how to read the result.
-- A later claim closes the earlier one it rewrites: a rewrite, a correction
-  sharing an entity, or the same opening words with a new object; the
-  closed one keeps its window for an as-of read. `POST /v1/consolidate`
-  runs the rule over what is held and reports the pairs before writing.
-  On MemoryAgentBench's conflict-resolution split the same rule takes a
-  7B reader from 0.33 to 0.55 single-hop to 0.76 to 0.86, 0.480 over the
-  split, where the published retrieval baselines with a stronger reader
-  sit at 0.155 to 0.295. On its accurate-retrieval split the fused panel
-  answers 0.675 of 2000 questions with the same 7B reader, against the
-  published 0.605 (BM25) and 0.651 (HippoRAG-v2) with a hosted reader.
-- Claims link by shared names; links carry weights that use strengthens and
-  disuse decays; `island` returns the cluster a task activates.
-- A `trust` atom is one weighted edge of an influence graph, scoped to
-  domains by its entities; a `persona` atom is a voter with its own anchor.
-  Both are exported with the rest and read by the seat's consensus.
-- One logical write at a time. The hammer example (`scripts/terra/hammer.sbatch`),
-  each client remembering unique claims and searching for them, two searches
-  a remember, dense ballot on, eight cores:
+- Writes are `remember` and `prefer`, two sentences at most, stored as given. Nothing is extracted from a transcript.
+- Every claim has a validity window and a review clock (FSRS). Retrievability scales search; on a longitudinal corpus it ranks a recalled claim first 0.947 of the time against 0.230 for words alone.
+- A later claim closes the earlier one it rewrites; the closed one keeps its window for an as-of read. `consolidate` runs the rule over what is held.
+- Search fuses a prefix scan, BM25+ and a dense ballot. LongMemEval_S sessions: 0.889 hit@1; MemoryAgentBench accurate retrieval 0.675 and conflict resolution 0.579 with a 7B reader.
+- A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
+- Claims link by shared names; links carry weights that use strengthens; `island` returns the cluster a task activates.
+- One writer, one LMDB file. Zero errors at 32 clients; throughput peaks at four. A second host is a second pack; a signed handover crosses.
+- Trust rows and personas live in the pack and reach the seat's consensus.
 
-  | clients | requests | req/s | remember p50 / p99 | search p50 / p99 | errors |
-  |---|---|---|---|---|---|
-  | 1 | 600 | 156 | 7 ms / 12 ms | 5 ms / 6 ms | 0 |
-  | 4 | 2400 | 321 | 16 ms / 32 ms | 10 ms / 19 ms | 0 |
-  | 16 | 9600 | 209 | 77 ms / 221 ms | 64 ms / 145 ms | 0 |
-  | 32 | 19200 | 167 | 202 ms / 571 ms | 181 ms / 394 ms | 0 |
-
-  Throughput peaks at four clients and latency grows with the queue behind
-  the one write lock and the one encoder; nothing fails. A second writer
-  host is a second pack: the store is one LMDB home per host, never shared
-  over a network filesystem, and what crosses hosts is a signed handover
-  (`ljos handover`, `ljos receive`), not a socket.
+The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html) and in the [bench package](https://github.com/leidarljos/bench).
 
 ## Crates
 

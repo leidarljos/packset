@@ -74,10 +74,33 @@ pub fn sort_atoms(atoms: &[Record], now: &str) -> Vec<Record> {
                 .partial_cmp(&trust_of(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
+        .then_with(|| {
+            retrievability_of(b, now)
+                .partial_cmp(&retrievability_of(a, now))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .then_with(|| ts_of(b).cmp(ts_of(a)))
         .then_with(|| id_of(a).cmp(id_of(b)))
     });
     out
+}
+
+/// The review model's odds the claim is still recalled: from the last
+/// review, or the write, and the claim's stability. Within a tier this
+/// ranks a claim the seat kept recalling above a newer one it never asked
+/// for, where recency alone ranked the newer one first.
+fn retrievability_of(atom: &Record, now: &str) -> f64 {
+    let review = atom.get("review");
+    let last = review
+        .and_then(|r| r.get("last"))
+        .and_then(Value::as_str)
+        .or_else(|| atom.get("ts").and_then(Value::as_str))
+        .unwrap_or(now);
+    let stability = review
+        .and_then(|r| r.get("stability"))
+        .and_then(Value::as_f64)
+        .unwrap_or(record::DEFAULT_STABILITY);
+    crate::decay::retrievability(crate::clock::elapsed_days(last, now), stability)
 }
 
 /// Take atoms until the text budget is spent, always keeping the first.
@@ -407,6 +430,27 @@ mod tests {
         let bare = ids(&recall(&live, &[], &Hints::default(), Some(10), NOW));
         assert_eq!(bare.len(), 10);
         assert!(bare.iter().all(|i| i.starts_with("due")), "{bare:?}");
+    }
+
+    #[test]
+    fn a_recalled_claim_outranks_a_newer_unreviewed_one() {
+        // Kept: written a year ago, reviewed last week, stability of sixty
+        // days. Late: written a month ago, never reviewed, stability of one.
+        let live = vec![
+            atom(
+                json!({"id": "late", "text": "x", "trust": 1.0, "ts": "2025-12-01T00:00:00.000Z",
+                "due_at": "2099-01-01T00:00:00.000Z"}),
+            ),
+            atom(
+                json!({"id": "kept", "text": "x", "trust": 1.0, "ts": "2025-01-01T00:00:00.000Z",
+                "due_at": "2099-01-01T00:00:00.000Z",
+                "review": {"last": "2025-12-25T00:00:00.000Z", "stability": 60.0}}),
+            ),
+        ];
+        assert_eq!(
+            ids(&sort_atoms(&live, NOW)),
+            vec!["kept".to_string(), "late".to_string()]
+        );
     }
 
     #[test]
