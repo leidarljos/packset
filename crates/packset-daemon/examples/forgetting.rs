@@ -8,12 +8,20 @@
 //! a lexical scorer cannot tell them apart. LoCoMo and LongMemEval carry no
 //! review history, so this is the corpus that can measure the slot at all.
 //!
+//! Beside the three decay slots two orderings the review clock competes
+//! with: LRU, the newest hit first, which is what a cache would do; and
+//! keep-testing, the recall path's own order, which spends the budget on
+//! due claims before the neighbourhood. `FORGETTING_JSON=path` writes the
+//! table as JSON beside the printed one.
+//!
 //! ```console
 //! $ cargo run --release -p packset-daemon --example forgetting
+//! $ FORGETTING_JSON=results/forgetting.json cargo run --release -p packset-daemon --example forgetting
 //! ```
 
 use packset_core::bm25::Index;
 use packset_core::panel::Panel;
+use packset_core::recall::{recall, Hints};
 use packset_core::record::{schedule_review, Grade};
 use packset_core::search::{atom_tokens, merge_ballots, Record};
 use serde_json::{json, Value};
@@ -134,33 +142,82 @@ fn main() -> anyhow::Result<()> {
     println!(
         "{TOPICS} topics, one kept claim written in the first 30 days and recalled on its clock, {PARAPHRASES} paraphrases written after day 150 and never reviewed; asked on day {DAYS}\n"
     );
-    println!("| decay slot | kept claim first | mean rank of the kept claim |");
+    println!("| ordering | kept claim first | mean rank of the kept claim |");
     println!("|---|---|---|");
+    let mut rows: Vec<Value> = Vec::new();
+    let mut report = |name: &str, ranks: &[usize]| {
+        let first = ranks.iter().filter(|r| **r == 1).count();
+        let kept_first = first as f64 / TOPICS as f64;
+        let mean_rank = ranks.iter().sum::<usize>() as f64 / TOPICS as f64;
+        println!("| {name} | {kept_first:.3} | {mean_rank:.2} |");
+        rows.push(json!({"ordering": name, "kept_first": kept_first, "mean_rank": mean_rank}));
+    };
+    let rank_of = |ranked: &[Value], topic: usize| -> usize {
+        let kept = format!("t{topic}-v0");
+        ranked
+            .iter()
+            .position(|h| h["id"].as_str() == Some(kept.as_str()))
+            .map_or(10, |r| r + 1)
+    };
+    let cue_of = |topic: usize| format!("topic{topic} settled answer");
     for (name, panel) in &panels {
-        let mut first = 0usize;
-        let mut rank_sum = 0usize;
-        for topic in 0..TOPICS {
+        let ranks: Vec<usize> = (0..TOPICS)
+            .map(|topic| {
+                let cue = atom_tokens(
+                    json!({"text": cue_of(topic)})
+                        .as_object()
+                        .expect("an object"),
+                );
+                let ranked = merge_ballots(&[hits_for(&cue, &index, &atoms)], 10, panel, &now);
+                rank_of(&ranked, topic)
+            })
+            .collect();
+        report(name, &ranks);
+    }
+    // LRU: the lexical hits, newest write first. What a cache would keep.
+    let off = Panel::named("combmnz", "none", "off")?;
+    let ranks: Vec<usize> = (0..TOPICS)
+        .map(|topic| {
             let cue = atom_tokens(
-                json!({"text": format!("topic{topic} settled answer")})
+                json!({"text": cue_of(topic)})
                     .as_object()
                     .expect("an object"),
             );
-            let ranked = merge_ballots(&[hits_for(&cue, &index, &atoms)], 10, panel, &now);
-            let kept = format!("t{topic}-v0");
-            let rank = ranked
-                .iter()
-                .position(|h| h["id"].as_str() == Some(kept.as_str()))
-                .map_or(10, |r| r + 1);
-            if rank == 1 {
-                first += 1;
-            }
-            rank_sum += rank;
-        }
-        println!(
-            "| {name} | {:.3} | {:.2} |",
-            first as f64 / TOPICS as f64,
-            rank_sum as f64 / TOPICS as f64
-        );
+            let mut ranked = merge_ballots(&[hits_for(&cue, &index, &atoms)], 10, &off, &now);
+            ranked.sort_by(|a, b| {
+                b["ts"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(a["ts"].as_str().unwrap_or(""))
+            });
+            rank_of(&ranked, topic)
+        })
+        .collect();
+    report("lru (newest hit first)", &ranks);
+    // Keep-testing: the recall path as the seat runs it, the due queue
+    // ahead of the cue's neighbourhood, retrievability within each.
+    let ranks: Vec<usize> = (0..TOPICS)
+        .map(|topic| {
+            let hints = Hints {
+                text: cue_of(topic),
+                entities: Vec::new(),
+            };
+            let picked = recall(&atoms, &[], &hints, Some(10), &now);
+            let ranked: Vec<Value> = picked.into_iter().map(Value::Object).collect();
+            rank_of(&ranked, topic)
+        })
+        .collect();
+    report("keep-testing (recall: due first)", &ranks);
+    if let Ok(path) = std::env::var("FORGETTING_JSON") {
+        let body = json!({
+            "topics": TOPICS,
+            "paraphrases": PARAPHRASES,
+            "days": DAYS,
+            "asked_on": now,
+            "orderings": rows,
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&body)?)?;
+        eprintln!("wrote {path}");
     }
     Ok(())
 }
