@@ -2,7 +2,7 @@
 //! existing `memory.lmdb` opens here unchanged; the NUL makes a workspace
 //! scan a prefix scan.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -260,7 +260,7 @@ impl Store {
                 }
             }
             *seen = generation;
-            *shown = Arc::new(shown_from(stored));
+            patch_shown(shown, stored, written, &now);
         }
     }
 
@@ -455,6 +455,72 @@ fn shown_from(stored: &[Record]) -> Vec<Record> {
     let mut shown = stored.to_vec();
     record::filter_live_links(&mut shown);
     shown
+}
+
+/// Fold one write into the shown copy without rebuilding it: the written
+/// records are replaced, removed or appended, their links cut to live ids,
+/// and a departed id is cut from every other record's links. Equal to
+/// `shown_from(stored)`; a shown copy another reader still holds is cloned
+/// once by `Arc::make_mut`, an unshared one is edited in place.
+fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Record], now: &str) {
+    let live: HashSet<&str> = stored
+        .iter()
+        .filter_map(|a| a.get("id").and_then(Value::as_str))
+        .collect();
+    let out = Arc::make_mut(shown);
+    let mut departed: Vec<String> = Vec::new();
+    for record in written {
+        let Some(id) = record.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let at = out
+            .iter()
+            .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
+        if live.contains(id) && (record::is_live(record, now) || record::is_due(record, now)) {
+            let mut copy = record.clone();
+            cut_links(&mut copy, &live);
+            match at {
+                Some(i) => out[i] = copy,
+                None => out.push(copy),
+            }
+        } else {
+            if let Some(i) = at {
+                out.remove(i);
+            }
+            departed.push(id.to_string());
+        }
+    }
+    if !departed.is_empty() {
+        for atom in out.iter_mut() {
+            let dropped = atom
+                .get("links")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| departed.contains(&record::value_text(item)))
+                });
+            if dropped {
+                cut_links(atom, &live);
+            }
+        }
+    }
+}
+
+/// Keep only the links that name a live id.
+fn cut_links(atom: &mut Record, live: &HashSet<&str>) {
+    let kept: Vec<Value> = atom
+        .get("links")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| live.contains(record::value_text(item).as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    atom.insert("links".into(), Value::Array(kept));
 }
 
 fn push_record(out: &mut Vec<Record>, raw: &[u8]) {

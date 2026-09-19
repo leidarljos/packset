@@ -154,13 +154,10 @@ impl Service {
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
                 + 1;
-            let reps = review
-                .and_then(|r| r.get("reps"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let recalls = review.map_or(0, record::recalls_of);
             let mut changed = atom.clone();
             if neglected >= NEGLECT_LIMIT
-                && reps == 0
+                && recalls == 0
                 && FORGETTABLE_KINDS.contains(&kind)
                 && changed.get("pinned").and_then(Value::as_bool) != Some(true)
             {
@@ -491,6 +488,9 @@ impl Service {
         }
         let mut all = vec![atom.clone()];
         all.append(&mut batch);
+        // The snapshot is released first: a write patches the cached live
+        // set in place only while nobody else holds it.
+        drop(snapshot);
         self.store.upsert_many(&all)?;
         self.project_atoms(&all);
         let forgot = self.enforce_cap(&workspace, &now)?;

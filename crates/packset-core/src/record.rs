@@ -384,7 +384,9 @@ fn value_repr(v: &Value) -> String {
     }
 }
 
-fn value_text(v: &Value) -> String {
+/// A value as the text it names: a string as itself, anything else as JSON.
+#[must_use]
+pub fn value_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -981,6 +983,9 @@ pub fn schedule_review(
     };
     let mut stability = read("stability", DEFAULT_STABILITY);
     let mut difficulty = read("difficulty", DEFAULT_DIFFICULTY);
+    // Every recall the claim ever had. `reps` restarts at a lapse; this does
+    // not, so "never recalled" stays answerable after one.
+    let recalls = recalls_of(&previous);
 
     let mut review = Map::new();
     let span;
@@ -990,6 +995,7 @@ pub fn schedule_review(
             stability = (stability * 0.5).max(0.1);
             span = (stability.max(1.0) * 86_400.0) as i64;
             review.insert("reps".into(), 0.into());
+            review.insert("recalls".into(), recalls.into());
             review.insert("interval_s".into(), span.into());
             review.insert("ease".into(), number_or_null(Some(REVIEW_EASE)));
             review.insert("stability".into(), number_or_null(Some(stability)));
@@ -1018,6 +1024,7 @@ pub fn schedule_review(
             stability *= 1.0 + (1.0 - difficulty / 10.0).exp() * (1.0 - retr);
             span = (stability.max(1.0) * 86_400.0) as i64;
             review.insert("reps".into(), reps.into());
+            review.insert("recalls".into(), recalls.saturating_add(1).into());
             review.insert("interval_s".into(), span.into());
             review.insert("ease".into(), number_or_null(Some(REVIEW_EASE)));
             review.insert("stability".into(), number_or_null(Some(stability)));
@@ -1047,6 +1054,17 @@ pub fn schedule_review(
         atom.insert("due_at".into(), Value::String(due));
     }
     atom.insert("review".into(), Value::Object(review));
+}
+
+/// How many times a review block's claim was ever recalled: the `recalls`
+/// counter, else the `reps` run for a block written before the counter.
+#[must_use]
+pub fn recalls_of(review: &Map<String, Value>) -> u64 {
+    review
+        .get("recalls")
+        .and_then(Value::as_u64)
+        .or_else(|| review.get("reps").and_then(Value::as_u64))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
