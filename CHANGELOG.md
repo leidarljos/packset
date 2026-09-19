@@ -11,8 +11,21 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the queue first so a search sees its own writes. The replacement rule
   compares against the claims sharing a token, a head word or an entity
   with the new claim, read from postings over the shaped pack, not
-  against every live claim. The index cache keys on ids and stamps so
-  the live set stays unshared between writes and is patched in place.
+  against every live claim: a candidate carries six tenths of the new
+  claim's tokens (the overlap rule's jaccard 0.6), or opens with the
+  same three words (the head rule), or shares an entity (the correction
+  rule), or is named in `supersedes`; the duplicate check runs over the
+  same candidates. The index cache keys on ids and stamps so the live
+  set stays unshared between writes and is patched in place; a patch
+  re-derives links only when an id departs or an arrival is one a cut
+  link named. The pack is shaped once per process and each write shapes
+  what it wrote. A fill of 10000 claims on the build host went from
+  1224 s to 236 s, the hook on a prompt at 10000 from 0.18 s to 0.12 s
+  cold and 0.07 s warm.
+- `PACKSET_TRACE_WRITES=FILE` writes one stage-clock line per write
+  (prepare, snapshot, dedup, replace, links, upsert, project, cap, in
+  milliseconds, with the live count), which is how the growth above was
+  found and is what to read when a fill slows with the pack.
 
 ## 0.9.15 (2026-09-19)
 
