@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.20 (2026-09-20)
+
 - A persona's lens over the shared graph: `GET /v1/activate` and `POST
   /v1/fire` take `as=NAME`, the weights a persona fires are written under
   `link_weights_by[NAME]` and read back only through that lens. Nodes and
