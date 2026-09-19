@@ -16,8 +16,8 @@ fn main() -> anyhow::Result<()> {
             .nth(1)
             .unwrap_or_else(|| "data/paper_a_fixtures.jsonl".into()),
     );
-    let file = std::fs::File::open(&path)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let file =
+        std::fs::File::open(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     let mut table = packset_core::PaperATable::new();
     for line in std::io::BufReader::new(file).lines() {
         let line = line?;

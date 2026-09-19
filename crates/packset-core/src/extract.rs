@@ -14,7 +14,9 @@ pub fn admit_seat_write(text: &str) -> Option<SeatWrite> {
     let last = text.trim().lines().last()?.trim();
     let lower = last.to_ascii_lowercase();
     if let Some(rest) = strip_prefix_ci(&lower, last, "accept:") {
-        let id = rest.trim().trim_matches(|c: char| c == ':' || c.is_whitespace());
+        let id = rest
+            .trim()
+            .trim_matches(|c: char| c == ':' || c.is_whitespace());
         if id.len() >= 4 {
             return Some(SeatWrite::Accept(id.to_string()));
         }

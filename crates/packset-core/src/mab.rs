@@ -125,7 +125,9 @@ mod tests {
     #[test]
     fn raw_context_is_a_refusal_not_a_zero() {
         let mut p = ProtocolReport::new();
-        assert!(p.ingest("The user lives in Berlin and likes tea.").is_none());
+        assert!(p
+            .ingest("The user lives in Berlin and likes tea.")
+            .is_none());
         assert_eq!(p.refused, 1);
         assert_eq!(p.admitted, 0);
         assert!(p.ingest("Remember: pin the review set").is_some());
@@ -133,7 +135,10 @@ mod tests {
         assert_eq!(p.by_competency.len(), 4);
         assert!(p.by_competency["Test_Time_Learning"].rate().is_none());
         let table = p.table();
-        assert!(table.contains("| Test_Time_Learning | 0 | — | — |"), "{table}");
+        assert!(
+            table.contains("| Test_Time_Learning | 0 | — | — |"),
+            "{table}"
+        );
         assert!(table.contains("| refusal |"), "{table}");
     }
 

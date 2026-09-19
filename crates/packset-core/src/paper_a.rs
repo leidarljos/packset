@@ -71,9 +71,9 @@ impl PaperATable {
             })
             .unwrap_or_default();
         let claim = match admitted {
-            Some(crate::extract::SeatWrite::Lesson(c) | crate::extract::SeatWrite::Preference(c)) => {
-                c
-            }
+            Some(
+                crate::extract::SeatWrite::Lesson(c) | crate::extract::SeatWrite::Preference(c),
+            ) => c,
             Some(crate::extract::SeatWrite::Accept(_)) => return,
             None => return,
         };

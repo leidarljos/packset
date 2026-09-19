@@ -50,7 +50,14 @@ fn normal(text: &str) -> String {
 }
 
 fn bearing(claims: &[String], answers: &[String]) -> bool {
-    let hay = format!(" {} ", claims.iter().map(|c| normal(c)).collect::<Vec<_>>().join(" "));
+    let hay = format!(
+        " {} ",
+        claims
+            .iter()
+            .map(|c| normal(c))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     answers
         .iter()
         .map(|a| normal(a))
@@ -198,7 +205,12 @@ fn run_mab(path: &Path, fact_list: bool) -> anyhow::Result<Row> {
                         .filter_map(|x| x.as_str().map(str::to_string))
                         .collect()
                 })
-                .or_else(|| answers.get(i).and_then(Value::as_str).map(|s| vec![s.to_string()]))
+                .or_else(|| {
+                    answers
+                        .get(i)
+                        .and_then(Value::as_str)
+                        .map(|s| vec![s.to_string()])
+                })
                 .unwrap_or_default();
             ask(q, &ans, &claims, &mut row);
         }
@@ -219,9 +231,8 @@ fn print_row(name: &str, row: &Row) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let lme = std::env::var("PAPER_A_LME").map_err(|_| {
-        anyhow::anyhow!("PAPER_A_LME must name the LongMemEval_S json")
-    })?;
+    let lme = std::env::var("PAPER_A_LME")
+        .map_err(|_| anyhow::anyhow!("PAPER_A_LME must name the LongMemEval_S json"))?;
     let mab = PathBuf::from(std::env::var("PAPER_A_MAB").map_err(|_| {
         anyhow::anyhow!("PAPER_A_MAB must name the MemoryAgentBench jsonl directory")
     })?);
