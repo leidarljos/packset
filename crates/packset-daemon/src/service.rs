@@ -38,6 +38,8 @@ const ACTIVATION_HOPS: usize = 2;
 const CONSOLIDATE_BUCKET_MAX: usize = 64;
 /// How many of an island's strongest claims fire together when asked.
 const FIRE_TOP: usize = 8;
+/// How long the same claims stay fired: a second fire inside it is held.
+const FIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 
 pub struct Service {
     home: Home,
@@ -69,6 +71,11 @@ pub struct Service {
     /// that every write shapes what it wrote, so the postings stay whole
     /// without a pass over the pack.
     shaped: Mutex<BTreeSet<String>>,
+    /// When each set of claims last fired together, by workspace and the
+    /// sorted ids: a second fire within [`FIRE_WINDOW`] is held, so several
+    /// seats or personas closing sittings on one issue tighten its links
+    /// once, not once each.
+    fired_recently: Mutex<HashMap<String, std::time::Instant>>,
     /// Projection writes waiting for the search index, in arrival order. A
     /// write queues its documents and returns; one batch reaches the index
     /// binary a moment later, or before the next read of it. Projecting
@@ -260,6 +267,7 @@ impl Service {
             postings: RwLock::new(HashMap::new()),
             shaped: Mutex::new(BTreeSet::new()),
             swept: Mutex::new(HashMap::new()),
+            fired_recently: Mutex::new(HashMap::new()),
             projection: Arc::new(Mutex::new(Vec::new())),
             flush_scheduled: Arc::new(AtomicBool::new(false)),
         })
@@ -1564,6 +1572,21 @@ impl Service {
     /// The store's.
     pub fn fire(&self, workspace: &str, ids: &[String]) -> anyhow::Result<Value> {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut key: Vec<&str> = ids.iter().map(String::as_str).collect();
+        key.sort_unstable();
+        key.dedup();
+        let key = format!("{workspace}\u{0}{}", key.join("\u{0}"));
+        if let Ok(mut recent) = self.fired_recently.lock() {
+            let now = std::time::Instant::now();
+            if recent
+                .get(&key)
+                .is_some_and(|at| now.duration_since(*at) < FIRE_WINDOW)
+            {
+                return Ok(json!({"fired": 0, "changed": 0, "held": true}));
+            }
+            recent.retain(|_, at| now.duration_since(*at) < FIRE_WINDOW);
+            recent.insert(key, now);
+        }
         let live = self.store.live(workspace)?;
         let mut atoms: Vec<Record> = live.iter().cloned().collect();
         let fired: Vec<usize> = ids
@@ -1588,7 +1611,7 @@ impl Service {
             self.store.upsert_many(&batch)?;
             self.project_atoms(&batch);
         }
-        Ok(json!({"fired": fired.len(), "changed": changed.len()}))
+        Ok(json!({"fired": fired.len(), "changed": changed.len(), "held": false}))
     }
 
     /// Consolidate the live set: in the order they were written, every
@@ -1787,16 +1810,20 @@ impl Service {
                 })
             })
             .collect();
-        let fired = if fire && !weak {
+        let (fired, held) = if fire && !weak {
             let ids: Vec<String> = lit
                 .iter()
                 .take(FIRE_TOP)
                 .filter_map(|(at, _)| atoms[*at].get("id").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect();
-            self.fire(workspace, &ids)?["changed"].as_u64().unwrap_or(0)
+            let fired = self.fire(workspace, &ids)?;
+            (
+                fired["changed"].as_u64().unwrap_or(0),
+                fired["held"].as_bool().unwrap_or(false),
+            )
         } else {
-            0
+            (0, false)
         };
         Ok(json!({
             "island": island,
@@ -1806,6 +1833,7 @@ impl Service {
             "dense": crate::embed::binary().is_some(),
             "hops": ACTIVATION_HOPS,
             "fired": fired,
+            "held": held,
         }))
     }
 
@@ -2102,6 +2130,34 @@ mod tests {
         );
         // A second sweep the same day finds nothing: the reviews moved.
         assert_eq!(svc.sweep("w").unwrap()["lapsed"], json!(0));
+    }
+
+    #[test]
+    fn the_same_claims_fire_once_an_hour() {
+        let (_dir, svc) = service();
+        let mut ids = Vec::new();
+        for text in [
+            "Alpha links to Beta through the Fuse.",
+            "Beta links to Alpha through the Fuse.",
+            "Gamma stands beside the Fuse as well.",
+        ] {
+            let mut a = atom(text);
+            a.insert("kind".into(), json!("lesson"));
+            a.insert("entities".into(), json!(["Fuse"]));
+            ids.push(svc.add(a).unwrap()["id"].as_str().unwrap().to_string());
+        }
+        let first = svc.fire("w", &ids).unwrap();
+        assert_eq!(first["held"], json!(false));
+        let again = svc.fire("w", &ids).unwrap();
+        assert_eq!(again["held"], json!(true), "{again}");
+        assert_eq!(again["changed"], json!(0));
+        let mut other = ids.clone();
+        other.pop();
+        assert_eq!(
+            svc.fire("w", &other).unwrap()["held"],
+            json!(false),
+            "a different set fires"
+        );
     }
 
     #[test]
