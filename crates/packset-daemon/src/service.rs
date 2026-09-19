@@ -132,13 +132,22 @@ impl WriteTrace {
     }
 }
 
-/// The postings a shape is filed under: its tokens and head words as they
-/// are, its entities behind a marker so a name never meets a token.
+/// The postings a shape is filed under: its tokens as they are, its first
+/// head word and its entities behind markers so a name never meets a token.
 fn posting_terms(shape: &record::Shape) -> Vec<String> {
     let mut terms: BTreeSet<String> = shape.tokens.iter().cloned().collect();
-    terms.extend(shape.head.iter().cloned());
+    if let Some(head) = shape.head.first() {
+        terms.insert(format!("h:{head}"));
+    }
     terms.extend(shape.entities.iter().map(|e| format!("e:{e}")));
     terms.into_iter().collect()
+}
+
+/// Whether a stored claim says what the new one says: same text, kind and set.
+fn same_claim(existing: &Record, atom: &Record) -> bool {
+    existing.get("text") == atom.get("text")
+        && existing.get("kind") == atom.get("kind")
+        && existing.get("set") == atom.get("set")
 }
 
 /// One change the search index has yet to see.
@@ -428,8 +437,11 @@ impl Service {
         }
     }
 
-    /// The live claims a new claim could replace: those sharing a token, a
-    /// head word or an entity with it, and those it names in `supersedes`.
+    /// The live claims a new claim could replace or duplicate. The overlap
+    /// rule needs a token jaccard of 0.6, so a candidate carries at least
+    /// six tenths of the new claim's tokens, counted over the postings; the
+    /// head rule's candidates share its first head word, the correction
+    /// rule's an entity, and `supersedes` names the rest.
     fn replace_candidates<'a>(
         &self,
         atom: &Record,
@@ -438,7 +450,27 @@ impl Service {
     ) -> Vec<&'a Record> {
         let mut wanted: BTreeSet<&str> = BTreeSet::new();
         if let Ok(postings) = self.postings.read() {
-            for term in posting_terms(shape) {
+            let need = ((shape.tokens.len() as f64) * 0.6).ceil().max(1.0) as usize;
+            let mut hits: HashMap<&str, usize> = HashMap::new();
+            for token in &shape.tokens {
+                if let Some(ids) = postings.get(token) {
+                    for id in ids {
+                        if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
+                            *hits.entry(key).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            wanted.extend(
+                hits.into_iter()
+                    .filter(|(_, n)| *n >= need)
+                    .map(|(id, _)| id),
+            );
+            let mut exact: Vec<String> = shape.entities.iter().map(|e| format!("e:{e}")).collect();
+            if let Some(head) = shape.head.first() {
+                exact.push(format!("h:{head}"));
+            }
+            for term in exact {
                 if let Some(ids) = postings.get(&term) {
                     for id in ids {
                         if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
@@ -666,28 +698,35 @@ impl Service {
             }
             None => &snapshot,
         };
-        for existing in live {
-            if existing.get("text") == atom.get("text")
-                && existing.get("kind") == atom.get("kind")
-                && existing.get("set") == atom.get("set")
-            {
-                return Ok(existing.clone());
-            }
+        let shape = record::Shape::of(&atom);
+        // One id map per write serves the duplicate, replacement and linking
+        // rules; the candidates are the claims that could satisfy any of them.
+        self.shape_workspace_once(&workspace, live);
+        let by_id: HashMap<&str, &Record> = live
+            .iter()
+            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, p)))
+            .collect();
+        let candidates = self.replace_candidates(&atom, &shape, &by_id);
+        // A duplicate shares every token, so it is among the candidates; a
+        // claim with no tokens is compared against the whole set.
+        let same_text: Option<&Record> = if shape.tokens.is_empty() {
+            live.iter().find(|existing| same_claim(existing, &atom))
+        } else {
+            candidates
+                .iter()
+                .copied()
+                .find(|existing| same_claim(existing, &atom))
+        };
+        if let Some(existing) = same_text {
+            return Ok(existing.clone());
         }
 
         trace.mark("dedup");
         let now = clock::utcnow();
         let mut closed: Vec<String> = Vec::new();
         let mut batch = Vec::new();
-        let shape = record::Shape::of(&atom);
-        // One id map per write serves the replacement and the linking rules.
-        self.shape_workspace_once(&workspace, live);
-        let by_id: HashMap<&str, &Record> = live
-            .iter()
-            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, p)))
-            .collect();
         if record::is_live(&atom, &now) {
-            for existing in self.replace_candidates(&atom, &shape, &by_id) {
+            for existing in candidates {
                 let theirs = self.shape_of(existing);
                 if record::replaces_shaped(&atom, &shape, existing, &theirs) {
                     let mut peer = existing.clone();
