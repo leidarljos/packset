@@ -89,6 +89,9 @@ pub struct Store {
     /// The inverted index over one workspace's live atoms, per generation,
     /// kept beside the snapshot its ordinals index.
     terms: RwLock<HashMap<String, Searchable>>,
+    /// One index build at a time: readers that find the cache stale wait for
+    /// the build in flight and take its result, rather than each building.
+    terms_build: Mutex<()>,
 }
 
 impl Store {
@@ -122,6 +125,7 @@ impl Store {
             generation: AtomicU64::new(0),
             live: RwLock::new(HashMap::new()),
             terms: RwLock::new(HashMap::new()),
+            terms_build: Mutex::new(()),
         })
     }
 
@@ -296,11 +300,21 @@ impl Store {
     ///
     /// Fails when the scan does.
     pub fn live(&self, workspace: &str) -> anyhow::Result<Arc<Vec<Record>>> {
+        self.live_versioned(workspace).map(|(shown, _)| shown)
+    }
+
+    /// [`Self::live`] with the generation the set belongs to, for a cache
+    /// keyed on it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the scan does.
+    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<(Arc<Vec<Record>>, u64)> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.live.read() {
             if let Some((seen, _stored, shown, _dangling)) = cache.get(workspace) {
                 if *seen == generation {
-                    return Ok(Arc::clone(shown));
+                    return Ok((Arc::clone(shown), generation));
                 }
             }
         }
@@ -323,7 +337,7 @@ impl Store {
                 );
             }
         }
-        Ok(shared)
+        Ok((shared, generation))
     }
 
     /// One workspace's live atoms and the index over them, as a matched pair;
@@ -339,18 +353,15 @@ impl Store {
     ///
     /// Fails when the scan does.
     pub fn searchable(&self, workspace: &str) -> anyhow::Result<SearchSet> {
-        let generation = self.generation.load(Ordering::Acquire);
-        if let Ok(cache) = self.terms.read() {
-            if let Some((seen, (_, index, documents))) = cache.get(workspace) {
-                if *seen == generation {
-                    let atoms = self.live(workspace)?;
-                    if atoms.len() == index.len() {
-                        return Ok((atoms, Arc::clone(index), Arc::clone(documents)));
-                    }
-                }
-            }
+        if let Some(found) = self.searchable_cached(workspace)? {
+            return Ok(found);
         }
-        let atoms = self.live(workspace)?;
+        // One build at a time; a reader that waited looks again first.
+        let _build = self.terms_build.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(found) = self.searchable_cached(workspace)? {
+            return Ok(found);
+        }
+        let (atoms, generation) = self.live_versioned(workspace)?;
         // The stale set is taken out of the cache, so this thread holds its
         // only reference and the index is edited rather than copied.
         let previous = self
@@ -392,25 +403,35 @@ impl Store {
                 (Arc::new(index), Arc::new(documents))
             }
         };
-        // Same rule as the snapshot: cached only if nothing committed while
-        // this was built, since an index over a superseded pack served under
-        // the newer generation would never be rebuilt.
-        if self.generation.load(Ordering::Acquire) == generation {
-            if let Ok(mut cache) = self.terms.write() {
-                cache.insert(
-                    workspace.to_string(),
+        // Cached under the generation the set was read at: a reader at a
+        // later generation patches from it rather than rebuilding.
+        if let Ok(mut cache) = self.terms.write() {
+            cache.insert(
+                workspace.to_string(),
+                (
+                    generation,
                     (
-                        generation,
-                        (
-                            fingerprint(&atoms),
-                            Arc::clone(&index),
-                            Arc::clone(&documents),
-                        ),
+                        fingerprint(&atoms),
+                        Arc::clone(&index),
+                        Arc::clone(&documents),
                     ),
-                );
-            }
+                ),
+            );
         }
         Ok((atoms, index, documents))
+    }
+
+    /// The cached index when it matches the live set's generation.
+    fn searchable_cached(&self, workspace: &str) -> anyhow::Result<Option<SearchSet>> {
+        let (atoms, generation) = self.live_versioned(workspace)?;
+        if let Ok(cache) = self.terms.read() {
+            if let Some((seen, (_, index, documents))) = cache.get(workspace) {
+                if *seen == generation && atoms.len() == index.len() {
+                    return Ok(Some((atoms, Arc::clone(index), Arc::clone(documents))));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The atoms that were live at `at`, from a store scan since the snapshot
