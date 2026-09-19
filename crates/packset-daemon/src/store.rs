@@ -23,7 +23,7 @@ pub type Record = Map<String, Value>;
 
 /// One workspace's live set at a write count: as stored (what a write folds
 /// into) and as shown (links narrowed to ids present).
-type Snapshot = (u64, Vec<Record>, Arc<Vec<Record>>);
+type Snapshot = (u64, Vec<Record>, Arc<Vec<Record>>, HashSet<String>);
 
 /// A workspace's index at one generation: the id and stamp of each atom
 /// the index was built over, in order, beside the index and its tokens.
@@ -258,7 +258,7 @@ impl Store {
         let Ok(mut cache) = self.live.write() else {
             return;
         };
-        for (workspace, (seen, stored, shown)) in cache.iter_mut() {
+        for (workspace, (seen, stored, shown, dangling)) in cache.iter_mut() {
             // One behind is this write; anything else raced and the snapshot
             // is not a base this write can be added to.
             if *seen + 1 != generation {
@@ -285,7 +285,7 @@ impl Store {
                 }
             }
             *seen = generation;
-            patch_shown(shown, stored, written, &now);
+            patch_shown(shown, stored, written, &now, dangling);
         }
     }
 
@@ -312,13 +312,14 @@ impl Store {
             .into_iter()
             .filter(|atom| shown_at(atom, &now))
             .collect();
-        let shared = Arc::new(shown_from(&stored));
+        let (shown, dangling) = shown_from(&stored);
+        let shared = Arc::new(shown);
         // Cached only if nothing committed while the scan ran.
         if self.generation.load(Ordering::Acquire) == generation {
             if let Ok(mut cache) = self.live.write() {
                 cache.insert(
                     workspace.to_string(),
-                    (generation, stored, Arc::clone(&shared)),
+                    (generation, stored, Arc::clone(&shared), dangling),
                 );
             }
         }
@@ -507,27 +508,41 @@ fn shown_at(atom: &Record, now: &str) -> bool {
         && (record::is_live(atom, now) || record::is_due(atom, now))
 }
 
-fn shown_from(stored: &[Record]) -> Vec<Record> {
+/// The shown copy of a stored set, links cut to live ids, and the ids the
+/// cuts named: the targets a later arrival may restore.
+fn shown_from(stored: &[Record]) -> (Vec<Record>, HashSet<String>) {
+    let live: HashSet<&str> = stored
+        .iter()
+        .filter_map(|a| a.get("id").and_then(Value::as_str))
+        .collect();
+    let mut dangling = HashSet::new();
     let mut shown = stored.to_vec();
-    record::filter_live_links(&mut shown);
-    shown
+    for atom in &mut shown {
+        dangling.extend(cut_links(atom, &live));
+    }
+    (shown, dangling)
 }
 
 /// Fold one write into the shown copy without rebuilding it: the written
 /// records are replaced, removed or appended with their links cut to live
-/// ids, and every record whose links name an id that arrived or departed
-/// is re-derived from `stored`. Equal to `shown_from(stored)`; a shown copy
-/// another reader still holds is cloned once by `Arc::make_mut`, an
-/// unshared one is edited in place.
-fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Record], now: &str) {
+/// ids. A record whose link was cut because its target was absent is
+/// re-derived when that target arrives, and every record naming a departed
+/// id is re-derived when it departs; `dangling` is the set of ids that cut
+/// links name, so an arrival nobody named costs no scan. Equal to
+/// `shown_from(stored)`; a shown copy another reader still holds is cloned
+/// once by `Arc::make_mut`, an unshared one is edited in place.
+fn patch_shown(
+    shown: &mut Arc<Vec<Record>>,
+    stored: &[Record],
+    written: &[Record],
+    now: &str,
+    dangling: &mut HashSet<String>,
+) {
     let live: HashSet<&str> = stored
         .iter()
         .filter_map(|a| a.get("id").and_then(Value::as_str))
         .collect();
     let out = Arc::make_mut(shown);
-    // Only a departure can leave another record's link dangling: links are
-    // written from both ends, so a record naming an arrival is in `written`
-    // itself and was cut here.
     let mut moved: Vec<String> = Vec::new();
     for record in written {
         let Some(id) = record.get("id").and_then(Value::as_str) else {
@@ -538,15 +553,21 @@ fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Recor
             .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
         if live.contains(id) && shown_at(record, now) {
             let mut copy = record.clone();
-            cut_links(&mut copy, &live);
+            dangling.extend(cut_links(&mut copy, &live));
             match at {
                 Some(i) => out[i] = copy,
-                None => out.push(copy),
+                None => {
+                    out.push(copy);
+                    if dangling.remove(id) {
+                        moved.push(id.to_string());
+                    }
+                }
             }
         } else {
             if let Some(i) = at {
                 out.remove(i);
             }
+            dangling.insert(id.to_string());
             moved.push(id.to_string());
         }
     }
@@ -573,26 +594,37 @@ fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Recor
             .position(|a| a.get("id").and_then(Value::as_str) == Some(id))
         {
             let mut copy = atom.clone();
-            cut_links(&mut copy, &live);
+            dangling.extend(cut_links(&mut copy, &live));
             out[i] = copy;
         }
     }
 }
 
-/// Keep only the links that name a live id.
-fn cut_links(atom: &mut Record, live: &HashSet<&str>) {
+/// Keep only the links that name a live id; the ids of the links cut are
+/// returned, since an arrival of one of them restores the link.
+fn cut_links(atom: &mut Record, live: &HashSet<&str>) -> Vec<String> {
+    let mut cut = Vec::new();
     let kept: Vec<Value> = atom
         .get("links")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
-                .filter(|item| live.contains(record::value_text(item).as_str()))
+                .filter(|item| {
+                    let id = record::value_text(item);
+                    if live.contains(id.as_str()) {
+                        true
+                    } else {
+                        cut.push(id);
+                        false
+                    }
+                })
                 .cloned()
                 .collect()
         })
         .unwrap_or_default();
     atom.insert("links".into(), Value::Array(kept));
+    cut
 }
 
 fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
