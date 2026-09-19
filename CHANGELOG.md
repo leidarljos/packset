@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.16 (2026-09-19)
+
 - The write path stops reading the pack per write. The search index is
   projected in batches: a write queues its documents and returns, one
   indexer run lands the batch when the burst pauses (200 ms quiet, at
