@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The inverted index follows a write in place: a record rewritten at its
+  position is re-indexed under its ordinal, an appended record is
+  pushed, and only a set whose order moved is rebuilt. The first hook
+  after a write no longer tokenises and indexes the whole pack.
+
 ## 0.9.14 (2026-09-19)
 
 - Neglect reads the recalls a claim ever had, a counter no lapse resets,
