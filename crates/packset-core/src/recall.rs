@@ -11,6 +11,16 @@ use crate::record;
 
 /// Atoms returned when the caller names no limit, and the ceiling on any.
 pub const DEFAULT_LIMIT: usize = 64;
+
+/// The most of a recall budget the due queue may take when the caller
+/// asked about something: a quarter, one at least. A pack a herd writes
+/// into holds hundreds of due claims, and a recall that spent its whole
+/// budget on them answered no cue at all (the forgetting corpus: the kept
+/// claim ranked nowhere while retrievability alone ranked it first).
+#[must_use]
+pub fn due_share(cap: usize) -> usize {
+    (cap / 4).max(1)
+}
 /// Characters of atom text the answer may carry.
 pub const TEXT_BUDGET: usize = 32_000;
 
@@ -237,12 +247,21 @@ pub fn recall(
         return apply_budget(sorted.into_iter().take(cap).collect(), TEXT_BUDGET);
     }
 
-    let due: Vec<Record> = live
+    // With a cue in hand the due queue is narrowed to what touches it and
+    // bounded to a share of the budget; a bare recall is the review path
+    // and takes the whole queue.
+    let asked = !seeds.is_empty() || !hints.is_empty();
+    let mut due: Vec<Record> = live
         .iter()
         .filter(|a| record::is_due(a, now))
+        .filter(|a| !asked || hints.is_empty() || matches_hints(a, hints))
         .cloned()
         .collect();
     let seed_ids = resolve_seeds(&live, seeds, hints);
+    if asked {
+        due = sort_atoms(&due, now);
+        due.truncate(due_share(cap));
+    }
     if seed_ids.is_empty() && due.is_empty() {
         return Vec::new();
     }
@@ -323,6 +342,42 @@ mod tests {
         ];
         let got = sort_atoms(&live, NOW);
         assert_eq!(ids(&got), vec!["late".to_string(), "trusted".to_string()]);
+    }
+
+    #[test]
+    fn a_cue_is_not_buried_under_unrelated_due_claims() {
+        // Forty due claims about other matters, one live claim about the
+        // cue: the cue's claim is in the answer, and the due queue takes at
+        // most its share of the budget.
+        let mut live: Vec<Record> = (0..40)
+            .map(|i| {
+                atom(json!({
+                    "id": format!("due{i:02}"),
+                    "text": format!("unrelated matter number {i} still pending review"),
+                    "due_at": "2020-01-01T00:00:00.000Z",
+                    "ts": "2025-12-01T00:00:00.000Z"
+                }))
+            })
+            .collect();
+        live.push(atom(json!({
+            "id": "kept",
+            "text": "The settled answer on the fuse is CombMNZ.",
+            "ts": "2025-06-01T00:00:00.000Z",
+            "due_at": "2099-01-01T00:00:00.000Z"
+        })));
+        let hints = Hints {
+            text: "fuse settled answer".into(),
+            entities: Vec::new(),
+        };
+        let got = ids(&recall(&live, &[], &hints, Some(10), NOW));
+        assert!(got.contains(&"kept".to_string()), "{got:?}");
+        let due_taken = got.iter().filter(|i| i.starts_with("due")).count();
+        assert!(due_taken <= due_share(10), "{got:?}");
+        // Without a cue the whole due queue is the answer, as the review
+        // path wants.
+        let bare = ids(&recall(&live, &[], &Hints::default(), Some(10), NOW));
+        assert_eq!(bare.len(), 10);
+        assert!(bare.iter().all(|i| i.starts_with("due")), "{bare:?}");
     }
 
     #[test]
