@@ -458,22 +458,26 @@ impl Service {
     ) -> Vec<&'a Record> {
         let mut wanted: BTreeSet<&str> = BTreeSet::new();
         if let Ok(postings) = self.postings.read() {
+            // A claim that carries `need` of the tokens misses at most
+            // `tokens - need` of them, so it sits in at least one of the
+            // shortest `tokens - need + 1` posting lists. Those lists are the
+            // candidates; the long lists of the common words are not walked,
+            // and the rule itself decides each candidate.
             let need = ((shape.tokens.len() as f64) * 0.6).ceil().max(1.0) as usize;
-            let mut hits: HashMap<&str, usize> = HashMap::new();
-            for token in &shape.tokens {
-                if let Some(ids) = postings.get(token) {
-                    for id in ids {
-                        if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
-                            *hits.entry(key).or_insert(0) += 1;
-                        }
+            let mut lists: Vec<&Vec<String>> = shape
+                .tokens
+                .iter()
+                .filter_map(|token| postings.get(token))
+                .collect();
+            lists.sort_by_key(|ids| ids.len());
+            let take = shape.tokens.len().saturating_sub(need) + 1;
+            for ids in lists.iter().take(take) {
+                for id in ids.iter() {
+                    if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
+                        wanted.insert(key);
                     }
                 }
             }
-            wanted.extend(
-                hits.into_iter()
-                    .filter(|(_, n)| *n >= need)
-                    .map(|(id, _)| id),
-            );
             let mut exact: Vec<String> = shape.entities.iter().map(|e| format!("e:{e}")).collect();
             if let Some(head) = head_key(shape) {
                 exact.push(head);
