@@ -1295,7 +1295,7 @@ impl Service {
                 .unwrap_or(false)
             {
                 *tomb.entry(kind).or_insert(0) += 1;
-            } else if record::is_live(&rec, &now) {
+            } else if record::is_live(rec, &now) {
                 *live.entry(kind).or_insert(0) += 1;
             } else {
                 *expired.entry(kind).or_insert(0) += 1;
