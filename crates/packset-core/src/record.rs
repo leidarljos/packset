@@ -760,7 +760,8 @@ pub fn apply_links(
 }
 
 /// The ids one atom links to.
-fn links_of(atom: &Map<String, Value>) -> BTreeSet<String> {
+/// The ids a claim links to.
+pub fn links_of(atom: &Map<String, Value>) -> BTreeSet<String> {
     atom.get("links")
         .and_then(Value::as_array)
         .map(|items| items.iter().map(value_text).collect())
@@ -801,7 +802,7 @@ pub enum Grade {
 }
 
 /// Words used to tell a rewrite from a neighbour.
-fn tokens(text: &str) -> BTreeSet<String> {
+pub fn tokens(text: &str) -> BTreeSet<String> {
     text.split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_ascii_lowercase)
@@ -870,6 +871,53 @@ pub fn same_head(a: &[String], b: &[String]) -> bool {
 /// different sentences stay both live.
 #[must_use]
 pub fn replaces(new: &Map<String, Value>, old: &Map<String, Value>) -> bool {
+    replaces_shaped(new, &Shape::of(new), old, &Shape::of(old))
+}
+
+/// What the replacement and linking rules read of a claim, computed once.
+/// A claim's text never changes under its id, so a writer keeps one of
+/// these per id and stops tokenising the whole pack on every write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shape {
+    pub tokens: BTreeSet<String>,
+    pub head: Vec<String>,
+    pub entities: BTreeSet<String>,
+}
+
+impl Shape {
+    #[must_use]
+    pub fn of(atom: &Map<String, Value>) -> Self {
+        let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+        Self {
+            tokens: tokens(text),
+            head: head_tokens(text),
+            entities: entities_of(atom),
+        }
+    }
+}
+
+/// The overlap of two token sets, as [`token_jaccard`] reads it.
+#[must_use]
+pub fn shape_jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let inter = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// [`replaces`] with the shapes already in hand.
+pub fn replaces_shaped(
+    new: &Map<String, Value>,
+    new_shape: &Shape,
+    old: &Map<String, Value>,
+    old_shape: &Shape,
+) -> bool {
     if new.get("kind") != old.get("kind") {
         return false;
     }
@@ -891,17 +939,19 @@ pub fn replaces(new: &Map<String, Value>, old: &Map<String, Value>) -> bool {
             }
         }
     }
-    let new_entities = entities_of(new);
-    let old_entities = entities_of(old);
-    let shared: BTreeSet<_> = new_entities.intersection(&old_entities).cloned().collect();
-    if !new_entities.is_empty() && !old_entities.is_empty() && shared.is_empty() {
+    let shared = new_shape
+        .entities
+        .intersection(&old_shape.entities)
+        .next()
+        .is_some();
+    if !new_shape.entities.is_empty() && !old_shape.entities.is_empty() && !shared {
         return false;
     }
-    if new.get("kind").and_then(Value::as_str) == Some("correction") && !shared.is_empty() {
+    if new.get("kind").and_then(Value::as_str) == Some("correction") && shared {
         return true;
     }
-    token_jaccard(new_text, old_text) >= 0.6
-        || same_head(&head_tokens(new_text), &head_tokens(old_text))
+    shape_jaccard(&new_shape.tokens, &old_shape.tokens) >= 0.6
+        || same_head(&new_shape.head, &old_shape.head)
 }
 
 /// Close the live window. Search already drops atoms whose `valid_to` is past.
@@ -1074,6 +1124,30 @@ mod tests {
         assert!(reject_unsafe("plain text").is_ok());
         assert!(reject_unsafe("hidden\u{200b}text").is_err());
         assert!(reject_unsafe("\u{feff}bom").is_err());
+    }
+
+    #[test]
+    fn the_shaped_rule_agrees_with_the_rule() {
+        let pairs = [
+            ("The default fuse is Borda.", "The default fuse is CombMNZ."),
+            (
+                "The Parser reads the Header.",
+                "The Header comes before the Parser body.",
+            ),
+            (
+                "A wholly different claim about nothing shared.",
+                "The default fuse is CombMNZ.",
+            ),
+        ];
+        for (a, b) in pairs {
+            let old = atom(json!({"id": "o", "kind": "lesson", "text": a}));
+            let new = atom(json!({"id": "n", "kind": "lesson", "text": b}));
+            assert_eq!(
+                replaces(&new, &old),
+                replaces_shaped(&new, &Shape::of(&new), &old, &Shape::of(&old)),
+                "{a} / {b}"
+            );
+        }
     }
 
     #[test]

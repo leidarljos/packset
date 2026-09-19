@@ -3,8 +3,8 @@
 //! The HTTP layer decodes and encodes; everything a verb actually means lives
 //! here, so the rules can be tested without a socket.
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, RwLock};
 
 use packset_core::clock;
 use packset_core::record::{self, AtomError, MEMORY_CAP, USER_CAP};
@@ -51,6 +51,11 @@ pub struct Service {
     /// that crossed it, so a herd of seats writing into one pack cannot
     /// grow it without bound.
     live_cap: usize,
+    /// What the replacement and linking rules read of each claim, by id.
+    /// A claim's text never changes under its id, so a write tokenises the
+    /// pack once, not once per write; ten thousand writes took forty
+    /// times a thousand before this.
+    shapes: RwLock<HashMap<String, Arc<record::Shape>>>,
 }
 
 /// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand, a
@@ -96,7 +101,27 @@ impl Service {
             attach: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(()),
             live_cap: live_cap_from_env(),
+            shapes: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// The shape of a stored claim, computed the first time it is asked for.
+    fn shape_of(&self, atom: &Record) -> Arc<record::Shape> {
+        let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
+        if !id.is_empty() {
+            if let Ok(map) = self.shapes.read() {
+                if let Some(found) = map.get(id) {
+                    return Arc::clone(found);
+                }
+            }
+        }
+        let shape = Arc::new(record::Shape::of(atom));
+        if !id.is_empty() {
+            if let Ok(mut map) = self.shapes.write() {
+                map.insert(id.to_string(), Arc::clone(&shape));
+            }
+        }
+        shape
     }
 
     /// The same service with another live cap; zero is none.
@@ -290,9 +315,11 @@ impl Service {
         let now = clock::utcnow();
         let mut closed: Vec<String> = Vec::new();
         let mut batch = Vec::new();
+        let shape = record::Shape::of(&atom);
         if record::is_live(&atom, &now) {
             for existing in live {
-                if record::replaces(&atom, existing) {
+                let theirs = self.shape_of(existing);
+                if record::replaces_shaped(&atom, &shape, existing, &theirs) {
                     let mut peer = existing.clone();
                     record::close_valid_to(&mut peer, &now);
                     peer.insert("ts".into(), Value::String(clock::utcnow()));
@@ -334,7 +361,11 @@ impl Service {
                     .collect();
                 &remaining
             };
-            let rewritten = record::apply_links(&mut atom, peers, record::LINK_THRESHOLD, &now);
+            // Only a peer that shares a name can be linked, and only its
+            // links can be re-selected when it fills; the rest of the pack
+            // is not read.
+            let narrowed = self.link_peers(&shape, peers);
+            let rewritten = record::apply_links(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
             for mut peer in rewritten {
                 peer.insert("ts".into(), Value::String(clock::utcnow()));
                 batch.push(peer);
@@ -364,6 +395,41 @@ impl Service {
             atom.insert("forgot".into(), json!(forgot));
         }
         Ok(atom)
+    }
+
+    /// The peers a new claim can link to, with the claims those peers
+    /// already link to: the claims sharing an entity with it, closed under
+    /// their links, so re-selection sees every candidate it would have seen
+    /// over the whole pack.
+    fn link_peers(&self, shape: &record::Shape, peers: &[Record]) -> Vec<Record> {
+        if shape.entities.is_empty() {
+            return Vec::new();
+        }
+        let by_id: HashMap<&str, &Record> = peers
+            .iter()
+            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, p)))
+            .collect();
+        let mut wanted: BTreeSet<String> = BTreeSet::new();
+        for peer in peers {
+            let theirs = self.shape_of(peer);
+            if shape
+                .entities
+                .intersection(&theirs.entities)
+                .next()
+                .is_some()
+            {
+                if let Some(id) = peer.get("id").and_then(Value::as_str) {
+                    wanted.insert(id.to_string());
+                    for link in record::links_of(peer) {
+                        wanted.insert(link);
+                    }
+                }
+            }
+        }
+        wanted
+            .iter()
+            .filter_map(|id| by_id.get(id.as_str()).map(|p| (*p).clone()))
+            .collect()
     }
 
     /// Fill the vector slot when this seat has an encoder; null otherwise.
