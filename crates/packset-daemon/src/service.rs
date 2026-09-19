@@ -60,6 +60,11 @@ pub struct Service {
     /// pack once, not once per write; ten thousand writes took forty
     /// times a thousand before this.
     shapes: RwLock<HashMap<String, Arc<record::Shape>>>,
+    /// Which shaped claims carry each token, head word or entity. The
+    /// replacement rule needs a shared token, a shared head or a shared
+    /// entity, so a write compares against the claims these name and not
+    /// against the whole pack.
+    postings: RwLock<HashMap<String, Vec<String>>>,
     /// Projection writes waiting for the search index, in arrival order. A
     /// write queues its documents and returns; one batch reaches the index
     /// binary a moment later, or before the next read of it. Projecting
@@ -68,6 +73,15 @@ pub struct Service {
     projection: Arc<Mutex<Vec<ProjectionOp>>>,
     /// Whether a flush of the queue is already scheduled.
     flush_scheduled: Arc<AtomicBool>,
+}
+
+/// The postings a shape is filed under: its tokens and head words as they
+/// are, its entities behind a marker so a name never meets a token.
+fn posting_terms(shape: &record::Shape) -> Vec<String> {
+    let mut terms: BTreeSet<String> = shape.tokens.iter().cloned().collect();
+    terms.extend(shape.head.iter().cloned());
+    terms.extend(shape.entities.iter().map(|e| format!("e:{e}")));
+    terms.into_iter().collect()
 }
 
 /// One change the search index has yet to see.
@@ -169,6 +183,7 @@ impl Service {
             writes: Mutex::new(()),
             live_cap: live_cap_from_env(),
             shapes: RwLock::new(HashMap::new()),
+            postings: RwLock::new(HashMap::new()),
             swept: Mutex::new(HashMap::new()),
             projection: Arc::new(Mutex::new(Vec::new())),
             flush_scheduled: Arc::new(AtomicBool::new(false)),
@@ -323,11 +338,72 @@ impl Service {
         }
         let shape = Arc::new(record::Shape::of(atom));
         if !id.is_empty() {
-            if let Ok(mut map) = self.shapes.write() {
-                map.insert(id.to_string(), Arc::clone(&shape));
+            let fresh = self
+                .shapes
+                .write()
+                .map(|mut map| map.insert(id.to_string(), Arc::clone(&shape)).is_none())
+                .unwrap_or(false);
+            if fresh {
+                if let Ok(mut postings) = self.postings.write() {
+                    for term in posting_terms(&shape) {
+                        postings.entry(term).or_default().push(id.to_string());
+                    }
+                }
             }
         }
         shape
+    }
+
+    /// The live claims a new claim could replace: those sharing a token, a
+    /// head word or an entity with it, and those it names in `supersedes`.
+    /// Every live claim is shaped first, so the postings cover the pack.
+    fn replace_candidates<'a>(
+        &self,
+        atom: &Record,
+        shape: &record::Shape,
+        live: &'a [Record],
+    ) -> Vec<&'a Record> {
+        let mut by_id: HashMap<&str, &'a Record> = HashMap::with_capacity(live.len());
+        for existing in live {
+            if let Some(id) = existing.get("id").and_then(Value::as_str) {
+                by_id.insert(id, existing);
+                let shaped = self.shapes.read().is_ok_and(|m| m.contains_key(id));
+                if !shaped {
+                    self.shape_of(existing);
+                }
+            }
+        }
+        let mut wanted: BTreeSet<&str> = BTreeSet::new();
+        if let Ok(postings) = self.postings.read() {
+            for term in posting_terms(shape) {
+                if let Some(ids) = postings.get(&term) {
+                    for id in ids {
+                        if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
+                            wanted.insert(key);
+                        }
+                    }
+                }
+            }
+        }
+        match atom.get("supersedes") {
+            Some(Value::Array(ids)) => {
+                for id in ids {
+                    if let Some((key, _)) = by_id.get_key_value(record::value_text(id).as_str()) {
+                        wanted.insert(key);
+                    }
+                }
+            }
+            Some(Value::String(id)) => {
+                if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
+                    wanted.insert(key);
+                }
+            }
+            _ => {}
+        }
+        wanted
+            .into_iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect()
     }
 
     /// The same service with another live cap; zero is none.
@@ -526,7 +602,7 @@ impl Service {
         let mut batch = Vec::new();
         let shape = record::Shape::of(&atom);
         if record::is_live(&atom, &now) {
-            for existing in live {
+            for existing in self.replace_candidates(&atom, &shape, live) {
                 let theirs = self.shape_of(existing);
                 if record::replaces_shaped(&atom, &shape, existing, &theirs) {
                     let mut peer = existing.clone();
