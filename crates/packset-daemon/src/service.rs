@@ -4,6 +4,7 @@
 //! here, so the rules can be tested without a socket.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use packset_core::clock;
@@ -59,6 +60,58 @@ pub struct Service {
     /// pack once, not once per write; ten thousand writes took forty
     /// times a thousand before this.
     shapes: RwLock<HashMap<String, Arc<record::Shape>>>,
+    /// Projection writes waiting for the search index, in arrival order. A
+    /// write queues its documents and returns; one batch reaches the index
+    /// binary a moment later, or before the next read of it. Projecting
+    /// each write on its own ran the indexer once per claim, and a fill of
+    /// ten thousand claims spent most of its time there.
+    projection: Arc<Mutex<Vec<ProjectionOp>>>,
+    /// Whether a flush of the queue is already scheduled.
+    flush_scheduled: Arc<AtomicBool>,
+}
+
+/// One change the search index has yet to see.
+#[derive(Debug, Clone)]
+enum ProjectionOp {
+    Upsert(Value),
+    Delete(String),
+}
+
+/// How long a write's projection may wait for company before it is indexed.
+const PROJECTION_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Apply queued projection ops to the index at `dir`, consecutive runs of
+/// one kind as one batch, in arrival order.
+fn flush_projection_ops(ops: Vec<ProjectionOp>, dir: &std::path::Path) {
+    let mut upserts: Vec<Value> = Vec::new();
+    let mut deletes: Vec<String> = Vec::new();
+    let mut last_upsert = true;
+    for op in ops {
+        match op {
+            ProjectionOp::Upsert(doc) => {
+                if !last_upsert && !deletes.is_empty() {
+                    let _ = crate::milli::delete(&deletes, dir);
+                    deletes.clear();
+                }
+                last_upsert = true;
+                upserts.push(doc);
+            }
+            ProjectionOp::Delete(id) => {
+                if last_upsert && !upserts.is_empty() {
+                    let _ = crate::milli::upsert(&upserts, dir);
+                    upserts.clear();
+                }
+                last_upsert = false;
+                deletes.push(id);
+            }
+        }
+    }
+    if !upserts.is_empty() {
+        let _ = crate::milli::upsert(&upserts, dir);
+    }
+    if !deletes.is_empty() {
+        let _ = crate::milli::delete(&deletes, dir);
+    }
 }
 
 /// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand, a
@@ -110,7 +163,46 @@ impl Service {
             live_cap: live_cap_from_env(),
             shapes: RwLock::new(HashMap::new()),
             swept: Mutex::new(HashMap::new()),
+            projection: Arc::new(Mutex::new(Vec::new())),
+            flush_scheduled: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Queue changes for the search index and schedule one flush for them
+    /// and whatever arrives in the next moment.
+    fn queue_projection(&self, ops: Vec<ProjectionOp>) {
+        if ops.is_empty() {
+            return;
+        }
+        if let Ok(mut pending) = self.projection.lock() {
+            pending.extend(ops);
+        }
+        if self.flush_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.projection);
+        let scheduled = Arc::clone(&self.flush_scheduled);
+        let dir = self.home.milli_dir();
+        std::thread::spawn(move || {
+            std::thread::sleep(PROJECTION_DELAY);
+            scheduled.store(false, Ordering::Release);
+            let ops: Vec<ProjectionOp> = pending
+                .lock()
+                .map(|mut p| std::mem::take(&mut *p))
+                .unwrap_or_default();
+            flush_projection_ops(ops, &dir);
+        });
+    }
+
+    /// Bring the search index level with every write so far, now. A read
+    /// of the index calls this first, so a search sees its own writes.
+    pub fn flush_projection(&self) {
+        let ops: Vec<ProjectionOp> = self
+            .projection
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default();
+        flush_projection_ops(ops, &self.home.milli_dir());
     }
 
     /// Forgetting by neglect: a claim left due for longer than twice its
@@ -656,7 +748,7 @@ impl Service {
             other => other,
         };
         let tomb = self.store.delete(workspace, id, why)?;
-        let _ = crate::milli::delete(&[id.to_string()], &self.home.milli_dir());
+        self.queue_projection(vec![ProjectionOp::Delete(id.to_string())]);
         Ok(tomb)
     }
 
@@ -861,31 +953,23 @@ impl Service {
     /// Keep the projection level with a write: upsert a live atom, delete one
     /// that left the live set. No-op without a search binary.
     fn project_atoms(&self, atoms: &[Record]) {
-        let dir = self.home.milli_dir();
         let now = clock::utcnow();
-        let mut live = Vec::new();
-        let mut dead = Vec::new();
+        let mut ops = Vec::with_capacity(atoms.len());
         for atom in atoms {
             let Some(id) = atom.get("id").and_then(Value::as_str) else {
                 continue;
             };
             if record::is_live(atom, &now) || record::is_due(atom, &now) {
-                live.push(crate::milli::atom_document(atom));
+                ops.push(ProjectionOp::Upsert(crate::milli::atom_document(atom)));
             } else {
-                dead.push(id.to_string());
+                ops.push(ProjectionOp::Delete(id.to_string()));
             }
         }
-        if !live.is_empty() {
-            let _ = crate::milli::upsert(&live, &dir);
-        }
-        if !dead.is_empty() {
-            let _ = crate::milli::delete(&dead, &dir);
-        }
+        self.queue_projection(ops);
     }
 
     /// Keep the projection's copy of the cards level with a write.
     fn project_cards(&self, workspace: Option<&str>) {
-        let dir = self.home.milli_dir();
         let workspace = workspace.unwrap_or("");
         let user = cards::read_text(&self.home.user_path());
         let memory = if workspace.is_empty() {
@@ -894,9 +978,7 @@ impl Service {
             cards::read_text(&self.home.memory_path(workspace))
         };
         let docs = crate::milli::pack_documents(workspace, &user, &memory, &[]);
-        if !docs.is_empty() {
-            let _ = crate::milli::upsert(&docs, &dir);
-        }
+        self.queue_projection(docs.into_iter().map(ProjectionOp::Upsert).collect());
     }
 
     /// The atoms that were live at `at`, over the `valid_from` / `valid_to` window.
@@ -988,6 +1070,8 @@ impl Service {
             return Ok(json!({"hits": [], "engine": "linear", "as_of": as_of, "rerank": "off"}));
         }
 
+        // The index sees every write so far before it is asked.
+        self.flush_projection();
         let dir = self.home.milli_dir();
         let corpus = crate::milli::Corpus {
             workspace,
