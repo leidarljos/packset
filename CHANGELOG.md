@@ -2,6 +2,20 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.9.13 (2026-09-19)
+
+- Recall: with a cue in hand the due queue takes at most a quarter of the
+  budget and only claims that touch the cue; a hint matches an atom on
+  half its tokens rather than one; within a tier retrievability comes
+  before the write time. A pack a herd leaves with hundreds of due claims
+  no longer answers every cue with them.
+- `examples/forgetting.rs` ranks LRU and the recall path's due-first
+  order beside the decay slots and writes the table as JSON with
+  `FORGETTING_JSON`; the keep-testing order is a review order, not a
+  retrieval ranking (kept claim first 0.000 against 0.947 for
+  retrievability).
+- `scripts/terra/forgetting.sbatch` and `scripts/terra/hammer.sbatch`.
+
 ## 0.9.12 (2026-09-19)
 
 - A live cap: past `PACKSET_LIVE_CAP` live claims in a workspace (twenty
