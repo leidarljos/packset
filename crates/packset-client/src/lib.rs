@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// How long one request may take: `PACKSET_TIMEOUT_MS`, else thirty seconds.
@@ -33,6 +34,46 @@ fn path_seg(id: &str) -> String {
 /// The port a writer listens on when nothing names one. The command line,
 /// the server and this client agree on it, so a seat needs no variable set.
 pub const DEFAULT_PORT: u16 = 8761;
+
+/// Load `~/.config/ljos/env` (KEY=VALUE) when the process has not set
+/// those keys. `ljos`, `packset`, and `packset-mcp` then share one pack.
+pub fn load_seat_env() {
+    let Some(home) = env::var_os("HOME") else {
+        return;
+    };
+    let path = PathBuf::from(home).join(".config/ljos/env");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() || env::var_os(k).is_some() {
+            continue;
+        }
+        env::set_var(k, v.trim());
+    }
+}
+
+/// The workspace the seat's memory lives in: `PACKSET_WORKSPACE` after
+/// loading the seat env file, else `seat`. Not `default`, and not the
+/// working directory's git remote: those two are how one harness's
+/// remember missed the other's sitting.
+#[must_use]
+pub fn resolved_workspace() -> String {
+    load_seat_env();
+    env::var("PACKSET_WORKSPACE")
+        .ok()
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| "seat".to_string())
+}
 
 /// `PACKSET_PORT` (`GROK_MEM_PORT` is an alias), else [`DEFAULT_PORT`].
 #[must_use]
@@ -133,6 +174,7 @@ impl PacksetClient {
     /// line starts a writer on, `PACKSET_PORT` (`GROK_MEM_PORT`) or 8761.
     /// `PACKSET_URL=off` is the one way to have no pack.
     pub fn from_env() -> Result<Self, Error> {
+        load_seat_env();
         let url = env::var("PACKSET_URL")
             .or_else(|_| env::var("INSIDE_MEMORY_URL"))
             .ok()
@@ -543,5 +585,64 @@ impl PacksetClient {
             .map_err(|e| refused(&url, e))?
             .into_json()?;
         Ok(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_workspace_reads_ljos_env_not_default() {
+        let dir = std::env::temp_dir().join(format!("packset-ljos-env-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".config/ljos")).unwrap();
+        std::fs::write(
+            dir.join(".config/ljos/env"),
+            "PACKSET_WORKSPACE=git:example.com/seat/notes\n",
+        )
+        .unwrap();
+        let old_home = env::var("HOME").ok();
+        let old_ws = env::var("PACKSET_WORKSPACE").ok();
+        unsafe {
+            env::remove_var("PACKSET_WORKSPACE");
+            env::set_var("HOME", &dir);
+        }
+        let got = resolved_workspace();
+        unsafe {
+            match old_home {
+                Some(h) => env::set_var("HOME", h),
+                None => env::remove_var("HOME"),
+            }
+            match old_ws {
+                Some(w) => env::set_var("PACKSET_WORKSPACE", w),
+                None => env::remove_var("PACKSET_WORKSPACE"),
+            }
+        }
+        assert_eq!(got, "git:example.com/seat/notes");
+    }
+
+    #[test]
+    fn resolved_workspace_without_env_is_seat_not_default() {
+        let dir = std::env::temp_dir().join(format!("packset-no-ljos-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_home = env::var("HOME").ok();
+        let old_ws = env::var("PACKSET_WORKSPACE").ok();
+        unsafe {
+            env::remove_var("PACKSET_WORKSPACE");
+            env::set_var("HOME", &dir);
+        }
+        let got = resolved_workspace();
+        unsafe {
+            match old_home {
+                Some(h) => env::set_var("HOME", h),
+                None => env::remove_var("HOME"),
+            }
+            match old_ws {
+                Some(w) => env::set_var("PACKSET_WORKSPACE", w),
+                None => env::remove_var("PACKSET_WORKSPACE"),
+            }
+        }
+        assert_eq!(got, "seat");
+        assert_ne!(got, "default");
     }
 }
