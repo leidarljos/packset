@@ -46,7 +46,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | =GET /v1/islands?workspace== | the link graph's communities, largest first |
 | =GET /v1/hubs?workspace=&limit== | the claims the link graph turns on, highest first, with their scores |
 | =GET /v1/activate?workspace=&q=&limit=&fire== | the cluster a cue activates: top hits as seeds, two hops along the links; =fire=1= wires the top eight |
-| =POST /v1/fire= | =ids= that fired together: weights up, missing links made, other links decayed |
+| =POST /v1/fire= | =ids= that fired together: weights up, missing links made, other links decayed; the same set within an hour of its last fire is held (=held: true=), so several seats closing one issue tighten it once |
 | =POST /v1/consolidate= | the replacement rule over the live set in written order; =apply= false reports the pairs, true closes the earlier of each |
 | =GET /v1/accessions?workspace== | accessions the live claims cite |
 | =GET /v1/citers?workspace=&accession== | claims citing one accession |
