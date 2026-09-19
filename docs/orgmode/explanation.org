@@ -214,6 +214,16 @@ day or two carries more retrievability than a kept claim thirty days past
 its last review. The recency half-life slot stays off. Retrievability (=fsrs=) is the
 default a seat gets; =PACKSET_DECAY=off= turns scaling off.
 
+A claim nobody grades still forgets. A review left due past twice its
+interval is a review the seat missed, and the writer treats it as one: on
+the first write of a day it sweeps the workspace, lapses each such claim
+(stability halved, the miss counted) and reschedules it; a lesson never
+once recalled and missed three times is tombstoned, =forgotten:
+neglect=. Preferences, rules, readings, goals, trust rows and personas
+lapse but stay. =packset sweep= runs the same pass now. This is what
+keeps a pack a herd writes into from holding three hundred claims due
+with nobody to grade them.
+
 Two orderings the clock competes with sit below the table. LRU, the
 newest hit first, is what a cache keeps; it never finds the kept claim.
 Keep-testing is the recall path's own order, the due queue ahead of the
