@@ -121,6 +121,10 @@ pub struct Hit {
     pub ts: Option<String>,
     /// How many of the panel's ballots named this hit, and how many ran.
     /// Two of three is agreement; one of three is one scorer's opinion.
+    /// The atom's entities: `seat:<name>` names the seat that wrote it,
+    /// `persona:<name>` a persona's own claim, `habit:<name>` a reading.
+    #[serde(default)]
+    pub entities: Vec<String>,
     #[serde(default)]
     pub ballots: Option<u32>,
     #[serde(default)]

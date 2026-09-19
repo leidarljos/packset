@@ -328,6 +328,7 @@ fn atom_hit(atom: &Record, score: f64) -> Value {
         "text": atom.get("text").cloned().unwrap_or(Value::Null),
         "ts": atom.get("ts").cloned().unwrap_or(Value::Null),
         "due_at": atom.get("due_at").cloned().unwrap_or(Value::Null),
+        "entities": atom.get("entities").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "score": score,
     })
 }

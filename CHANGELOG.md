@@ -2,6 +2,19 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A live cap: past `PACKSET_LIVE_CAP` live claims in a workspace (twenty
+  thousand when unset, `off` for none) the write that crossed it forgets
+  the least retrievable forgettable claims, tombstoned with
+  `forgotten: the live cap`; preferences, rules, readings, goals, trust
+  rows and personas are never forgotten this way. The write's answer
+  says `forgot: N`; `/v1/status` says `live_cap`. A herd of seats writing
+  into one pack cannot grow it without bound.
+- Search hits carry the atom's `entities`, so a reader can see which seat
+  wrote a claim (`seat:<name>`), which persona holds it, which habit it
+  reads.
+
 ## 0.9.11 (2026-09-19)
 
 - Many seats may run `packset ensure` at once: a spawned writer that

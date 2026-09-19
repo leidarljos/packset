@@ -46,6 +46,14 @@ $ packset island fusing two ballots     # the memories a task activates
 - Writes are `remember` and `prefer`, two sentences at most, stored as
   given. Nothing is extracted from a transcript. A retraction names the deed
   that withdrew the claim.
+- A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty
+  thousand unset, `off` for none). The write that crosses the cap forgets
+  the least retrievable lessons, by the review model's own curve, as
+  tombstones marked `forgotten: the live cap`; a preference, a rule, a
+  reading, a goal, a trust row or a persona is never forgotten this way.
+  Many seats writing into one pack cannot grow it without bound, and every
+  claim carries `seat:<name>` among its entities, so a reader sees whose
+  lesson it is.
 - Every claim has a validity window and a review clock (FSRS,
   doi:10.1145/3534678.3539081). Retrievability scales search by default
   (`PACKSET_DECAY=off` turns it off): on a longitudinal corpus where one early claim is kept

@@ -46,6 +46,40 @@ pub struct Service {
     /// read-check-write a dedupe or a grade is, so two identical remembers
     /// arriving together must not both be stored.
     writes: Mutex<()>,
+    /// Most live claims a workspace holds; zero is no cap. Past it, the
+    /// least retrievable forgettable claims are tombstoned on the write
+    /// that crossed it, so a herd of seats writing into one pack cannot
+    /// grow it without bound.
+    live_cap: usize,
+}
+
+/// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand, a
+/// size at which the hook still answers a prompt in a tenth of a second.
+pub const DEFAULT_LIVE_CAP: usize = 20_000;
+
+/// Kinds the cap may forget. A standing choice, a rule, a reading, a goal, a
+/// trust row and a persona are what the seat is; a lesson it has not
+/// recalled is what it can afford to lose.
+pub const FORGETTABLE_KINDS: &[&str] = &[
+    "lesson",
+    "conclusion",
+    "summary",
+    "card_line",
+    "belief",
+    "voice",
+    "cache-pointer",
+    "correction",
+];
+
+fn live_cap_from_env() -> usize {
+    match std::env::var("PACKSET_LIVE_CAP") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_LIVE_CAP,
+            "off" | "none" => 0,
+            n => n.parse().unwrap_or(DEFAULT_LIVE_CAP),
+        },
+        Err(_) => DEFAULT_LIVE_CAP,
+    }
 }
 
 impl Service {
@@ -61,7 +95,81 @@ impl Service {
             store,
             attach: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(()),
+            live_cap: live_cap_from_env(),
         })
+    }
+
+    /// The same service with another live cap; zero is none.
+    #[must_use]
+    pub fn with_live_cap(mut self, cap: usize) -> Self {
+        self.live_cap = cap;
+        self
+    }
+
+    /// Most live claims a workspace holds before the least retrievable are
+    /// forgotten; zero is no cap.
+    #[must_use]
+    pub fn live_cap(&self) -> usize {
+        self.live_cap
+    }
+
+    /// Hold a workspace at the live cap: tombstone the least retrievable
+    /// forgettable claims until it fits. Retrievability is the review
+    /// model's, from the last review or the write and the claim's
+    /// stability, so a lesson recalled last week outlives one written a
+    /// month ago and never asked for. Returns how many were forgotten.
+    fn enforce_cap(&self, workspace: &str, now: &str) -> anyhow::Result<usize> {
+        if self.live_cap == 0 {
+            return Ok(0);
+        }
+        let live = self.store.live(workspace)?;
+        let over = live.len().saturating_sub(self.live_cap);
+        if over == 0 {
+            return Ok(0);
+        }
+        let mut ranked: Vec<(f64, String, Record)> = live
+            .iter()
+            .filter(|a| {
+                FORGETTABLE_KINDS.contains(&a.get("kind").and_then(Value::as_str).unwrap_or(""))
+                    && a.get("pinned").and_then(Value::as_bool) != Some(true)
+            })
+            .map(|a| {
+                let review = a.get("review");
+                let last = review
+                    .and_then(|r| r.get("last"))
+                    .and_then(Value::as_str)
+                    .or_else(|| a.get("ts").and_then(Value::as_str))
+                    .unwrap_or(now);
+                let stability = review
+                    .and_then(|r| r.get("stability"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(record::DEFAULT_STABILITY);
+                let r =
+                    packset_core::decay::retrievability(clock::elapsed_days(last, now), stability);
+                (r, last.to_string(), a.clone())
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let tombs: Vec<Record> = ranked
+            .into_iter()
+            .take(over)
+            .map(|(_, _, mut a)| {
+                a.insert("tombstone".into(), Value::Bool(true));
+                a.insert("ts".into(), Value::String(now.to_string()));
+                a.insert("forgotten".into(), Value::String("the live cap".into()));
+                a
+            })
+            .collect();
+        if tombs.is_empty() {
+            return Ok(0);
+        }
+        self.store.upsert_many(&tombs)?;
+        self.project_atoms(&tombs);
+        Ok(tombs.len())
     }
 
     /// The pack home.
@@ -251,6 +359,10 @@ impl Service {
         all.append(&mut batch);
         self.store.upsert_many(&all)?;
         self.project_atoms(&all);
+        let forgot = self.enforce_cap(&workspace, &now)?;
+        if forgot > 0 {
+            atom.insert("forgot".into(), json!(forgot));
+        }
         Ok(atom)
     }
 
@@ -1314,6 +1426,7 @@ impl Service {
             "workspace": workspace.unwrap_or(""),
             "set": pin,
             "live": live.values().sum::<usize>(),
+            "live_cap": self.live_cap,
             "tombstone": tomb.values().sum::<usize>(),
             "expired": expired.values().sum::<usize>(),
             "live_by_kind": live,
@@ -1417,6 +1530,67 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn the_live_cap_forgets_the_least_retrievable_lessons_first() {
+        let (_dir, svc) = service();
+        let svc = svc.with_live_cap(3);
+        // Four lessons written straight to the store with review stamps a
+        // month apart, and one preference, which the cap never touches.
+        let mut rows = Vec::new();
+        for (i, day) in ["01", "02", "03", "04"].iter().enumerate() {
+            let mut a = atom(&format!(
+                "Lesson number {i} stands alone on its own words {day}."
+            ));
+            a.insert(
+                "id".into(),
+                json!(format!("lesson000000000000000000000000000{i}")),
+            );
+            a.insert("ts".into(), json!(format!("2026-{day}-01T00:00:00.000Z")));
+            a.insert("kind".into(), json!("lesson"));
+            a.insert(
+                "review".into(),
+                json!({"last": format!("2026-{day}-01T00:00:00.000Z"), "stability": 1.0}),
+            );
+            rows.push(a);
+        }
+        let mut pref = atom("Prefer CombMNZ over RRF for two ballots.");
+        pref.insert("id".into(), json!("pref00000000000000000000000000000001"));
+        pref.insert("ts".into(), json!("2025-06-01T00:00:00.000Z"));
+        pref.insert("kind".into(), json!("preference"));
+        rows.push(pref);
+        svc.store().upsert_many(&rows).unwrap();
+        // The write that crosses the cap forgets the two least retrievable.
+        let written = svc
+            .add(atom(
+                "A fifth lesson arrives and the pack is over its cap today.",
+            ))
+            .unwrap();
+        assert_eq!(written["forgot"], json!(2), "{written:?}");
+        let live = svc.store().live("w").unwrap();
+        let ids: Vec<&str> = live
+            .iter()
+            .filter_map(|a| a.get("id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(live.len(), 3, "{ids:?}");
+        assert!(
+            ids.contains(&"pref00000000000000000000000000000001"),
+            "{ids:?}"
+        );
+        assert!(
+            ids.contains(&"lesson0000000000000000000000000003"),
+            "{ids:?}"
+        );
+        assert!(
+            !ids.contains(&"lesson0000000000000000000000000000"),
+            "{ids:?}"
+        );
+        assert!(
+            !ids.contains(&"lesson0000000000000000000000000001"),
+            "{ids:?}"
+        );
+        assert_eq!(svc.status(None).unwrap()["live_cap"], json!(3));
     }
 
     #[test]
