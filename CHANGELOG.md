@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.15 (2026-09-19)
+
+- An entity `seat:<name>` names the seat that wrote a claim and is not a
+  topic: it links and matches nothing. Every write carries one, so a
+  pack written by one seat had every claim sharing an entity with every
+  other and the link step read the whole pack on each write. The peers
+  that can qualify are handed to the link step borrowed, not cloned.
 - The inverted index follows a write in place: a record rewritten at its
   position is re-indexed under its ordinal, an appended record is
   pushed, and only a set whose order moved is rebuilt. The first hook
