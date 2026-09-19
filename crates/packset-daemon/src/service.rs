@@ -75,6 +75,59 @@ pub struct Service {
     flush_scheduled: Arc<AtomicBool>,
 }
 
+/// The stage clock of one write, written as a line to the file
+/// `PACKSET_TRACE_WRITES` names when it is set; nothing otherwise. A fill
+/// that grows slower with the pack is read from these lines, not guessed.
+struct WriteTrace {
+    path: Option<std::path::PathBuf>,
+    last: std::time::Instant,
+    stages: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl WriteTrace {
+    fn begin() -> Self {
+        Self {
+            path: std::env::var_os("PACKSET_TRACE_WRITES").map(std::path::PathBuf::from),
+            last: std::time::Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, stage: &'static str, took: std::time::Duration) {
+        if self.path.is_some() {
+            self.stages.push((stage, took));
+        }
+    }
+
+    fn mark(&mut self, stage: &'static str) {
+        if self.path.is_some() {
+            let now = std::time::Instant::now();
+            self.stages.push((stage, now - self.last));
+            self.last = now;
+        }
+    }
+
+    fn finish(&self, id: &str, live: usize) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        use std::io::Write;
+        let total: std::time::Duration = self.stages.iter().map(|(_, d)| *d).sum();
+        let mut line = format!("{id} live={live} total={:.1}ms", total.as_secs_f64() * 1e3);
+        for (stage, took) in &self.stages {
+            line.push_str(&format!(" {stage}={:.1}", took.as_secs_f64() * 1e3));
+        }
+        line.push('\n');
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
 /// The postings a shape is filed under: its tokens and head words as they
 /// are, its entities behind a marker so a name never meets a token.
 fn posting_terms(shape: &record::Shape) -> Vec<String> {
@@ -500,12 +553,16 @@ impl Service {
     pub fn add(&self, atom: Record) -> anyhow::Result<Record> {
         // Validation and the encoder run before the lock: the encode is the
         // slow part of a write and depends on the text alone.
+        let started = std::time::Instant::now();
         let atom = self.prepare(atom)?;
+        let prepared = started.elapsed();
         if let Some(ws) = atom.get("workspace").and_then(Value::as_str) {
             self.sweep_if_due(ws);
         }
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
-        self.add_prepared(atom)
+        let mut trace = WriteTrace::begin();
+        trace.add("prepare", prepared);
+        self.add_prepared_traced(atom, trace)
     }
 
     /// Check a claim and fill the fields that depend on nothing stored.
@@ -557,7 +614,16 @@ impl Service {
     }
 
     /// Store a prepared claim, or return the live one that already says it.
-    fn add_prepared(&self, mut atom: Record) -> anyhow::Result<Record> {
+    fn add_prepared(&self, atom: Record) -> anyhow::Result<Record> {
+        self.add_prepared_traced(atom, WriteTrace::begin())
+    }
+
+    /// [`Self::add_prepared`] with the stage clock a write's trace reads.
+    fn add_prepared_traced(
+        &self,
+        mut atom: Record,
+        mut trace: WriteTrace,
+    ) -> anyhow::Result<Record> {
         let workspace = atom
             .get("workspace")
             .and_then(Value::as_str)
@@ -568,6 +634,8 @@ impl Service {
         // Compared within its own scope; the shared snapshot is narrowed only
         // when the scope excludes something.
         let snapshot = self.store.live(&workspace)?;
+        let snapshot_len = snapshot.len();
+        trace.mark("snapshot");
         let narrowed: Vec<Record>;
         let live: &[Record] = match named.as_deref() {
             Some(name) => {
@@ -597,6 +665,7 @@ impl Service {
             }
         }
 
+        trace.mark("dedup");
         let now = clock::utcnow();
         let mut closed: Vec<String> = Vec::new();
         let mut batch = Vec::new();
@@ -627,6 +696,7 @@ impl Service {
                 }
             }
         }
+        trace.mark("replace");
         if record::is_live(&atom, &now) {
             // Closed peers stay out of apply_links: a rewrite of links would
             // otherwise write them back without valid_to.
@@ -672,17 +742,25 @@ impl Service {
         {
             record::schedule_review(&mut atom, &now, record::Grade::Initial, None);
         }
+        trace.mark("links");
         let mut all = vec![atom.clone()];
         all.append(&mut batch);
         // The snapshot is released first: a write patches the cached live
         // set in place only while nobody else holds it.
         drop(snapshot);
         self.store.upsert_many(&all)?;
+        trace.mark("upsert");
         self.project_atoms(&all);
+        trace.mark("project");
         let forgot = self.enforce_cap(&workspace, &now)?;
+        trace.mark("cap");
         if forgot > 0 {
             atom.insert("forgot".into(), json!(forgot));
         }
+        trace.finish(
+            atom.get("id").and_then(Value::as_str).unwrap_or(""),
+            snapshot_len,
+        );
         Ok(atom)
     }
 
