@@ -71,7 +71,7 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =text= | the claim: at most two sentences of at most twenty-five words |
 | =workspace= | required |
 | =set= | optional; a checked name |
-| =entities= | names the claim is about; an entity shaped like an accession must be one |
+| =entities= | names the claim is about; an entity shaped like an accession must be one; =seat:<name>= names the seat that wrote the claim and is not a topic, so it links and matches nothing |
 | =ts=, =valid_from=, =valid_to= | written, and the window it was true; =valid_to= closes on supersession |
 | =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object |
 | =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s= |
