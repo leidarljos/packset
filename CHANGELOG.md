@@ -2,8 +2,17 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.9.11 (2026-09-19)
 
+- Many seats may run `packset ensure` at once: a spawned writer that
+  exits on the port or the store lock waits for the sibling's writer
+  within the startup budget and reports it, and `ensure` waits for
+  `/health` to answer as packsetd before printing the URL.
+- Clippy with warnings denied is clean again: the stated MSRV is the
+  one the code needs (1.88), two unused encoder helpers are gone, one
+  test attribute on the workers test.
+- `scripts/terra/stack.sbatch` builds the pack's binaries on the build
+  host.
 - `cargo install packset` installs `packset` and `packsetd`.
 - `packset-mcp` loads `~/.config/ljos/env` and uses that
   `PACKSET_WORKSPACE`, else `seat`. It no longer defaults to `default`,
