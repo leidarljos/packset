@@ -1590,7 +1590,8 @@ mod tests {
             !ids.contains(&"lesson0000000000000000000000000001"),
             "{ids:?}"
         );
-        assert_eq!(svc.status(None).unwrap()["live_cap"], json!(3));
+        let panel = packset_core::Panel::named("rrf", "none", "off").unwrap();
+        assert_eq!(svc.status(None, &panel).unwrap()["live_cap"], json!(3));
     }
 
     #[test]
