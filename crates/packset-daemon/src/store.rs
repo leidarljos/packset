@@ -246,7 +246,7 @@ impl Store {
                 let Some(id) = record.get("id").and_then(Value::as_str) else {
                     continue;
                 };
-                let visible = record::is_live(record, &now) || record::is_due(record, &now);
+                let visible = shown_at(record, &now);
                 let at = stored
                     .iter()
                     .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
@@ -285,7 +285,7 @@ impl Store {
         let stored: Vec<Record> = self
             .scan(Some(workspace))?
             .into_iter()
-            .filter(|atom| record::is_live(atom, &now) || record::is_due(atom, &now))
+            .filter(|atom| shown_at(atom, &now))
             .collect();
         let shared = Arc::new(shown_from(&stored));
         // Cached only if nothing committed while the scan ran.
@@ -451,6 +451,17 @@ impl Store {
 }
 
 /// The live set as a reader sees it: links narrowed to the ids present.
+/// Whether the live set shows a record: live, or on the review clock; a
+/// tombstone is neither, whatever `due_at` it kept from before it was
+/// forgotten.
+fn shown_at(atom: &Record, now: &str) -> bool {
+    !atom
+        .get("tombstone")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && (record::is_live(atom, now) || record::is_due(atom, now))
+}
+
 fn shown_from(stored: &[Record]) -> Vec<Record> {
     let mut shown = stored.to_vec();
     record::filter_live_links(&mut shown);
@@ -458,17 +469,18 @@ fn shown_from(stored: &[Record]) -> Vec<Record> {
 }
 
 /// Fold one write into the shown copy without rebuilding it: the written
-/// records are replaced, removed or appended, their links cut to live ids,
-/// and a departed id is cut from every other record's links. Equal to
-/// `shown_from(stored)`; a shown copy another reader still holds is cloned
-/// once by `Arc::make_mut`, an unshared one is edited in place.
+/// records are replaced, removed or appended with their links cut to live
+/// ids, and every record whose links name an id that arrived or departed
+/// is re-derived from `stored`. Equal to `shown_from(stored)`; a shown copy
+/// another reader still holds is cloned once by `Arc::make_mut`, an
+/// unshared one is edited in place.
 fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Record], now: &str) {
     let live: HashSet<&str> = stored
         .iter()
         .filter_map(|a| a.get("id").and_then(Value::as_str))
         .collect();
     let out = Arc::make_mut(shown);
-    let mut departed: Vec<String> = Vec::new();
+    let mut moved: Vec<String> = Vec::new();
     for record in written {
         let Some(id) = record.get("id").and_then(Value::as_str) else {
             continue;
@@ -476,33 +488,48 @@ fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Recor
         let at = out
             .iter()
             .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
-        if live.contains(id) && (record::is_live(record, now) || record::is_due(record, now)) {
+        if live.contains(id) && shown_at(record, now) {
             let mut copy = record.clone();
             cut_links(&mut copy, &live);
             match at {
                 Some(i) => out[i] = copy,
-                None => out.push(copy),
+                None => {
+                    out.push(copy);
+                    moved.push(id.to_string());
+                }
             }
         } else {
             if let Some(i) = at {
                 out.remove(i);
             }
-            departed.push(id.to_string());
+            moved.push(id.to_string());
         }
     }
-    if !departed.is_empty() {
-        for atom in out.iter_mut() {
-            let dropped = atom
-                .get("links")
-                .and_then(Value::as_array)
-                .is_some_and(|items| {
-                    items
-                        .iter()
-                        .any(|item| departed.contains(&record::value_text(item)))
-                });
-            if dropped {
-                cut_links(atom, &live);
-            }
+    if moved.is_empty() {
+        return;
+    }
+    for atom in stored {
+        let names_moved = atom
+            .get("links")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| moved.contains(&record::value_text(item)))
+            });
+        if !names_moved {
+            continue;
+        }
+        let Some(id) = atom.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(i) = out
+            .iter()
+            .position(|a| a.get("id").and_then(Value::as_str) == Some(id))
+        {
+            let mut copy = atom.clone();
+            cut_links(&mut copy, &live);
+            out[i] = copy;
         }
     }
 }
