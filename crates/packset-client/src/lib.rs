@@ -429,6 +429,32 @@ impl PacksetClient {
         self.atoms_as_of(workspace, None)
     }
 
+    /// The live atoms of one kind in a workspace: personas, trust rows,
+    /// habits, without the rest of the pack.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn atoms_of_kind(
+        &self,
+        workspace: &str,
+        kind: &str,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        let url = format!("{}/v1/atoms", self.base);
+        let body: serde_json::Value = ureq::get(&url)
+            .query("workspace", workspace)
+            .query("kind", kind)
+            .timeout(timeout())
+            .call()
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
+        Ok(body
+            .get("atoms")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// The live atoms in a workspace that cite one deed accession.
     ///
     /// # Errors

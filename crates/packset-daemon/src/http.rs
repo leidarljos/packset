@@ -183,7 +183,17 @@ fn route(
                 Err(a) => a,
                 Ok(Some(at)) => answer(service.as_of(&workspace, &at)),
                 Ok(None) => match service.store().live(&workspace) {
-                    Ok(atoms) => Answer::ok(json!({ "atoms": atoms.as_ref() })),
+                    // `kind` narrows the answer to one kind, so a roster of
+                    // personas does not carry every lesson's embedding.
+                    Ok(atoms) => match query.get("kind").map(String::as_str) {
+                        Some(kind) if !kind.is_empty() => Answer::ok(json!({
+                            "atoms": atoms
+                                .iter()
+                                .filter(|a| a.get("kind").and_then(Value::as_str) == Some(kind))
+                                .collect::<Vec<_>>()
+                        })),
+                        _ => Answer::ok(json!({ "atoms": atoms.as_ref() })),
+                    },
                     Err(e) => Answer::err(400, e),
                 },
             },

@@ -1894,6 +1894,7 @@ impl Service {
         let mut live: BTreeMap<String, usize> = BTreeMap::new();
         let mut tomb: BTreeMap<String, usize> = BTreeMap::new();
         let mut expired: BTreeMap<String, usize> = BTreeMap::new();
+        let mut forgotten: BTreeMap<String, usize> = BTreeMap::new();
         let mut last_write = String::new();
         self.store.for_each(workspace, |rec| {
             let kind = rec
@@ -1912,6 +1913,9 @@ impl Service {
                 .unwrap_or(false)
             {
                 *tomb.entry(kind).or_insert(0) += 1;
+                if let Some(why) = rec.get("forgotten").and_then(Value::as_str) {
+                    *forgotten.entry(why.to_string()).or_insert(0) += 1;
+                }
             } else if record::is_live(rec, &now) {
                 *live.entry(kind).or_insert(0) += 1;
             } else {
@@ -1936,6 +1940,7 @@ impl Service {
             "expired": expired.values().sum::<usize>(),
             "live_by_kind": live,
             "tombstone_by_kind": tomb,
+            "forgotten_by_reason": forgotten,
             "expired_by_kind": expired,
             "last_write_ts": if last_write.is_empty() { Value::Null } else { Value::String(last_write) },
             "milli": {
