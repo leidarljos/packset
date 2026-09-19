@@ -1571,11 +1571,30 @@ impl Service {
     ///
     /// The store's.
     pub fn fire(&self, workspace: &str, ids: &[String]) -> anyhow::Result<Value> {
+        self.fire_as(workspace, ids, None)
+    }
+
+    /// [`Self::fire`] through a persona's lens: the weights move under its
+    /// name, the shared ones stand.
+    ///
+    /// # Errors
+    ///
+    /// The store's.
+    pub fn fire_as(
+        &self,
+        workspace: &str,
+        ids: &[String],
+        lens: Option<&str>,
+    ) -> anyhow::Result<Value> {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         let mut key: Vec<&str> = ids.iter().map(String::as_str).collect();
         key.sort_unstable();
         key.dedup();
-        let key = format!("{workspace}\u{0}{}", key.join("\u{0}"));
+        let key = format!(
+            "{workspace}\u{0}{}\u{0}{}",
+            lens.unwrap_or(""),
+            key.join("\u{0}")
+        );
         if let Ok(mut recent) = self.fired_recently.lock() {
             let now = std::time::Instant::now();
             if recent
@@ -1597,7 +1616,7 @@ impl Service {
                     .position(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
             })
             .collect();
-        let changed = packset_core::island::fire(&mut atoms, &fired);
+        let changed = packset_core::island::fire_as(&mut atoms, &fired, lens);
         if !changed.is_empty() {
             let now = clock::utcnow();
             let batch: Vec<Record> = changed
@@ -1753,9 +1772,27 @@ impl Service {
         panel: &packset_core::Panel,
         fire: bool,
     ) -> anyhow::Result<Value> {
+        self.activate_as(workspace, query, limit, panel, fire, None)
+    }
+
+    /// [`Self::activate`] through a persona's lens: the spread follows the
+    /// weights that persona wrote, and a fire writes them.
+    ///
+    /// # Errors
+    ///
+    /// The search's or the store's.
+    pub fn activate_as(
+        &self,
+        workspace: &str,
+        query: &str,
+        limit: usize,
+        panel: &packset_core::Panel,
+        fire: bool,
+        lens: Option<&str>,
+    ) -> anyhow::Result<Value> {
         let seeds = self.search(workspace, query, ACTIVATION_SEEDS, None, panel, None, false)?;
         let atoms = self.store.live(workspace)?;
-        let graph = packset_core::island::Graph::from_atoms(&atoms);
+        let graph = packset_core::island::Graph::from_atoms_as(&atoms, lens);
         let weighted: Vec<(usize, f64)> = seeds["hits"]
             .as_array()
             .map(|hits| {
@@ -1814,7 +1851,11 @@ impl Service {
             // The cue holds the island for the hour as the claims do: a
             // closing that grew the island by a lesson would otherwise fire
             // a new set for the same title.
-            let cue_key = format!("cue\u{0}{workspace}\u{0}{}", query.trim().to_lowercase());
+            let cue_key = format!(
+                "cue\u{0}{workspace}\u{0}{}\u{0}{}",
+                lens.unwrap_or(""),
+                query.trim().to_lowercase()
+            );
             let cue_held = self.fired_recently.lock().is_ok_and(|mut recent| {
                 let now = std::time::Instant::now();
                 if recent
@@ -1836,7 +1877,7 @@ impl Service {
                     .filter_map(|(at, _)| atoms[*at].get("id").and_then(Value::as_str))
                     .map(str::to_string)
                     .collect();
-                let fired = self.fire(workspace, &ids)?;
+                let fired = self.fire_as(workspace, &ids, lens)?;
                 (
                     fired["changed"].as_u64().unwrap_or(0),
                     fired["held"].as_bool().unwrap_or(false),
@@ -1854,6 +1895,7 @@ impl Service {
             "hops": ACTIVATION_HOPS,
             "fired": fired,
             "held": held,
+            "as": lens.unwrap_or(""),
         }))
     }
 

@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A persona's lens over the shared graph: `GET /v1/activate` and `POST
+  /v1/fire` take `as=NAME`, the weights a persona fires are written under
+  `link_weights_by[NAME]` and read back only through that lens. Nodes and
+  links stay the pack's; several personas walking one island each
+  tighten the paths they walked and the seat's graph moves only when the
+  seat fires. `PacksetClient::activate_as`, `fire_as`, `atoms_in_set`.
+
 ## 0.9.19 (2026-09-20)
 
 - The cue that fired an island holds it for the hour as the claims do:

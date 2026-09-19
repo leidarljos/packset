@@ -45,7 +45,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | =GET /v1/search?workspace=&q=&limit=&as_of=&rerank== | ranked hits, the engine, the stage |
 | =GET /v1/islands?workspace== | the link graph's communities, largest first |
 | =GET /v1/hubs?workspace=&limit== | the claims the link graph turns on, highest first, with their scores |
-| =GET /v1/activate?workspace=&q=&limit=&fire== | the cluster a cue activates: top hits as seeds, two hops along the links; =fire=1= wires the top eight |
+| =GET /v1/activate?workspace=&q=&limit=&fire=&as== | the cluster a cue activates: top hits as seeds, two hops along the links; =fire=1= wires the top eight; =as=NAME= reads and writes that persona's weights (=link_weights_by=), the shared ones untouched |
 | =POST /v1/fire= | =ids= that fired together: weights up, missing links made, other links decayed; the same set within an hour of its last fire is held (=held: true=), so several seats closing one issue tighten it once |
 | =POST /v1/consolidate= | the replacement rule over the live set in written order; =apply= false reports the pairs, true closes the earlier of each |
 | =GET /v1/accessions?workspace== | accessions the live claims cite |
@@ -77,6 +77,7 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s= |
 | =links= | peers by entity overlap, at most eight, chosen by relative-neighbourhood pruning; =fire= adds peers up to eight |
 | =link_weights= | weight per link in (0, 1], absent meaning 0.5; moved by =fire= |
+| =link_weights_by= | a persona's own weights by name, written by a fire =as= that persona and read only through its lens; the nodes and links stay shared |
 | =from=, =to=, =weight= | a =trust= row: one edge of an influence graph, weight in (0, 1]; =entities= scope it to domains |
 | =name=, =anchor= | a =persona=: a voter and how far it moves off its own ballot, in [0, 1]; the text is its view, =entities= its domains |
 

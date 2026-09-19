@@ -329,7 +329,11 @@ fn route(
                 if ids.len() < 2 {
                     return Answer::err(400, "ids: two or more claims that fired together");
                 }
-                answer(service.fire(&workspace, &ids))
+                let lens = body
+                    .get("as")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty());
+                answer(service.fire_as(&workspace, &ids, lens))
             }
         },
         (Method::Get, "/v1/islands") => match required(query, "workspace") {
@@ -358,7 +362,12 @@ fn route(
                     return Answer::err(400, "q required: the cue that activates");
                 }
                 let fire = crate::embed::requested(query.get("fire").map(String::as_str));
-                answer(service.activate(&workspace, &q, limit, panel, fire))
+                // `as` is a persona's lens: its weights on the way in and out.
+                let lens = query
+                    .get("as")
+                    .map(String::as_str)
+                    .filter(|s| !s.trim().is_empty());
+                answer(service.activate_as(&workspace, &q, limit, panel, fire, lens))
             }
         },
         (Method::Get, "/v1/search") => match required(query, "workspace") {

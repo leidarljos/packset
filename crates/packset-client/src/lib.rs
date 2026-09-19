@@ -563,10 +563,27 @@ impl PacksetClient {
 
     /// Claims that fired together: their links gain weight.
     pub fn fire(&self, workspace: &str, ids: &[String]) -> Result<serde_json::Value, Error> {
+        self.fire_as(workspace, ids, None)
+    }
+
+    /// [`Self::fire`] through a persona's lens: the weights move under its
+    /// name and the seat's stand.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn fire_as(
+        &self,
+        workspace: &str,
+        ids: &[String],
+        lens: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/fire", self.base);
         let body: serde_json::Value = ureq::post(&url)
             .timeout(timeout())
-            .send_json(serde_json::json!({"workspace": workspace, "ids": ids}))
+            .send_json(
+                serde_json::json!({"workspace": workspace, "ids": ids, "as": lens.unwrap_or("")}),
+            )
             .map_err(|e| refused(&url, e))?
             .into_json()?;
         Ok(body)
@@ -610,17 +627,61 @@ impl PacksetClient {
         limit: u32,
         fire: bool,
     ) -> Result<serde_json::Value, Error> {
+        self.activate_as(workspace, q, limit, fire, None)
+    }
+
+    /// [`Self::activate`] through a persona's lens: the spread follows the
+    /// weights that persona wrote, and a fire writes them.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn activate_as(
+        &self,
+        workspace: &str,
+        q: &str,
+        limit: u32,
+        fire: bool,
+        lens: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/activate", self.base);
-        let body: serde_json::Value = ureq::get(&url)
+        let mut req = ureq::get(&url)
             .query("workspace", workspace)
             .query("q", q)
             .query("limit", &limit.to_string())
             .query("fire", if fire { "1" } else { "0" })
+            .timeout(timeout());
+        if let Some(name) = lens.filter(|n| !n.trim().is_empty()) {
+            req = req.query("as", name);
+        }
+        let body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        Ok(body)
+    }
+
+    /// The live atoms of one named set in a workspace: a persona's own
+    /// conclusions, a pinned slice.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn atoms_in_set(
+        &self,
+        workspace: &str,
+        set: &str,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        let url = format!("{}/v1/pack", self.base);
+        let body: serde_json::Value = ureq::get(&url)
+            .query("workspace", workspace)
+            .query("set", set)
             .timeout(timeout())
             .call()
             .map_err(|e| refused(&url, e))?
             .into_json()?;
-        Ok(body)
+        Ok(body
+            .get("atoms")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default())
     }
 
     pub fn post_atom(&self, atom: &serde_json::Value) -> Result<serde_json::Value, Error> {

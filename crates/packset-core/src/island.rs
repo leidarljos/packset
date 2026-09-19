@@ -26,6 +26,14 @@ impl Graph {
     /// set is dropped.
     #[must_use]
     pub fn from_atoms(atoms: &[Record]) -> Self {
+        Self::from_atoms_as(atoms, None)
+    }
+
+    /// [`Self::from_atoms`] through a lens: the weights a persona wrote on
+    /// the edges it fired, the shared weight where it wrote none. The nodes
+    /// and the links are the pack's; only the weights are the persona's.
+    #[must_use]
+    pub fn from_atoms_as(atoms: &[Record], lens: Option<&str>) -> Self {
         let ids: Vec<String> = atoms
             .iter()
             .map(|a| {
@@ -52,7 +60,7 @@ impl Graph {
                 if i == j {
                     continue;
                 }
-                let weight = weight_of(atom, link);
+                let weight = weight_of_as(atom, link, lens);
                 // Both sides may carry a weight; the heavier one is the edge's.
                 let held = adjacency[i].entry(j).or_insert(0.0);
                 *held = held.max(weight);
@@ -110,12 +118,43 @@ fn weight_of(atom: &Record, peer: &str) -> f64 {
         .unwrap_or(WEIGHT_DEFAULT)
 }
 
+/// [`weight_of`] through a lens: the persona's own weight for the edge
+/// under `link_weights_by`, else the shared one.
+fn weight_of_as(atom: &Record, peer: &str, lens: Option<&str>) -> f64 {
+    lens.and_then(|name| {
+        atom.get("link_weights_by")
+            .and_then(|by| by.get(name))
+            .and_then(|w| w.get(peer))
+            .and_then(|w| w.as_f64())
+    })
+    .unwrap_or_else(|| weight_of(atom, peer))
+}
+
 fn set_weight(atom: &mut Record, peer: &str, weight: f64) {
     let entry = atom
         .entry("link_weights")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(map) = entry.as_object_mut() {
         map.insert(peer.to_string(), serde_json::json!(weight));
+    }
+}
+
+/// [`set_weight`] through a lens: written under `link_weights_by[lens]`,
+/// so a persona's fire moves its own paths and nobody else's.
+fn set_weight_as(atom: &mut Record, peer: &str, weight: f64, lens: Option<&str>) {
+    let Some(name) = lens else {
+        return set_weight(atom, peer, weight);
+    };
+    let by = atom
+        .entry("link_weights_by")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(by) = by.as_object_mut() {
+        let own = by
+            .entry(name.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(map) = own.as_object_mut() {
+            map.insert(peer.to_string(), serde_json::json!(weight));
+        }
     }
 }
 
@@ -146,6 +185,13 @@ fn add_link(atom: &mut Record, peer: &str) {
 /// [`LAMBDA`], the term Oja's rule adds to Hebb (doi:10.1007/BF00275687).
 /// Returns the positions whose record changed.
 pub fn fire(atoms: &mut [Record], fired: &[usize]) -> Vec<usize> {
+    fire_as(atoms, fired, None)
+}
+
+/// [`fire`] through a lens: the links made are the pack's, the weights
+/// moved are the persona's own, so several personas walking one island
+/// each tighten the paths they walked and leave the seat's graph as it was.
+pub fn fire_as(atoms: &mut [Record], fired: &[usize], lens: Option<&str>) -> Vec<usize> {
     let mut fired: Vec<usize> = fired.iter().copied().filter(|&i| i < atoms.len()).collect();
     fired.sort_unstable();
     fired.dedup();
@@ -185,12 +231,12 @@ pub fn fire(atoms: &mut [Record], fired: &[usize]) -> Vec<usize> {
             }
             // Both ends carry the edge's weight, so the decay is written on
             // the peer as well when it is in the set.
-            let w = weight_of(&atoms[i], &peer) * (1.0 - LAMBDA);
-            set_weight(&mut atoms[i], &peer, w);
+            let w = weight_of_as(&atoms[i], &peer, lens) * (1.0 - LAMBDA);
+            set_weight_as(&mut atoms[i], &peer, w, lens);
             changed.insert(i);
             if let Some(&j) = position.get(peer.as_str()) {
                 if j != i && !ids[i].is_empty() {
-                    set_weight(&mut atoms[j], &ids[i], w);
+                    set_weight_as(&mut atoms[j], &ids[i], w, lens);
                     changed.insert(j);
                 }
             }
@@ -218,10 +264,10 @@ pub fn fire(atoms: &mut [Record], fired: &[usize]) -> Vec<usize> {
                     add_link(&mut atoms[j], &id_i);
                 }
             }
-            let w = weight_of(&atoms[i], &id_j).max(weight_of(&atoms[j], &id_i));
+            let w = weight_of_as(&atoms[i], &id_j, lens).max(weight_of_as(&atoms[j], &id_i, lens));
             let w = (w + ETA * (1.0 - w)).min(1.0);
-            set_weight(&mut atoms[i], &id_j, w);
-            set_weight(&mut atoms[j], &id_i, w);
+            set_weight_as(&mut atoms[i], &id_j, w, lens);
+            set_weight_as(&mut atoms[j], &id_i, w, lens);
             changed.insert(i);
             changed.insert(j);
         }
@@ -709,6 +755,43 @@ mod tests {
 
     /// Firing a pair raises its weight toward one and decays the links they
     /// did not fire with; the heavier link then carries more activation.
+    #[test]
+    fn a_lens_moves_its_own_weights_and_leaves_the_shared_ones() {
+        let mut atoms: Vec<Record> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                serde_json::json!({"id": id, "text": id, "links": []})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        // Through the lens: a and b wire and weigh up under "reviewer" only.
+        let changed = fire_as(&mut atoms, &[0, 1], Some("reviewer"));
+        assert_eq!(changed.len(), 2);
+        assert!(has_link(&atoms[0], "b"), "the link made is the pack's");
+        assert_eq!(
+            weight_of(&atoms[0], "b"),
+            WEIGHT_DEFAULT,
+            "the shared weight stands"
+        );
+        assert!(weight_of_as(&atoms[0], "b", Some("reviewer")) > WEIGHT_DEFAULT);
+        assert_eq!(
+            weight_of_as(&atoms[0], "b", Some("reader")),
+            WEIGHT_DEFAULT,
+            "another lens reads the shared weight"
+        );
+        // The seat's own fire moves the shared weight and not the lens.
+        let before = weight_of_as(&atoms[0], "b", Some("reviewer"));
+        fire(&mut atoms, &[0, 1]);
+        assert!(weight_of(&atoms[0], "b") > WEIGHT_DEFAULT);
+        assert_eq!(weight_of_as(&atoms[0], "b", Some("reviewer")), before);
+        // The two graphs differ on that edge alone.
+        let shared = Graph::from_atoms(&atoms);
+        let lensed = Graph::from_atoms_as(&atoms, Some("reviewer"));
+        assert_eq!(shared.ids, lensed.ids);
+    }
+
     #[test]
     fn fire_together_wire_together() {
         let mut atoms = clique("a", 3);
