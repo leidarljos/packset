@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.19 (2026-09-20)
+
+- The cue that fired an island holds it for the hour as the claims do:
+  a closing that remembered a lesson first grew the island by one and
+  the next closing fired a new set for the same title. Eight closings on
+  one title now fire once; seven read `held`.
+
 ## 0.9.18 (2026-09-20)
 
 - An island fires once an hour: a second fire of the same claims within
