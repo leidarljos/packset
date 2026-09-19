@@ -5,6 +5,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - `cargo install packset` installs `packset` and `packsetd`.
+- `packset-mcp` loads `~/.config/ljos/env` and uses that
+  `PACKSET_WORKSPACE`, else `seat`. It no longer defaults to `default`,
+  which is how its search missed the workspace `ljos` remembers into.
 
 ## 0.9.9 (2026-09-15)
 

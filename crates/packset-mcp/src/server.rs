@@ -59,11 +59,13 @@ fn down(e: impl std::fmt::Display) -> McpError {
 
 #[tool_router]
 impl PacksetServer {
-    /// Read the port and workspace the seat uses, the same as the command line.
+    /// Read the port and workspace the seat uses, the same as `ljos doctor`.
+    /// Loads `~/.config/ljos/env` when those keys are unset. An absent
+    /// `PACKSET_WORKSPACE` is `seat`, not `default`.
     #[must_use]
     pub fn from_env() -> Self {
         let port = packset_client::default_port();
-        let workspace = std::env::var("PACKSET_WORKSPACE").unwrap_or_else(|_| "default".into());
+        let workspace = packset_client::resolved_workspace();
         Self { port, workspace }
     }
 
@@ -329,5 +331,35 @@ mod tests {
         assert_eq!(server.workspace_for(None), "sample");
         assert_eq!(server.workspace_for(Some("")), "sample");
         assert_eq!(server.workspace_for(Some("other")), "other");
+    }
+
+    #[test]
+    fn from_env_uses_ljos_env_workspace_not_default() {
+        let dir = std::env::temp_dir().join(format!("packset-mcp-env-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".config/ljos")).unwrap();
+        std::fs::write(
+            dir.join(".config/ljos/env"),
+            "PACKSET_WORKSPACE=git:example.com/seat/notes\n",
+        )
+        .unwrap();
+        let old_home = std::env::var("HOME").ok();
+        let old_ws = std::env::var("PACKSET_WORKSPACE").ok();
+        unsafe {
+            std::env::remove_var("PACKSET_WORKSPACE");
+            std::env::set_var("HOME", &dir);
+        }
+        let server = PacksetServer::from_env();
+        unsafe {
+            match old_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            match old_ws {
+                Some(w) => std::env::set_var("PACKSET_WORKSPACE", w),
+                None => std::env::remove_var("PACKSET_WORKSPACE"),
+            }
+        }
+        assert_eq!(server.workspace_for(None), "git:example.com/seat/notes");
+        assert_ne!(server.workspace_for(None), "default");
     }
 }
