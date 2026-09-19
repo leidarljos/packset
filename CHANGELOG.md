@@ -4,6 +4,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The write path stops reading the pack per write. The search index is
+  projected in batches: a write queues its documents and returns, one
+  indexer run lands the batch when the burst pauses (200 ms quiet, at
+  most three seconds or 512 documents), and a read of the index flushes
+  the queue first so a search sees its own writes. The replacement rule
+  compares against the claims sharing a token, a head word or an entity
+  with the new claim, read from postings over the shaped pack, not
+  against every live claim. The index cache keys on ids and stamps so
+  the live set stays unshared between writes and is patched in place.
+
 ## 0.9.15 (2026-09-19)
 
 - An entity `seat:<name>` names the seat that wrote a claim and is not a
