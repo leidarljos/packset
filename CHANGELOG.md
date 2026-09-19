@@ -4,6 +4,18 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.14 (2026-09-19)
+
+- Neglect reads the recalls a claim ever had, a counter no lapse resets,
+  where it read the run since the last lapse; a lesson recalled and then
+  missed is lapsed, not forgotten. A review block written before the
+  counter reads its `reps`.
+- A tombstone is never in the live set, whatever review clock it kept
+  from before it was forgotten; a forgotten claim is not recalled as due.
+- A write folds itself into the shown live set in place instead of
+  cloning every live record and refiltering every link; a fill of 10000
+  claims was quadratic. A link cut because its target was absent returns
+  when the target arrives.
 - Forgetting by neglect: a review left due past twice its interval is
   lapsed as a missed review would be, its stability halved and the miss
   counted; a never-recalled forgettable claim missed three times is
