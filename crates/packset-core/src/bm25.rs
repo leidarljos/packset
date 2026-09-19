@@ -69,31 +69,85 @@ pub struct Index {
     occurrences: HashMap<String, u64>,
 }
 
+/// Term frequencies of one document, in first-seen order.
+fn term_counts(tokens: &[String]) -> Vec<(&str, u32)> {
+    let mut order: Vec<(&str, u32)> = Vec::new();
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    for term in tokens {
+        match at.get(term.as_str()) {
+            Some(&i) => order[i].1 += 1,
+            None => {
+                at.insert(term.as_str(), order.len());
+                order.push((term.as_str(), 1));
+            }
+        }
+    }
+    order
+}
+
 impl Index {
     /// Build over tokenised documents; a document's ordinal is its position.
     #[must_use]
     pub fn build<'a>(documents: impl IntoIterator<Item = &'a [String]>) -> Self {
         let mut index = Self::default();
         for tokens in documents {
-            let ordinal = u32::try_from(index.lengths.len()).unwrap_or(u32::MAX);
-            index
-                .lengths
-                .push(u32::try_from(tokens.len()).unwrap_or(u32::MAX));
-            index.total_length += tokens.len() as u64;
-            let mut counts: HashMap<&str, u32> = HashMap::new();
-            for term in tokens {
-                *counts.entry(term.as_str()).or_insert(0) += 1;
-            }
-            for (term, count) in counts {
-                index
-                    .postings
-                    .entry(term.to_string())
-                    .or_default()
-                    .push((ordinal, count));
-                *index.occurrences.entry(term.to_string()).or_insert(0) += u64::from(count);
-            }
+            index.push(tokens);
         }
         index
+    }
+
+    /// Index one more document; its ordinal is the next position. A write
+    /// that appends to a corpus extends the index rather than rebuilding it.
+    pub fn push(&mut self, tokens: &[String]) {
+        let ordinal = u32::try_from(self.lengths.len()).unwrap_or(u32::MAX);
+        self.lengths
+            .push(u32::try_from(tokens.len()).unwrap_or(u32::MAX));
+        self.total_length += tokens.len() as u64;
+        for (term, count) in term_counts(tokens) {
+            self.postings
+                .entry(term.to_string())
+                .or_default()
+                .push((ordinal, count));
+            *self.occurrences.entry(term.to_string()).or_insert(0) += u64::from(count);
+        }
+    }
+
+    /// Re-index one document in place: the postings `old` gave it are taken
+    /// out and `new` is indexed under the same ordinal. A rewritten record
+    /// keeps its position in the corpus, so the rest of the index stands.
+    pub fn replace(&mut self, ordinal: usize, old: &[String], new: &[String]) {
+        let Ok(at) = u32::try_from(ordinal) else {
+            return;
+        };
+        if ordinal >= self.lengths.len() {
+            return;
+        }
+        for (term, count) in term_counts(old) {
+            if let Some(list) = self.postings.get_mut(term) {
+                list.retain(|(o, _)| *o != at);
+                if list.is_empty() {
+                    self.postings.remove(term);
+                }
+            }
+            if let Some(total) = self.occurrences.get_mut(term) {
+                *total = total.saturating_sub(u64::from(count));
+                if *total == 0 {
+                    self.occurrences.remove(term);
+                }
+            }
+        }
+        self.total_length = self
+            .total_length
+            .saturating_sub(u64::from(self.lengths[ordinal]));
+        self.lengths[ordinal] = u32::try_from(new.len()).unwrap_or(u32::MAX);
+        self.total_length += new.len() as u64;
+        for (term, count) in term_counts(new) {
+            let list = self.postings.entry(term.to_string()).or_default();
+            // Postings stay ordered by ordinal, as a build leaves them.
+            let slot = list.partition_point(|(o, _)| *o < at);
+            list.insert(slot, (at, count));
+            *self.occurrences.entry(term.to_string()).or_insert(0) += u64::from(count);
+        }
     }
 
     /// How many documents are indexed.

@@ -303,6 +303,12 @@ impl Store {
     /// One workspace's live atoms and the index over them, as a matched pair;
     /// cards are scored against the same corpus.
     ///
+    /// A write patches the live set in place, so the cached set is usually
+    /// the new one with records rewritten at their positions and appended at
+    /// the end. The index follows the same way: a rewritten record is
+    /// re-indexed under its ordinal, an appended one is pushed, and only a
+    /// set whose order moved is rebuilt from scratch.
+    ///
     /// # Errors
     ///
     /// Fails when the scan does.
@@ -316,36 +322,47 @@ impl Store {
             }
         }
         let atoms = self.live(workspace)?;
-        // Tokenising is most of what a rebuild costs. When the live set is the
-        // cached one with atoms appended, which is what a write does, only the
-        // new atoms are tokenised and the index is rebuilt from cached tokens.
+        // The stale set is taken out of the cache, so this thread holds its
+        // only reference and the index is edited rather than copied.
         let previous = self
             .terms
-            .read()
+            .write()
             .ok()
-            .and_then(|cache| cache.get(workspace).map(|(_, set)| set.clone()));
-        let documents: Arc<Vec<Vec<String>>> = Arc::new(match previous {
-            Some((old_atoms, _, old_documents))
+            .and_then(|mut cache| cache.remove(workspace))
+            .map(|(_, set)| set);
+        let (index, documents) = match previous {
+            Some((old_atoms, mut index, mut documents))
                 if old_atoms.len() <= atoms.len()
                     && old_atoms
                         .iter()
                         .zip(atoms.iter())
-                        .all(|(a, b)| a.get("id") == b.get("id") && a.get("ts") == b.get("ts")) =>
+                        .all(|(a, b)| a.get("id") == b.get("id")) =>
             {
-                let mut documents = (*old_documents).clone();
-                documents.extend(
-                    atoms[old_atoms.len()..]
-                        .iter()
-                        .map(packset_core::search::atom_tokens),
-                );
-                documents
+                let idx = Arc::make_mut(&mut index);
+                let docs = Arc::make_mut(&mut documents);
+                for (ordinal, (old, new)) in old_atoms.iter().zip(atoms.iter()).enumerate() {
+                    if old.get("ts") != new.get("ts") {
+                        let tokens = packset_core::search::atom_tokens(new);
+                        idx.replace(ordinal, &docs[ordinal], &tokens);
+                        docs[ordinal] = tokens;
+                    }
+                }
+                for atom in &atoms[old_atoms.len()..] {
+                    let tokens = packset_core::search::atom_tokens(atom);
+                    idx.push(&tokens);
+                    docs.push(tokens);
+                }
+                (index, documents)
             }
-            _ => atoms
-                .iter()
-                .map(packset_core::search::atom_tokens)
-                .collect(),
-        });
-        let index = Arc::new(Index::build(documents.iter().map(Vec::as_slice)));
+            _ => {
+                let documents: Vec<Vec<String>> = atoms
+                    .iter()
+                    .map(packset_core::search::atom_tokens)
+                    .collect();
+                let index = Index::build(documents.iter().map(Vec::as_slice));
+                (Arc::new(index), Arc::new(documents))
+            }
+        };
         // Same rule as the snapshot: cached only if nothing committed while
         // this was built, since an index over a superseded pack served under
         // the newer generation would never be rebuilt.
