@@ -1591,7 +1591,7 @@ mod tests {
         }
         let forgotten = svc
             .store()
-            .current("w", None)
+            .scan(Some("w"))
             .unwrap()
             .iter()
             .filter(|a| a.get("forgotten").is_some())
