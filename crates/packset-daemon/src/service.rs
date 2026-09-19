@@ -65,6 +65,10 @@ pub struct Service {
     /// entity, so a write compares against the claims these name and not
     /// against the whole pack.
     postings: RwLock<HashMap<String, Vec<String>>>,
+    /// Workspaces whose live set has been shaped once in this process; after
+    /// that every write shapes what it wrote, so the postings stay whole
+    /// without a pass over the pack.
+    shaped: Mutex<BTreeSet<String>>,
     /// Projection writes waiting for the search index, in arrival order. A
     /// write queues its documents and returns; one batch reaches the index
     /// binary a moment later, or before the next read of it. Projecting
@@ -237,6 +241,7 @@ impl Service {
             live_cap: live_cap_from_env(),
             shapes: RwLock::new(HashMap::new()),
             postings: RwLock::new(HashMap::new()),
+            shaped: Mutex::new(BTreeSet::new()),
             swept: Mutex::new(HashMap::new()),
             projection: Arc::new(Mutex::new(Vec::new())),
             flush_scheduled: Arc::new(AtomicBool::new(false)),
@@ -407,25 +412,30 @@ impl Service {
         shape
     }
 
+    /// Shape every live claim of a workspace the first time this process
+    /// writes to it, so the postings cover the pack; afterwards each write
+    /// shapes what it wrote.
+    fn shape_workspace_once(&self, workspace: &str, live: &[Record]) {
+        let first = self
+            .shaped
+            .lock()
+            .map(|mut set| set.insert(workspace.to_string()))
+            .unwrap_or(false);
+        if first {
+            for existing in live {
+                self.shape_of(existing);
+            }
+        }
+    }
+
     /// The live claims a new claim could replace: those sharing a token, a
     /// head word or an entity with it, and those it names in `supersedes`.
-    /// Every live claim is shaped first, so the postings cover the pack.
     fn replace_candidates<'a>(
         &self,
         atom: &Record,
         shape: &record::Shape,
-        live: &'a [Record],
+        by_id: &HashMap<&str, &'a Record>,
     ) -> Vec<&'a Record> {
-        let mut by_id: HashMap<&str, &'a Record> = HashMap::with_capacity(live.len());
-        for existing in live {
-            if let Some(id) = existing.get("id").and_then(Value::as_str) {
-                by_id.insert(id, existing);
-                let shaped = self.shapes.read().is_ok_and(|m| m.contains_key(id));
-                if !shaped {
-                    self.shape_of(existing);
-                }
-            }
-        }
         let mut wanted: BTreeSet<&str> = BTreeSet::new();
         if let Ok(postings) = self.postings.read() {
             for term in posting_terms(shape) {
@@ -670,8 +680,14 @@ impl Service {
         let mut closed: Vec<String> = Vec::new();
         let mut batch = Vec::new();
         let shape = record::Shape::of(&atom);
+        // One id map per write serves the replacement and the linking rules.
+        self.shape_workspace_once(&workspace, live);
+        let by_id: HashMap<&str, &Record> = live
+            .iter()
+            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, p)))
+            .collect();
         if record::is_live(&atom, &now) {
-            for existing in self.replace_candidates(&atom, &shape, live) {
+            for existing in self.replace_candidates(&atom, &shape, &by_id) {
                 let theirs = self.shape_of(existing);
                 if record::replaces_shaped(&atom, &shape, existing, &theirs) {
                     let mut peer = existing.clone();
@@ -719,7 +735,7 @@ impl Service {
             // Only a peer that shares a name can be linked, and only its
             // links can be re-selected when it fills; the rest of the pack
             // is not read.
-            let narrowed = self.link_peers(&shape, peers);
+            let narrowed = self.link_peers(peers, &shape, &by_id, &closed);
             let rewritten =
                 record::apply_links_among(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
             for mut peer in rewritten {
@@ -749,6 +765,7 @@ impl Service {
         // set in place only while nobody else holds it.
         drop(snapshot);
         self.store.upsert_many(&all)?;
+        self.shape_of(&atom);
         trace.mark("upsert");
         self.project_atoms(&all);
         trace.mark("project");
@@ -768,34 +785,50 @@ impl Service {
     /// already link to: the claims sharing an entity with it, closed under
     /// their links, so re-selection sees every candidate it would have seen
     /// over the whole pack.
-    fn link_peers<'p>(&self, shape: &record::Shape, peers: &'p [Record]) -> Vec<&'p Record> {
-        if shape.entities.is_empty() {
+    fn link_peers<'p>(
+        &self,
+        peers: &'p [Record],
+        shape: &record::Shape,
+        by_id: &HashMap<&str, &'p Record>,
+        closed: &[String],
+    ) -> Vec<&'p Record> {
+        if shape.entities.is_empty() || peers.is_empty() {
             return Vec::new();
         }
-        let by_id: HashMap<&str, &Record> = peers
-            .iter()
-            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, p)))
-            .collect();
-        let mut wanted: BTreeSet<String> = BTreeSet::new();
-        for peer in peers {
-            let theirs = self.shape_of(peer);
-            if shape
-                .entities
-                .intersection(&theirs.entities)
-                .next()
-                .is_some()
-            {
-                if let Some(id) = peer.get("id").and_then(Value::as_str) {
-                    wanted.insert(id.to_string());
-                    for link in record::links_of(peer) {
-                        wanted.insert(link);
+        // The peers sharing an entity come from the postings; a closed peer
+        // is out, as it is out of `peers`.
+        let mut wanted: BTreeSet<&str> = BTreeSet::new();
+        if let Ok(postings) = self.postings.read() {
+            for entity in &shape.entities {
+                if let Some(ids) = postings.get(&format!("e:{entity}")) {
+                    for id in ids {
+                        if closed.iter().any(|c| c == id) {
+                            continue;
+                        }
+                        if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
+                            wanted.insert(key);
+                        }
                     }
                 }
             }
         }
+        let mut linked: Vec<String> = Vec::new();
+        for id in &wanted {
+            if let Some(peer) = by_id.get(id) {
+                linked.extend(record::links_of(peer));
+            }
+        }
+        for id in &linked {
+            if closed.iter().any(|c| c == id) {
+                continue;
+            }
+            if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
+                wanted.insert(key);
+            }
+        }
         wanted
-            .iter()
-            .filter_map(|id| by_id.get(id.as_str()).copied())
+            .into_iter()
+            .filter_map(|id| by_id.get(id).copied())
             .collect()
     }
 

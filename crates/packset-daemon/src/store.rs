@@ -525,6 +525,9 @@ fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Recor
         .filter_map(|a| a.get("id").and_then(Value::as_str))
         .collect();
     let out = Arc::make_mut(shown);
+    // Only a departure can leave another record's link dangling: links are
+    // written from both ends, so a record naming an arrival is in `written`
+    // itself and was cut here.
     let mut moved: Vec<String> = Vec::new();
     for record in written {
         let Some(id) = record.get("id").and_then(Value::as_str) else {
@@ -538,10 +541,7 @@ fn patch_shown(shown: &mut Arc<Vec<Record>>, stored: &[Record], written: &[Recor
             cut_links(&mut copy, &live);
             match at {
                 Some(i) => out[i] = copy,
-                None => {
-                    out.push(copy);
-                    moved.push(id.to_string());
-                }
+                None => out.push(copy),
             }
         } else {
             if let Some(i) = at {
