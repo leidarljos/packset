@@ -90,6 +90,9 @@ fn det(a: &mut [Vec<f64>]) -> f64 {
         out *= pv;
         for r in (i + 1)..n {
             let f = a[r][i] / pv;
+            // Row r is written while row i is read, so an iterator over one of
+            // them would borrow the matrix twice.
+            #[allow(clippy::needless_range_loop)]
             for c in i..n {
                 a[r][c] -= f * a[i][c];
             }

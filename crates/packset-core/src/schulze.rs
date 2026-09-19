@@ -1,8 +1,14 @@
 //! Schulze beatpath: pairwise counts, then strongest paths.
 //!
-//! d[i,j] is how many ballots rank i above j (top-k). i beats j
+//! `d[i,j]` is how many ballots rank i above j (top-k). i beats j
 //! when the strongest i->j path is stronger than j->i. Floyd-style
-//! widest paths. Ties break first-seen.
+//! widest paths.
+//!
+//! The linear order is by how many others a candidate beats that way,
+//! first-seen breaking a tie. Ordering by the pairwise comparison
+//! itself is not sound: the relation is transitive, but broken by
+//! first-seen it is not, and three candidates can tie pairwise in a
+//! pattern that sends a before b, b before c and c before a.
 //!
 //! Schulze, A new monotonic, clone-independent, reversal
 //! symmetric, and condorcet-consistent single-winner election
@@ -89,11 +95,26 @@ where
         }
     }
 
+    // How many others each candidate beats on the strongest paths.
+    //
+    // Sorting by the beatpath comparison itself is not sound. The relation is
+    // transitive, which is Schulze's theorem, but the relation broken by
+    // first-seen order is not: three candidates can tie pairwise in a pattern
+    // where the tie-break sends a before b, b before c, and c before a. A sort
+    // handed that comparator has no correct answer to give, and the standard
+    // library says so by panicking rather than returning a wrong order.
+    //
+    // The win count is an integer, so ordering by it is total by construction,
+    // and it never contradicts the relation: if a beats b then a also beats
+    // everything b beats, by that same transitivity, plus b itself.
+    let wins: Vec<usize> = (0..n)
+        .map(|i| (0..n).filter(|j| *j != i && p[i][*j] > p[*j][i]).count())
+        .collect();
     let mut ranked = first_seen;
     ranked.sort_by(|a, b| {
         let i = index[a];
         let j = index[b];
-        p[j][i].cmp(&p[i][j]).then_with(|| i.cmp(&j))
+        wins[j].cmp(&wins[i]).then_with(|| i.cmp(&j))
     });
     ranked
 }
@@ -102,6 +123,44 @@ where
 mod tests {
     use super::*;
     use crate::borda::borda_merge;
+
+    /// A comparator that is not a total order has no correct answer to give,
+    /// and the sort says so by panicking rather than by returning a wrong one.
+    ///
+    /// Two ballots never reached this: every contested pair ties, so first-seen
+    /// order alone decided and that is total. Three is the first number of
+    /// voters where the tie-break can send a before b, b before c and c before
+    /// a, which is why the fusion swept over three ballots is what found it.
+    #[test]
+    fn three_ballots_never_ask_the_sort_for_an_impossible_order() {
+        // A small deterministic generator, so a failure is reproducible and no
+        // dependency is added for it.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let names: Vec<String> = (0..9).map(|n| format!("id{n}")).collect();
+        for _ in 0..500 {
+            let ballots: Vec<Ballot<String>> = (0..3)
+                .map(|_| {
+                    let mut pool = names.clone();
+                    // Shuffle, then truncate, so the ballots disagree about
+                    // which candidates exist as well as about their order.
+                    for at in (1..pool.len()).rev() {
+                        pool.swap(at, (next() % (at as u64 + 1)) as usize);
+                    }
+                    pool.truncate(4 + (next() % 5) as usize);
+                    pool
+                })
+                .collect();
+            let ranked = schulze_merge(&ballots, 9);
+            let seen: std::collections::HashSet<&String> = ranked.iter().collect();
+            assert_eq!(seen.len(), ranked.len(), "a key came back twice");
+        }
+    }
 
     fn condorcet_mid_borda() -> [Ballot<&'static str>; 5] {
         [

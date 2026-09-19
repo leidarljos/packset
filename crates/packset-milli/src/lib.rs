@@ -84,7 +84,9 @@ fn apply_settings(index: &Index) -> Result<()> {
     settings.set_searchable_fields(SEARCHABLE.iter().map(|s| (*s).to_owned()).collect());
     settings.set_displayed_fields(DISPLAYED.iter().map(|s| (*s).to_owned()).collect());
     settings.set_filterable_fields(filterable_set());
-    // Match the Python scorer: one-edit typos from length 4.
+    // The linear scorer this projects: one-edit typos from length 4, so a
+    // query answered by the index and the same query answered by the fallback
+    // agree on what counts as a match.
     settings.set_min_word_len_one_typo(4);
     settings.set_autorize_typos(true);
     settings

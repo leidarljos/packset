@@ -273,3 +273,9 @@ __pycache__/
 *.lmdb/
 memory.milli/
 .env
+
+# Written by the deploy so a build host can be told which commit it is
+# building, since the source reaches it without its history.
+.build-commit
+.venv-docs/
+docs/build/

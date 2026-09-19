@@ -1,7 +1,7 @@
 //! Copeland: pairwise wins minus losses.
 //!
-//! d[i,j] is how many ballots rank i above j (top-k). i beats j
-//! when d[i,j] > d[j,i]. Score is wins minus losses. No path
+//! `d[i,j]` is how many ballots rank i above j (top-k). i beats j
+//! when `d[i,j] > d[j,i]`. Score is wins minus losses. No path
 //! step. Ties break first-seen.
 //!
 //! Nurmi, Comparing Voting Systems, 1987.
@@ -81,6 +81,9 @@ where
     }
 
     let mut scores = vec![0i64; n];
+    // Indexed on purpose: the comparison is d[i][j] against d[j][i], so the
+    // pair of indices is the subject rather than an artefact of the loop.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         for j in 0..n {
             if i == j {

@@ -3,17 +3,28 @@ resolver = "2"
 members = [
     "crates/packset-core",
     "crates/packset-client",
+    "crates/packset-cli",
+    "crates/packset-mcp",
+    "crates/packset-daemon",
+    "crates/packset-embed",
     "crates/packset-milli",
 ]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.0"
-publish = false
+version = "0.9.9"
+publish = true
+rust-version = "1.85"
+repository = "https://github.com/leidarljos/packset"
+homepage = "https://leidarljos.github.io/packset/"
 
 [workspace.dependencies]
 anyhow = "1"
+# Snowball, which is Porter's suffix stripping as its author later revised it.
+rust-stemmers = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order so a record written by the other writer round-trips with its
+# fields in the order that writer put them.
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"

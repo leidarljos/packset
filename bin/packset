@@ -1,162 +1,20 @@
 #!/usr/bin/env bash
-# Start, stop and inspect packsetd.
+# Run this checkout's `packset`, wherever the build put it.
 #
-#   packset ensure | start | stop | status | port | pin [NAME] | clear
-#
-# Clients export PACKSET_URL (INSIDE_MEMORY_URL is an alias).
+# A seat wires one stable path and does not track whether the last build was a
+# debug or a release one. Everything the command does lives in the binary.
 
 set -euo pipefail
 
 self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 root="$(cd "$(dirname "$self")/.." && pwd)"
 
-PORT="${PACKSET_PORT:-${GROK_MEM_PORT:-8761}}"
-LOG="${PACKSET_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/packsetd.log}"
-daemon="$root/scripts/packsetd.py"
+for candidate in "${PACKSET_CLI:-}" \
+                 "$root/target/release/packset" \
+                 "$root/target/debug/packset"; do
+    [ -n "$candidate" ] || continue
+    [ -x "$candidate" ] && exec "$candidate" "$@"
+done
 
-resolve_python() {
-    if [ -x "$root/.pixi/envs/default/bin/python" ]; then
-        printf '%s' "$root/.pixi/envs/default/bin/python"
-    elif command -v pixi >/dev/null 2>&1; then
-        printf '%s' "pixi run --manifest-path $root/pixi.toml python"
-    elif command -v python3 >/dev/null 2>&1; then
-        printf '%s' "python3"
-    else
-        return 1
-    fi
-}
-
-listening() {
-    (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null
-}
-
-pid_on_port() {
-    ss -ltnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2
-}
-
-health_reply() {
-    timeout 3 curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null || true
-}
-
-is_ours() {
-    case "$(health_reply)" in
-        packsetd*|inside-memd*) return 0 ;;
-    esac
-    return 1
-}
-
-start() {
-    if listening && is_ours; then
-        echo "packset: already listening on 127.0.0.1:$PORT" >&2
-        return 0
-    fi
-    if listening; then
-        echo "packset: port $PORT is held by something else; set PACKSET_PORT" >&2
-        return 1
-    fi
-    mkdir -p "$(dirname "$LOG")"
-    if ! py="$(resolve_python)"; then
-        echo "packset: python3 not found" >&2
-        return 1
-    fi
-    setsid $py "$daemon" --port "$PORT" >>"$LOG" 2>&1 </dev/null &
-    for _ in $(seq 1 25); do
-        listening && { echo "packset: listening on 127.0.0.1:$PORT" >&2; return 0; }
-        sleep 0.2
-    done
-    echo "packset: did not come up; see $LOG" >&2
-    tail -3 "$LOG" >&2 2>/dev/null || true
-    return 1
-}
-
-print_url() {
-    printf 'PACKSET_URL=http://127.0.0.1:%s\n' "$PORT"
-    printf 'INSIDE_MEMORY_URL=http://127.0.0.1:%s\n' "$PORT"
-}
-
-case "${1:-ensure}" in
-    ensure)
-        if listening && ! is_ours; then
-            echo "packset: port $PORT is held by something else; set PACKSET_PORT" >&2
-            exit 1
-        fi
-        listening || start
-        print_url
-        ;;
-    start) start ;;
-    stop)
-        pid="$(pid_on_port)"
-        if is_ours && [ -n "$pid" ]; then
-            kill "$pid" 2>/dev/null || true
-            echo "packset: stopped $pid" >&2
-        else
-            echo "packset: nothing to stop on $PORT" >&2
-        fi
-        ;;
-    status)
-        if listening && is_ours; then
-            echo "packset: up on 127.0.0.1:$PORT ($(health_reply))"
-            # Optional detail from GET /v1/status (workspace via PACKSET_WORKSPACE).
-            detail_url="http://127.0.0.1:$PORT/v1/status"
-            if [ -n "${PACKSET_WORKSPACE:-}" ]; then
-                case "$PACKSET_WORKSPACE" in
-                    *[!A-Za-z0-9._~-]*)
-                        # Needs percent-encoding; refuse to fall back to an unscoped query.
-                        if ! py="$(resolve_python)"; then
-                            echo "packset: PACKSET_WORKSPACE needs python to encode" >&2
-                            exit 1
-                        fi
-                        ws_enc="$(PACKSET_WORKSPACE="$PACKSET_WORKSPACE" $py -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["PACKSET_WORKSPACE"], safe=""))')"
-                        ;;
-                    *)
-                        ws_enc="$PACKSET_WORKSPACE"
-                        ;;
-                esac
-                detail_url="${detail_url}?workspace=${ws_enc}"
-            fi
-            if ! detail="$(timeout 3 curl -fsS "$detail_url" 2>/dev/null)"; then
-                echo "packset: could not fetch /v1/status" >&2
-                exit 1
-            fi
-            if py="$(resolve_python)"; then
-                printf '%s\n' "$detail" | $py -m json.tool 2>/dev/null || printf '%s\n' "$detail"
-            else
-                printf '%s\n' "$detail"
-            fi
-        elif listening; then
-            echo "packset: port $PORT held by another process"
-            exit 1
-        else
-            echo "packset: down"
-            exit 1
-        fi
-        ;;
-    port) echo "$PORT" ;;
-    url) print_url ;;
-    pin)
-        shift
-        name="${1:-}"
-        if [ -z "$name" ]; then
-            curl -fsS "http://127.0.0.1:$PORT/v1/pin"
-            echo
-        else
-            curl -fsS -X PUT "http://127.0.0.1:$PORT/v1/pin" \
-                -H 'Content-Type: application/json' \
-                -d "{\"name\":\"$name\"}"
-            echo
-        fi
-        ;;
-    tui)
-        shift
-        if ! py="$(resolve_python)"; then
-            echo "packset: python3 not found" >&2
-            exit 1
-        fi
-        export PYTHONPATH="${root}${PYTHONPATH:+:$PYTHONPATH}"
-        exec $py -m packset_tui "$@"
-        ;;
-    *)
-        echo "usage: packset ensure|start|stop|status|port|url|pin [NAME]|tui" >&2
-        exit 2
-        ;;
-esac
+echo "packset: no packset binary; cargo build --release -p packset-cli" >&2
+exit 1

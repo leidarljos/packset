@@ -1,8 +1,8 @@
 //! Tideman ranked pairs: lock pairwise victories by margin.
 //!
-//! d[i,j] is how many ballots rank i above j (top-k). A victory
-//! is i over j when d[i,j] > d[j,i]. Sort by margin
-//! d[i,j] - d[j,i], then lock a victory if it does not create a
+//! `d[i,j]` is how many ballots rank i above j (top-k). A victory
+//! is i over j when `d[i,j] > d[j,i]`. Sort by margin
+//! `d[i,j] - d[j,i]`, then lock a victory if it does not create a
 //! cycle. The locked graph is a DAG; topological order is the
 //! ranking. Ties break first-seen.
 //!
@@ -66,6 +66,8 @@ where
     }
 
     let mut victories = Vec::new();
+    // Indexed on purpose: the comparison is d[i][j] against d[j][i].
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         for j in 0..n {
             if i == j {
@@ -132,6 +134,8 @@ fn reaches(adj: &[Vec<usize>], from: usize, to: usize) -> bool {
 fn topo_first_seen<T: Clone>(adj: &[Vec<usize>], first_seen: &[T]) -> Vec<T> {
     let n = first_seen.len();
     let mut indeg = vec![0usize; n];
+    // u indexes adj; the count it increments is indexed by v, not by u.
+    #[allow(clippy::needless_range_loop)]
     for u in 0..n {
         for &v in &adj[u] {
             indeg[v] += 1;

@@ -3,7 +3,7 @@ name = "packset-milli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 description = "Embedded milli index for the seat pack"
 
 [[bin]]
