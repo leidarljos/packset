@@ -4,6 +4,25 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.17 (2026-09-19)
+
+- `GET /v1/atoms?kind=persona` answers one kind; `PacksetClient::
+  atoms_of_kind` asks for it. A roster of a dozen personas no longer
+  reads every lesson's embedding.
+- Status counts the forgotten by reason (`forgotten_by_reason`: the
+  live cap, neglect, or the reason a forget gave).
+- The hammer's herd arm (`HAMMER_SHARED=1`) writes every client into one
+  workspace, each stamping its seat, with token-distinct claims, and ends
+  by counting live plus closed against the writes: 800, 3200 and 6400
+  written, none lost, on the build host at 4, 16 and 32 clients.
+- Under a herd the overlap candidates come from the shortest posting
+  lists (a claim carrying six tenths of the tokens sits in one of them),
+  and the search index is rebuilt once per stale set under a lock and
+  cached under the set's own generation; readers that arrive during a
+  build wait for it, and a build finished after a further write is kept
+  and patched from. Shared-workspace throughput at 16 and 32 clients
+  went from 64 and 49 requests a second to 91 and 66 on a loaded node.
+
 ## 0.9.16 (2026-09-19)
 
 - The write path stops reading the pack per write. The search index is

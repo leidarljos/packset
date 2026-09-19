@@ -50,7 +50,7 @@ $ packset island fusing two ballots     # the memories a task activates
 - A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
 - Forgetting by neglect: a review left due past twice its interval lapses as a missed review would, and a never-recalled lesson missed three times is forgotten. The writer sweeps once a day; `packset sweep` runs it now.
 - Claims link by shared names; links carry weights that use strengthens; `island` returns the cluster a task activates.
-- One writer, one LMDB file. Zero errors at 32 clients; throughput peaks at four. A second host is a second pack; a signed handover crosses.
+- One writer, one LMDB file. Zero errors at 32 clients, and a herd of 32 writing 6400 distinct claims into one workspace loses none of them. A second host is a second pack; a signed handover crosses.
 - Trust rows and personas live in the pack and reach the seat's consensus.
 
 The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html) and in the [bench package](https://github.com/leidarljos/bench).
