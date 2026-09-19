@@ -94,8 +94,22 @@ $ packset island fusing two ballots     # the memories a task activates
 - A `trust` atom is one weighted edge of an influence graph, scoped to
   domains by its entities; a `persona` atom is a voter with its own anchor.
   Both are exported with the rest and read by the seat's consensus.
-- One logical write at a time; 150 to 230 requests a second at 32 clients on
-  four cores, no failures.
+- One logical write at a time. The hammer example (`scripts/terra/hammer.sbatch`),
+  each client remembering unique claims and searching for them, two searches
+  a remember, dense ballot on, eight cores:
+
+  | clients | requests | req/s | remember p50 / p99 | search p50 / p99 | errors |
+  |---|---|---|---|---|---|
+  | 1 | 600 | 156 | 7 ms / 12 ms | 5 ms / 6 ms | 0 |
+  | 4 | 2400 | 321 | 16 ms / 32 ms | 10 ms / 19 ms | 0 |
+  | 16 | 9600 | 209 | 77 ms / 221 ms | 64 ms / 145 ms | 0 |
+  | 32 | 19200 | 167 | 202 ms / 571 ms | 181 ms / 394 ms | 0 |
+
+  Throughput peaks at four clients and latency grows with the queue behind
+  the one write lock and the one encoder; nothing fails. A second writer
+  host is a second pack: the store is one LMDB home per host, never shared
+  over a network filesystem, and what crosses hosts is a signed handover
+  (`ljos handover`, `ljos receive`), not a socket.
 
 ## Crates
 
