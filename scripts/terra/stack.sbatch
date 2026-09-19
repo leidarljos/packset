@@ -17,7 +17,7 @@ cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E "^(error|wa
 cargo build --release --workspace 2>&1 | tail -1
 # The full log stays beside the job output; a failing test's panic is read
 # from there rather than rerun.
-cargo test --workspace --no-fail-fast > "$HOME/packset-test-${SLURM_JOB_ID}.log" 2>&1
+cargo test --workspace --no-fail-fast > "$HOME/packset-test-${SLURM_JOB_ID}.log" 2>&1; tests=$?
 grep -E "^(test result:|failures:|---- )" "$HOME/packset-test-${SLURM_JOB_ID}.log" | head -20
 grep -E "panicked at|assertion|left:|right:" "$HOME/packset-test-${SLURM_JOB_ID}.log" | head -20
 for b in packset packsetd packset-embed packset-mcp; do
@@ -25,3 +25,5 @@ for b in packset packsetd packset-embed packset-mcp; do
 done
 ls -la "$HOME/stackbin" | tail -5
 echo STACK-DONE
+# A chained job (--dependency=afterok) must not run on a red build.
+exit $tests
