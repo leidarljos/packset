@@ -720,7 +720,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn default_workers_is_four_not_core_count() {
         assert_eq!(DEFAULT_WORKERS, 4);
         assert_eq!(MAX_WORKERS, 8);
