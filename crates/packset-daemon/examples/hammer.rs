@@ -7,7 +7,9 @@
 //!
 //! The first argument is the number of clients, the second the operations
 //! each performs. Every client remembers unique claims and searches for them,
-//! two searches per remember, in its own workspace.
+//! two searches per remember, in its own workspace; with `HAMMER_SHARED=1`
+//! every client writes into one workspace, as a herd of seats does, and the
+//! run ends by counting the live claims there against what was written.
 
 use std::time::{Duration, Instant};
 
@@ -32,13 +34,18 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(100);
     let url = std::env::var("PACKSET_URL").unwrap_or_else(|_| "http://127.0.0.1:8761".into());
     let run = std::process::id();
+    let shared = std::env::var_os("HAMMER_SHARED").is_some();
     let started = Instant::now();
     let handles: Vec<_> = (0..clients)
         .map(|c| {
             let url = url.clone();
             std::thread::spawn(move || {
                 let client = PacksetClient::new(url);
-                let workspace = format!("hammer-{run}-{c}");
+                let workspace = if shared {
+                    format!("hammer-{run}")
+                } else {
+                    format!("hammer-{run}-{c}")
+                };
                 let mut writes = Vec::new();
                 let mut reads = Vec::new();
                 let mut errors = 0usize;
@@ -47,9 +54,11 @@ fn main() -> anyhow::Result<()> {
                         "Client {c} learned fact {n} in run {run}. It weighs {} grams.",
                         n * 7 + c
                     );
+                    // A seat's name rides in the entities, as ljos writes it.
                     let atom = serde_json::json!({
                         "schema": "inside.atom/v1", "kind": "lesson", "level": "explicit",
                         "text": text, "workspace": workspace,
+                        "entities": [format!("seat:hammer-{c}")],
                     });
                     let t = Instant::now();
                     if client.post_atom(&atom).is_err() {
@@ -94,6 +103,17 @@ fn main() -> anyhow::Result<()> {
             percentile(lat, 0.99),
             percentile(lat, 1.0)
         );
+    }
+    if shared {
+        // Every write was a distinct claim; the pack must hold them all.
+        let client = PacksetClient::new(url);
+        let live = client.atoms(&format!("hammer-{run}"))?.len();
+        let written = clients * ops;
+        println!("shared workspace: {live} live of {written} written");
+        if live != written {
+            eprintln!("{} writes lost or merged", written.saturating_sub(live));
+            std::process::exit(1);
+        }
     }
     if errors > 0 {
         std::process::exit(1);

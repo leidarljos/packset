@@ -21,5 +21,12 @@ for c in 1 4 16 32; do
   echo "=== $c clients x 200 ops"
   ./target/release/examples/hammer "$c" 200
 done
+# The herd case: every client into one workspace, the count checked at the end.
+export HAMMER_SHARED=1
+for c in 4 16 32; do
+  echo "=== $c clients x 200 ops"
+  ./target/release/examples/hammer "$c" 200
+done
+unset HAMMER_SHARED
 packset stop >/dev/null 2>&1 || true
 echo HAMMER-DONE
