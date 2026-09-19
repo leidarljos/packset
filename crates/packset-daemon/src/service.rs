@@ -1811,17 +1811,37 @@ impl Service {
             })
             .collect();
         let (fired, held) = if fire && !weak {
-            let ids: Vec<String> = lit
-                .iter()
-                .take(FIRE_TOP)
-                .filter_map(|(at, _)| atoms[*at].get("id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect();
-            let fired = self.fire(workspace, &ids)?;
-            (
-                fired["changed"].as_u64().unwrap_or(0),
-                fired["held"].as_bool().unwrap_or(false),
-            )
+            // The cue holds the island for the hour as the claims do: a
+            // closing that grew the island by a lesson would otherwise fire
+            // a new set for the same title.
+            let cue_key = format!("cue\u{0}{workspace}\u{0}{}", query.trim().to_lowercase());
+            let cue_held = self.fired_recently.lock().is_ok_and(|mut recent| {
+                let now = std::time::Instant::now();
+                if recent
+                    .get(&cue_key)
+                    .is_some_and(|at| now.duration_since(*at) < FIRE_WINDOW)
+                {
+                    true
+                } else {
+                    recent.insert(cue_key, now);
+                    false
+                }
+            });
+            if cue_held {
+                (0, true)
+            } else {
+                let ids: Vec<String> = lit
+                    .iter()
+                    .take(FIRE_TOP)
+                    .filter_map(|(at, _)| atoms[*at].get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
+                let fired = self.fire(workspace, &ids)?;
+                (
+                    fired["changed"].as_u64().unwrap_or(0),
+                    fired["held"].as_bool().unwrap_or(false),
+                )
+            }
         } else {
             (0, false)
         };
