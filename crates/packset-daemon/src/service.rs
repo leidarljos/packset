@@ -136,11 +136,19 @@ impl WriteTrace {
 /// head word and its entities behind markers so a name never meets a token.
 fn posting_terms(shape: &record::Shape) -> Vec<String> {
     let mut terms: BTreeSet<String> = shape.tokens.iter().cloned().collect();
-    if let Some(head) = shape.head.first() {
-        terms.insert(format!("h:{head}"));
+    if let Some(head) = head_key(shape) {
+        terms.insert(head);
     }
     terms.extend(shape.entities.iter().map(|e| format!("e:{e}")));
     terms.into_iter().collect()
+}
+
+/// The posting a shared head is found under: the first `HEAD_MIN` head
+/// words, which two claims must open with alike; a shorter head shares
+/// with nothing.
+fn head_key(shape: &record::Shape) -> Option<String> {
+    (shape.head.len() >= record::HEAD_MIN)
+        .then(|| format!("h:{}", shape.head[..record::HEAD_MIN].join(" ")))
 }
 
 /// Whether a stored claim says what the new one says: same text, kind and set.
@@ -467,8 +475,8 @@ impl Service {
                     .map(|(id, _)| id),
             );
             let mut exact: Vec<String> = shape.entities.iter().map(|e| format!("e:{e}")).collect();
-            if let Some(head) = shape.head.first() {
-                exact.push(format!("h:{head}"));
+            if let Some(head) = head_key(shape) {
+                exact.push(head);
             }
             for term in exact {
                 if let Some(ids) = postings.get(&term) {
