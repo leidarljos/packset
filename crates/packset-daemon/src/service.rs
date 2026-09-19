@@ -77,8 +77,15 @@ enum ProjectionOp {
     Delete(String),
 }
 
-/// How long a write's projection may wait for company before it is indexed.
+/// How long the projection waits after the last write before it is indexed:
+/// a burst is indexed once when it pauses, not once per write.
 const PROJECTION_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+/// The longest a steady stream of writes keeps the index waiting, and the
+/// batch size that ends the wait early. The indexer is one process run per
+/// flush, and a run every few seconds on four cores leaves the encoder its
+/// share; a run every write did not.
+const PROJECTION_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+const PROJECTION_BATCH: usize = 512;
 
 /// Apply queued projection ops to the index at `dir`, consecutive runs of
 /// one kind as one batch, in arrival order.
@@ -184,7 +191,17 @@ impl Service {
         let scheduled = Arc::clone(&self.flush_scheduled);
         let dir = self.home.milli_dir();
         std::thread::spawn(move || {
-            std::thread::sleep(PROJECTION_DELAY);
+            let started = std::time::Instant::now();
+            let mut seen = 0usize;
+            loop {
+                std::thread::sleep(PROJECTION_DELAY);
+                let len = pending.lock().map(|p| p.len()).unwrap_or(0);
+                let quiet = len == seen;
+                seen = len;
+                if quiet || len >= PROJECTION_BATCH || started.elapsed() >= PROJECTION_MAX_WAIT {
+                    break;
+                }
+            }
             scheduled.store(false, Ordering::Release);
             let ops: Vec<ProjectionOp> = pending
                 .lock()
