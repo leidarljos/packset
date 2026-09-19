@@ -15,7 +15,11 @@ mkdir -p "$HOME/stackbin"
 cargo fmt --all --check && echo FMT-CLEAN
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E "^(error|warning)" -A 8 | head -40
 cargo build --release --workspace 2>&1 | tail -1
-cargo test --workspace --no-fail-fast 2>&1 | grep -E "^(test result:|failures:|---- )" | head -20
+# The full log stays beside the job output; a failing test's panic is read
+# from there rather than rerun.
+cargo test --workspace --no-fail-fast > "$HOME/packset-test-${SLURM_JOB_ID}.log" 2>&1
+grep -E "^(test result:|failures:|---- )" "$HOME/packset-test-${SLURM_JOB_ID}.log" | head -20
+grep -E "panicked at|assertion|left:|right:" "$HOME/packset-test-${SLURM_JOB_ID}.log" | head -20
 for b in packset packsetd packset-embed packset-mcp; do
   cp -f "target/release/$b" "$HOME/stackbin/" && echo "copied $b"
 done
