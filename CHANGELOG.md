@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.9.18 (2026-09-20)
+
+- An island fires once an hour: a second fire of the same claims within
+  the hour is held and says so (`held: true` on `/v1/fire` and
+  `/v1/activate`). Several seats, or several personas, closing sittings
+  on one issue tighten its links one step, not one step each.
+
 ## 0.9.17 (2026-09-19)
 
 - `GET /v1/atoms?kind=persona` answers one kind; `PacksetClient::
