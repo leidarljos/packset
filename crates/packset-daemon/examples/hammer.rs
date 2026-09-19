@@ -23,6 +23,21 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[at]
 }
 
+/// A pronounceable pseudo-word from a seed, so claims share no tokens.
+fn pseudo(seed: usize) -> String {
+    const C: &[u8] = b"bdfgklmnprstvz";
+    const V: &[u8] = b"aeiou";
+    let mut x = seed.wrapping_mul(2_654_435_761) | 1;
+    let mut word = String::new();
+    for i in 0..6 {
+        let set = if i % 2 == 0 { C } else { V };
+        word.push(set[x % set.len()] as char);
+        x /= set.len().max(2);
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    }
+    word
+}
+
 fn main() -> anyhow::Result<()> {
     let clients: usize = std::env::args()
         .nth(1)
@@ -50,9 +65,14 @@ fn main() -> anyhow::Result<()> {
                 let mut reads = Vec::new();
                 let mut errors = 0usize;
                 for n in 0..ops {
+                    // Pseudo-words distinct per claim: a herd's lessons
+                    // differ, and two that shared their tokens would be one
+                    // claim to the overlap rule, which is the rule working.
                     let text = format!(
-                        "Client {c} learned fact {n} in run {run}. It weighs {} grams.",
-                        n * 7 + c
+                        "Client {c} learned fact {n} in run {run}: {} {} {}.",
+                        pseudo(c * 7919 + n * 31 + 1),
+                        pseudo(c * 7919 + n * 31 + 2),
+                        pseudo(c * 7919 + n * 31 + 3)
                     );
                     // A seat's name rides in the entities, as ljos writes it.
                     let atom = serde_json::json!({
@@ -105,13 +125,17 @@ fn main() -> anyhow::Result<()> {
         );
     }
     if shared {
-        // Every write was a distinct claim; the pack must hold them all.
+        // Every write was a distinct claim: each is live, or closed by a
+        // later one that says the same; none may vanish.
         let client = PacksetClient::new(url);
-        let live = client.atoms(&format!("hammer-{run}"))?.len();
+        let workspace = format!("hammer-{run}");
+        let status = client.status(Some(&workspace))?;
+        let live = status["live"].as_u64().unwrap_or(0) as usize;
+        let closed = status["expired"].as_u64().unwrap_or(0) as usize;
         let written = clients * ops;
-        println!("shared workspace: {live} live of {written} written");
-        if live != written {
-            eprintln!("{} writes lost or merged", written.saturating_sub(live));
+        println!("shared workspace: {live} live + {closed} closed of {written} written");
+        if live + closed != written {
+            eprintln!("{} writes lost", written.saturating_sub(live + closed));
             std::process::exit(1);
         }
     }
