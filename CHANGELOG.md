@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.9.12 (2026-09-19)
 
 - A live cap: past `PACKSET_LIVE_CAP` live claims in a workspace (twenty
   thousand when unset, `off` for none) the write that crossed it forgets
