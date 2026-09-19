@@ -1561,13 +1561,12 @@ mod tests {
         pref.insert("kind".into(), json!("preference"));
         rows.push(pref);
         svc.store().upsert_many(&rows).unwrap();
-        // The write that crosses the cap forgets the two least retrievable.
-        let written = svc
-            .add(atom(
-                "A fifth lesson arrives and the pack is over its cap today.",
-            ))
-            .unwrap();
-        assert_eq!(written["forgot"], json!(2), "{written:?}");
+        // Six live after the write, cap three: the three least retrievable
+        // lessons go; the preference and the newest lessons stay.
+        let mut fifth = atom("A fifth lesson arrives and the pack is over its cap today.");
+        fifth.insert("kind".into(), json!("lesson"));
+        let written = svc.add(fifth).unwrap();
+        assert_eq!(written["forgot"], json!(3), "{written:?}");
         let live = svc.store().live("w").unwrap();
         let ids: Vec<&str> = live
             .iter()
@@ -1582,14 +1581,22 @@ mod tests {
             ids.contains(&"lesson0000000000000000000000000003"),
             "{ids:?}"
         );
-        assert!(
-            !ids.contains(&"lesson0000000000000000000000000000"),
-            "{ids:?}"
-        );
-        assert!(
-            !ids.contains(&"lesson0000000000000000000000000001"),
-            "{ids:?}"
-        );
+        assert!(ids.contains(&written["id"].as_str().unwrap()), "{ids:?}");
+        for gone in [
+            "lesson0000000000000000000000000000",
+            "lesson0000000000000000000000000001",
+            "lesson0000000000000000000000000002",
+        ] {
+            assert!(!ids.contains(&gone), "{ids:?}");
+        }
+        let forgotten = svc
+            .store()
+            .current("w", None)
+            .unwrap()
+            .iter()
+            .filter(|a| a.get("forgotten").is_some())
+            .count();
+        assert_eq!(forgotten, 3);
         let panel = packset_core::Panel::named("rrf", "none", "off").unwrap();
         assert_eq!(svc.status(None, &panel).unwrap()["live_cap"], json!(3));
     }
