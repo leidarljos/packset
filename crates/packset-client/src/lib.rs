@@ -559,6 +559,22 @@ impl PacksetClient {
         Ok(body)
     }
 
+    /// Sweep a workspace for neglect: reviews left due past twice their
+    /// interval lapse, and the third miss forgets a never-recalled lesson.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn sweep(&self, workspace: &str) -> Result<serde_json::Value, Error> {
+        let url = format!("{}/v1/sweep", self.base);
+        let body: serde_json::Value = ureq::post(&url)
+            .timeout(timeout())
+            .send_json(serde_json::json!({"workspace": workspace}))
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
+        Ok(body)
+    }
+
     /// The memories a cue activates, strongest first; with `fire`, the top
     /// of them fire together.
     pub fn activate(

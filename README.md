@@ -48,6 +48,7 @@ $ packset island fusing two ballots     # the memories a task activates
 - A later claim closes the earlier one it rewrites; the closed one keeps its window for an as-of read. `consolidate` runs the rule over what is held.
 - Search fuses a prefix scan, BM25+ and a dense ballot. LongMemEval_S sessions: 0.889 hit@1; MemoryAgentBench accurate retrieval 0.675 and conflict resolution 0.579 with a 7B reader.
 - A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
+- Forgetting by neglect: a review left due past twice its interval lapses as a missed review would, and a never-recalled lesson missed three times is forgotten. The writer sweeps once a day; `packset sweep` runs it now.
 - Claims link by shared names; links carry weights that use strengthens; `island` returns the cluster a task activates.
 - One writer, one LMDB file. Zero errors at 32 clients; throughput peaks at four. A second host is a second pack; a signed handover crosses.
 - Trust rows and personas live in the pack and reach the seat's consensus.

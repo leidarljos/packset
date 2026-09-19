@@ -2,6 +2,20 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- Forgetting by neglect: a review left due past twice its interval is
+  lapsed as a missed review would be, its stability halved and the miss
+  counted; a never-recalled forgettable claim missed three times is
+  tombstoned, `forgotten: neglect`. Preferences, rules, readings, goals,
+  trust rows and personas lapse but are never forgotten this way. The
+  writer sweeps a workspace on the first write of a day; `POST
+  /v1/sweep` and `packset sweep` run it on demand.
+- The writer keeps one shape per claim, the tokens, head words and
+  entities the replacement and linking rules read, and linking reads only
+  the peers that share an entity with the new claim, closed under their
+  links. A write no longer tokenises the pack.
+
 ## 0.9.13 (2026-09-19)
 
 - Recall: with a cue in hand the due queue takes at most a quarter of the

@@ -293,6 +293,10 @@ fn route(
             let cwd = query.get("cwd").cloned().unwrap_or_else(|| ".".into());
             Answer::ok(crate::context::repo_map(std::path::Path::new(&cwd)))
         }
+        (Method::Post, "/v1/sweep") => match required(body, "workspace") {
+            Err(a) => a,
+            Ok(workspace) => answer(service.sweep(&workspace)),
+        },
         (Method::Post, "/v1/consolidate") => match required(body, "workspace") {
             Err(a) => a,
             Ok(workspace) => {

@@ -51,6 +51,9 @@ pub struct Service {
     /// that crossed it, so a herd of seats writing into one pack cannot
     /// grow it without bound.
     live_cap: usize,
+    /// The day each workspace was last swept for neglect, so a write sweeps
+    /// at most once a day.
+    swept: Mutex<HashMap<String, String>>,
     /// What the replacement and linking rules read of each claim, by id.
     /// A claim's text never changes under its id, so a write tokenises the
     /// pack once, not once per write; ten thousand writes took forty
@@ -61,6 +64,10 @@ pub struct Service {
 /// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand, a
 /// size at which the hook still answers a prompt in a tenth of a second.
 pub const DEFAULT_LIVE_CAP: usize = 20_000;
+
+/// How many missed reviews, each past twice the claim's interval, make a
+/// never-recalled forgettable claim forgotten.
+pub const NEGLECT_LIMIT: u64 = 3;
 
 /// Kinds the cap may forget. A standing choice, a rule, a reading, a goal, a
 /// trust row and a persona are what the seat is; a lesson it has not
@@ -102,7 +109,100 @@ impl Service {
             writes: Mutex::new(()),
             live_cap: live_cap_from_env(),
             shapes: RwLock::new(HashMap::new()),
+            swept: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Forgetting by neglect: a claim left due for longer than twice its
+    /// interval and never graded is what a person would have forgotten. The
+    /// sweep lapses it as a missed review does, halving its stability, and
+    /// counts the neglect; a forgettable claim neglected [`NEGLECT_LIMIT`]
+    /// times and never once recalled is tombstoned, marked
+    /// `forgotten: neglect`. A preference, rule, reading, goal, trust row or
+    /// persona lapses but is never forgotten this way. Returns how many
+    /// lapsed and how many were forgotten.
+    ///
+    /// # Errors
+    ///
+    /// The store's.
+    pub fn sweep(&self, workspace: &str) -> anyhow::Result<Value> {
+        let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        let now = clock::utcnow();
+        let live = self.store.live(workspace)?;
+        let mut lapsed: Vec<Record> = Vec::new();
+        let mut forgotten: Vec<Record> = Vec::new();
+        for atom in live.iter() {
+            if !record::is_due(atom, &now) {
+                continue;
+            }
+            let kind = atom.get("kind").and_then(Value::as_str).unwrap_or("");
+            if kind == "trust" || kind == "persona" {
+                continue;
+            }
+            let due_at = atom.get("due_at").and_then(Value::as_str).unwrap_or(&now);
+            let review = atom.get("review").and_then(Value::as_object);
+            let interval_days = review
+                .and_then(|r| r.get("interval_s"))
+                .and_then(Value::as_f64)
+                .map_or(1.0, |secs| (secs / 86_400.0).max(1.0));
+            let overdue = clock::elapsed_days(due_at, &now);
+            if overdue <= 2.0 * interval_days {
+                continue;
+            }
+            let neglected = review
+                .and_then(|r| r.get("neglected"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + 1;
+            let reps = review
+                .and_then(|r| r.get("reps"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mut changed = atom.clone();
+            if neglected >= NEGLECT_LIMIT
+                && reps == 0
+                && FORGETTABLE_KINDS.contains(&kind)
+                && changed.get("pinned").and_then(Value::as_bool) != Some(true)
+            {
+                changed.insert("tombstone".into(), Value::Bool(true));
+                changed.insert("ts".into(), Value::String(now.clone()));
+                changed.insert("forgotten".into(), Value::String("neglect".into()));
+                forgotten.push(changed);
+                continue;
+            }
+            record::schedule_review(&mut changed, &now, record::Grade::Lapsed, None);
+            if let Some(Value::Object(r)) = changed.get_mut("review") {
+                r.insert("neglected".into(), json!(neglected));
+            }
+            lapsed.push(changed);
+        }
+        let mut all = lapsed.clone();
+        all.extend(forgotten.iter().cloned());
+        if !all.is_empty() {
+            self.store.upsert_many(&all)?;
+            self.project_atoms(&all);
+        }
+        if let Ok(mut swept) = self.swept.lock() {
+            swept.insert(workspace.to_string(), now[..10].to_string());
+        }
+        Ok(json!({
+            "lapsed": lapsed.len(),
+            "forgotten": forgotten.len(),
+            "forgotten_ids": forgotten.iter().filter_map(|a| a.get("id").cloned()).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Sweep a workspace on the first write of a day; the lock is not held.
+    fn sweep_if_due(&self, workspace: &str) {
+        let today = clock::utcnow()[..10].to_string();
+        let due = self
+            .swept
+            .lock()
+            .map(|m| m.get(workspace) != Some(&today))
+            .unwrap_or(false);
+        if due {
+            let _ = self.sweep(workspace);
+        }
     }
 
     /// The shape of a stored claim, computed the first time it is asked for.
@@ -219,6 +319,9 @@ impl Service {
         // Validation and the encoder run before the lock: the encode is the
         // slow part of a write and depends on the text alone.
         let atom = self.prepare(atom)?;
+        if let Some(ws) = atom.get("workspace").and_then(Value::as_str) {
+            self.sweep_if_due(ws);
+        }
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         self.add_prepared(atom)
     }
@@ -1596,6 +1699,64 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn neglect_lapses_a_missed_review_and_forgets_the_third_miss() {
+        let (_dir, svc) = service();
+        // Three claims long past due: a lesson never recalled, a lesson
+        // recalled once, a preference. Two misses already on the first.
+        let mut rows = Vec::new();
+        for (id, kind, reps, neglected) in [
+            ("lesson000000000000000000000000000a", "lesson", 0, 2),
+            ("lesson000000000000000000000000000b", "lesson", 1, 2),
+            ("pref00000000000000000000000000000c", "preference", 0, 5),
+        ] {
+            let mut a = atom(&format!("Claim {id} stands on its own words and waits."));
+            a.insert("id".into(), json!(id));
+            a.insert("kind".into(), json!(kind));
+            a.insert("ts".into(), json!("2025-01-01T00:00:00.000Z"));
+            a.insert("due_at".into(), json!("2025-02-01T00:00:00.000Z"));
+            a.insert(
+                "review".into(),
+                json!({"reps": reps, "interval_s": 86400, "stability": 2.0, "last": "2025-01-31T00:00:00.000Z", "neglected": neglected}),
+            );
+            rows.push(a);
+        }
+        svc.store().upsert_many(&rows).unwrap();
+        let report = svc.sweep("w").unwrap();
+        assert_eq!(report["forgotten"], json!(1), "{report}");
+        assert_eq!(report["lapsed"], json!(2), "{report}");
+        assert_eq!(
+            report["forgotten_ids"][0],
+            json!("lesson000000000000000000000000000a")
+        );
+        let live = svc.store().live("w").unwrap();
+        let ids: Vec<&str> = live
+            .iter()
+            .filter_map(|a| a.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(
+            !ids.contains(&"lesson000000000000000000000000000a"),
+            "{ids:?}"
+        );
+        let b = live
+            .iter()
+            .find(|a| {
+                a.get("id").and_then(Value::as_str) == Some("lesson000000000000000000000000000b")
+            })
+            .unwrap();
+        assert_eq!(b["review"]["neglected"], json!(3));
+        assert!(
+            b["review"]["stability"].as_f64().unwrap() < 2.0,
+            "a lapse halves stability"
+        );
+        assert!(
+            !record::is_due(b, "2025-02-02T00:00:00.000Z"),
+            "rescheduled into the future"
+        );
+        // A second sweep the same day finds nothing: the reviews moved.
+        assert_eq!(svc.sweep("w").unwrap()["lapsed"], json!(0));
     }
 
     #[test]

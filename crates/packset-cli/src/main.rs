@@ -95,6 +95,7 @@ fn run() -> anyhow::Result<()> {
         "prefer" => write(port, "preference", rest),
         "search" => search(port, rest),
         "due" => due(port, rest.first().map(String::as_str)),
+        "sweep" => sweep(port, rest.first().map(String::as_str)),
         "islands" => islands(port, rest.first().map(String::as_str)),
         "hubs" => hubs(port, rest.first().map(String::as_str)),
         "island" => island(port, rest),
@@ -129,6 +130,7 @@ fn usage() -> String {
     "packset: start, stop and inspect the pack writer\n\
      \n\
          ensure                 start if down, then print the URL\n\
+         sweep [WS]             lapse the reviews left due past twice their interval; the third miss forgets a never-recalled lesson\n\
          start | stop\n\
          status [WORKSPACE]     counts by kind, pin, index\n\
          port | url | which\n\
@@ -554,6 +556,21 @@ fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
 }
 
 /// Live claims whose `due_at` has passed, soonest first: due, id, text.
+/// Lapse what was left due past twice its interval; the third miss forgets.
+fn sweep(port: u16, given: Option<&str>) -> anyhow::Result<()> {
+    let workspace = workspace(given)?;
+    let report = client(port).sweep(&workspace)?;
+    println!(
+        "{} lapsed by neglect, {} forgotten",
+        report["lapsed"].as_u64().unwrap_or(0),
+        report["forgotten"].as_u64().unwrap_or(0)
+    );
+    for id in report["forgotten_ids"].as_array().into_iter().flatten() {
+        println!("forgotten\t{}", id.as_str().unwrap_or("-"));
+    }
+    Ok(())
+}
+
 fn due(port: u16, given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
     let now = packset_core::clock::utcnow();
