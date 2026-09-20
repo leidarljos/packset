@@ -279,3 +279,4 @@ memory.milli/
 .build-commit
 .venv-docs/
 docs/build/
+packset_tui/

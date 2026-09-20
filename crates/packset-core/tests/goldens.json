@@ -183,12 +183,12 @@
  ],
  "remote": [
   {
-   "remote": "https://github.com/HaoZeke/grok-inside.git",
-   "workspace": "git:github.com/HaoZeke/grok-inside"
+   "remote": "https://github.com/example/kit.git",
+   "workspace": "git:github.com/example/kit"
   },
   {
-   "remote": "git@github.com:HaoZeke/grok-inside.git",
-   "workspace": "git:github.com/HaoZeke/grok-inside"
+   "remote": "git@github.com:example/kit.git",
+   "workspace": "git:github.com/example/kit"
   },
   {
    "remote": "ssh://git@github.com/HaoZeke/vissue.git",
