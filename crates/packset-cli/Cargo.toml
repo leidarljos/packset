@@ -14,6 +14,9 @@ description = "Standing memory: Remember and Prefer only. Installs packset, pack
 pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target }.tar.gz"
 bin-dir = "packset-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
+# cargo-quickinstall only ships the crate's default bin (`packset`). The
+# GitHub tarball has packset, packsetd and packset-mcp.
+disabled-strategies = ["quick-install", "compile"]
 
 [[bin]]
 name = "packset"
