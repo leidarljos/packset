@@ -15,7 +15,8 @@
 | =packset due [WS]= | claims whose review clock has run out, soonest first |
 | =packset islands [WS]= | the link graph's clusters, largest first: size and first claim |
 | =packset hubs [WS]= | the claims the link graph turns on, highest first: a weighted PageRank over the links |
-| =packset island [--workspace WS] [--fire] CUE= | the memories a cue activates: activation, seed mark, id, text; =--fire= wires the top eight together |
+| =packset island [--workspace WS] [--fire] [--as NAME] CUE= | the memories a cue activates: activation, seed mark, id, text; =--fire= wires the top eight together, held within an hour of the same cue's last fire; =--as= reads and writes one persona's weights |
+| =packset sweep [WS]= | the neglect sweep now: reviews left due past twice their interval lapse; a never-recalled forgettable claim missed three times is tombstoned =forgotten: neglect= |
 | =packset fire [--workspace WS] ID ID...= | these claims fired together; their links gain weight, their other links lose a little |
 | =packset grade ID [--lapsed] [WS]= | mark a review recalled, or lapsed |
 | =packset pin [NAME]= | read or set the pinned set; an empty name clears it |
@@ -34,7 +35,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | Method and path | Does |
 |---+---|
 | =GET /health= | =packsetd= |
-| =GET /v1/status?workspace== | counts, pin, index and dense state |
+| =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, and =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave) |
 | =GET /v1/workspaces= | names with live counts |
 | =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate |
 | =GET /v1/atoms?workspace=&as_of== | live claims, or those live at =as_of= |
@@ -45,7 +46,8 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | =GET /v1/search?workspace=&q=&limit=&as_of=&rerank== | ranked hits, the engine, the stage |
 | =GET /v1/islands?workspace== | the link graph's communities, largest first |
 | =GET /v1/hubs?workspace=&limit== | the claims the link graph turns on, highest first, with their scores |
-| =GET /v1/activate?workspace=&q=&limit=&fire=&as== | the cluster a cue activates: top hits as seeds, two hops along the links; =fire=1= wires the top eight; =as=NAME= reads and writes that persona's weights (=link_weights_by=), the shared ones untouched |
+| =GET /v1/activate?workspace=&q=&limit=&fire=&as== | the cluster a cue activates: top hits as seeds, two hops along the links, as =island=; =seeds=, =agreed_seeds= (two scorers agreed), =weak= (no seed both scorers agreed on), =fired= and =held= (the same cue fired within the hour, so nothing moved), =as=; =fire=1= wires the top eight; =as=NAME= reads and writes that persona's weights (=link_weights_by=), the shared ones untouched |
+| =POST /v1/sweep= | =workspace=; the neglect sweep now: =lapsed=, =forgotten=, =forgotten_ids=. The writer runs it on a workspace's first write of a day |
 | =POST /v1/fire= | =ids= that fired together: weights up, missing links made, other links decayed; the same set within an hour of its last fire is held (=held: true=), so several seats closing one issue tighten it once |
 | =POST /v1/consolidate= | the replacement rule over the live set in written order; =apply= false reports the pairs, true closes the earlier of each |
 | =GET /v1/accessions?workspace== | accessions the live claims cite |
@@ -74,7 +76,8 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =entities= | names the claim is about; an entity shaped like an accession must be one; =seat:<name>= names the seat that wrote the claim and is not a topic, so it links and matches nothing |
 | =ts=, =valid_from=, =valid_to= | written, and the window it was true; =valid_to= closes on supersession |
 | =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object |
-| =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s= |
+| =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s=, =neglected= (sweeps that found it overdue) |
+| =forgotten= | on a tombstone the writer made: =neglect= (a forgettable claim never recalled and missed three sweeps) or =the live cap= (the least retrievable claims past the workspace's cap); a forget by hand carries its own reason. Preferences, rules, readings, goals, trust rows and personas are never forgotten by the writer |
 | =links= | peers by entity overlap, at most eight, chosen by relative-neighbourhood pruning; =fire= adds peers up to eight |
 | =link_weights= | weight per link in (0, 1], absent meaning 0.5; moved by =fire= |
 | =link_weights_by= | a persona's own weights by name, written by a fire =as= that persona and read only through its lens; the nodes and links stay shared |
@@ -100,6 +103,8 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 | =PACKSET_HOME= | =packsetd= | the pack home; default =~/.grokinside/memory=; two writers on one host want two homes and two ports |
 | =PACKSET_WORKSPACE= | clients | the workspace when none is given |
 | =PACKSET_FUSE=, =PACKSET_DIVERSIFY=, =PACKSET_DECAY= | writer | the panel |
+| =PACKSET_LIVE_CAP= | writer | live claims a workspace holds before the write that crosses it forgets the least retrievable forgettable ones; default twenty thousand, =off= for none; a write that forgot says =forgot: N= |
+| =PACKSET_TRACE_WRITES= | writer | a file that receives one line per write with the time each stage took |
 | =PACKSET_EMBED_QUERY_WORKERS= | writer | query encoders kept side by side, default 2; each holds one model in memory |
 | =PACKSET_STEM= | writer | =off= turns lexical stemming off |
 | =PACKSET_EMBED= | writer | the encoder binary; else beside the writer, else on =PATH= |

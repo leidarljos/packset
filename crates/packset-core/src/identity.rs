@@ -140,17 +140,17 @@ mod tests {
 
     #[test]
     fn https_and_ssh_land_on_the_same_workspace() {
-        let https = normalize_remote("https://github.com/HaoZeke/grok-inside.git").unwrap();
-        let ssh = normalize_remote("git@github.com:HaoZeke/grok-inside.git").unwrap();
-        assert_eq!(https, "git:github.com/HaoZeke/grok-inside");
+        let https = normalize_remote("https://example.com/acme/widgets.git").unwrap();
+        let ssh = normalize_remote("git@example.com:acme/widgets.git").unwrap();
+        assert_eq!(https, "git:example.com/acme/widgets");
         assert_eq!(ssh, https);
     }
 
     #[test]
     fn the_ssh_scheme_form_agrees_too() {
         assert_eq!(
-            normalize_remote("ssh://git@github.com/HaoZeke/vissue.git").unwrap(),
-            "git:github.com/HaoZeke/vissue"
+            normalize_remote("ssh://git@example.com/acme/widgets.git").unwrap(),
+            "git:example.com/acme/widgets"
         );
     }
 
@@ -172,8 +172,8 @@ mod tests {
     #[test]
     fn a_slug_is_one_directory_component() {
         assert_eq!(
-            workspace_slug("git:github.com/HaoZeke/vissue"),
-            "git_github.com_HaoZeke_vissue"
+            workspace_slug("git:example.com/acme/widgets"),
+            "git_example.com_acme_widgets"
         );
         assert_eq!(workspace_slug("global"), "global");
         assert_eq!(workspace_slug("///"), "workspace");

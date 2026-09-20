@@ -2,7 +2,16 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.9.21 (2026-09-20)
+
+- The reference lists `packset sweep`, `POST /v1/sweep`, the `forgotten`
+  field and its reasons, `PACKSET_LIVE_CAP`, `PACKSET_TRACE_WRITES`, the
+  status rows `live_cap` and `forgotten_by_reason`, and every field an
+  activation answers with (`weak`, `held`, `as`).
+- Every crate page carries the README.
+- `just milli` and `just embed` gate on `PACKSET_BUILDER=1` in the
+  builder's environment rather than on its host name; the identity tests
+  use `example.com` remotes.
 
 ## 0.9.20 (2026-09-20)
 

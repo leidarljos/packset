@@ -13,16 +13,12 @@ bench sizes="":
 milli:
     #!/usr/bin/env bash
     set -euo pipefail
-    host="$(hostname -s || hostname)"
-    # The compute nodes are named rgamNterra, so a bare `terra` prefix match
-    # would refuse to build on the builder itself.
-    case "$host" in
-        terra|rg.terra|*.terra|*terra) ;;
-        *)
-            echo "just milli: build on the remote builder, not $host" >&2
-            exit 1
-            ;;
-    esac
+    # The builder is the host where the model may live; it says so with
+    # PACKSET_BUILDER=1 in its environment rather than by name.
+    if [ "${PACKSET_BUILDER:-}" != 1 ]; then
+        echo "just milli: build on the builder (PACKSET_BUILDER=1), not here" >&2
+        exit 1
+    fi
     cargo build -p packset-milli --release
 
 # The dense projection. Same rule as milli: it carries a native runtime and a
@@ -30,14 +26,10 @@ milli:
 embed:
     #!/usr/bin/env bash
     set -euo pipefail
-    host="$(hostname -s || hostname)"
-    case "$host" in
-        terra|rg.terra|*.terra|*terra) ;;
-        *)
-            echo "just embed: build on the remote builder, not $host" >&2
-            exit 1
-            ;;
-    esac
+    if [ "${PACKSET_BUILDER:-}" != 1 ]; then
+        echo "just embed: build on the builder (PACKSET_BUILDER=1), not here" >&2
+        exit 1
+    fi
     cargo build -p packset-embed --release
 
 ensure:
