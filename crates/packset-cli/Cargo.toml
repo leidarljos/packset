@@ -36,10 +36,10 @@ path = "../packset-mcp/src/main.rs"
 [dependencies]
 anyhow.workspace = true
 libc = "0.2"
-packset-client = { path = "../packset-client", version = "0.10.0" }
+packset-client = { path = "../packset-client", version = "0.10.1" }
 serde.workspace = true
 serde_json.workspace = true
-packset-core = { path = "../packset-core", version = "0.10.0" }
+packset-core = { path = "../packset-core", version = "0.10.1" }
 # The writer's: the LMDB store, the proposal log's ordered map, HTTP.
 heed = "0.20"
 indexmap = "2"

@@ -2841,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "packset"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "heed 0.20.5",
@@ -2861,7 +2861,7 @@ dependencies = [
 
 [[package]]
 name = "packset-client"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "packset-core",
  "serde",
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "criterion",
  "rust-stemmers",
@@ -2883,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "packset-daemon"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "heed 0.20.5",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "packset-embed"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "fastembed",
@@ -2909,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "packset-milli"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "milli",
