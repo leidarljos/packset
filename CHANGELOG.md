@@ -2,6 +2,12 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `cargo binstall packset` takes the GitHub tarball (packset, packsetd,
+  packset-mcp) and skips cargo-quickinstall, which only had the default
+  binary.
+
 ## 0.10.0 (2026-09-20)
 
 - One crate installs the tool: `cargo install packset` (or `cargo binstall
