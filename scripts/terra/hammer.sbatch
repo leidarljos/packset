@@ -9,6 +9,9 @@
 #SBATCH --output=%x-%j.out
 # Many clients on one writer: the hammer example at 1, 4, 16 and 32 clients,
 # 200 operations each, against a scratch writer with the dense ballot on.
+# Write-path leftover gate: PACKSET_TRACE_WRITES plus HAMMER_SHARED (one
+# workspace, live+closed counted against written). That is the id-map /
+# snapshot-patch measurement, not ljos/scripts/herd.sh occupancy smoke.
 set -uo pipefail
 export PATH="$HOME/stackbin:$PATH"
 export PACKSET_PORT=8798 PACKSET_URL=http://127.0.0.1:8798 PACKSET_HOME="$HOME/.cache/packset-hammer"

@@ -2,6 +2,19 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The 0.9.16 fill note quoted 236 s. Round-15 close on the build host
+  was 127.3 s at 10000 claims (`hook-scale-15900`). What still grows
+  per write is the linear id map (`by_id` collect) and the snapshot
+  patch (`patch_live` / `patch_shown` position scans, `Arc::make_mut`
+  under a concurrent search). At live=9999 the write trace is snapshot
+  0.0 ms, dedup 11.2 ms, upsert 17.5 ms (`hook-scale-writes-15900`):
+  snapshot plus dedup do not dominate, so the leftover stays those
+  linear maps with small constants. Measure it with
+  `PACKSET_TRACE_WRITES` plus `HAMMER_SHARED`, not by growing herd
+  occupancy smoke.
+
 ## 0.10.1 (2026-09-20)
 
 - `cargo binstall packset` takes the GitHub tarball (packset, packsetd,
