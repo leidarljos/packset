@@ -2,6 +2,17 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.10.0 (2026-09-20)
+
+- One crate installs the tool: `cargo install packset` (or `cargo binstall
+  packset`) gives `packset`, `packsetd` and `packset-mcp`. The writer and
+  the MCP surface are built by the `packset` crate from their source trees;
+  `packset-daemon` is a library in the workspace and `packset-mcp` a source
+  tree, neither published. `packset-core`, `packset-client` and
+  `packset-embed` stay published: two are libraries other tools depend on,
+  the third is the optional encoder. Nothing already on crates.io is
+  yanked.
+
 ## 0.9.21 (2026-09-20)
 
 - The reference lists `packset sweep`, `POST /v1/sweep`, the `forgotten`

@@ -15,7 +15,7 @@ milli is a projection. Every agent is an HTTP client.
 
 | Crate | Role |
 |---|---|
-| =packsetd= | writer (Rust, crate =packset-daemon=) |
+| =packsetd= | writer (Rust, source in =packset-daemon=, shipped by the =packset= crate) |
 | =packset-core= | named fuse/diversify/decay panel |
 | =packset-client= | HTTP |
 | =packset-embed= | optional dense encoder |

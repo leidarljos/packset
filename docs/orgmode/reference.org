@@ -116,8 +116,8 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 | Crate | Carries |
 |---+---|
 | =packset-core= | the atom, the prose limit, BM25+, the scan, the panel, decay, review clock |
-| =packset-daemon= | =packsetd=: the Lightning Memory-Mapped Database (LMDB) store, HTTP, projections, the encoder child |
+| =packset-daemon= | =packsetd=: the Lightning Memory-Mapped Database (LMDB) store, HTTP, projections, the encoder child; a library in the workspace whose binary the =packset= crate builds |
 | =packset-client= | the HTTP client every tool uses |
-| =packset-cli= | =packset= |
-| =packset-mcp= | the read-only Model Context Protocol (MCP) surface |
+| =packset-cli= | the =packset= crate on crates.io: =packset=, =packsetd=, =packset-mcp= |
+| =packset-mcp= | the read-only Model Context Protocol (MCP) surface, built by =packset= from its source tree |
 | =packset-embed= | dense, late, sparse and cross-encoder models as one child process |

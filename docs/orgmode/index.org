@@ -35,8 +35,7 @@ and every other tool is a client.
 * Install
 
 #+begin_src console
-$ cargo binstall packset packset-daemon
-$ cargo binstall packset-mcp   # optional
+$ cargo binstall packset          # packset, packsetd and packset-mcp
 $ packset ensure
 PACKSET_URL=http://127.0.0.1:8761
 #+end_src

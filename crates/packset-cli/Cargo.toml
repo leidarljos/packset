@@ -8,7 +8,7 @@ publish.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "Standing memory: Remember and Prefer only. Binary name packset."
+description = "Standing memory: Remember and Prefer only. Installs packset, packsetd and packset-mcp."
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target }.tar.gz"
@@ -19,17 +19,33 @@ pkg-fmt = "tgz"
 name = "packset"
 path = "src/main.rs"
 
+# The writer and the MCP surface are built from their source trees in the
+# workspace, so one published crate installs the three binaries and the
+# internals publish nothing.
 [[bin]]
 name = "packsetd"
-path = "src/bin/packsetd.rs"
+path = "../packset-daemon/src/bin_root.rs"
+
+[[bin]]
+name = "packset-mcp"
+path = "../packset-mcp/src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 libc = "0.2"
-packset-client = { path = "../packset-client", version = "0.9.0" }
+packset-client = { path = "../packset-client", version = "0.10.0" }
+serde.workspace = true
 serde_json.workspace = true
-packset-core = { path = "../packset-core", version = "0.9.0" }
-packset-daemon = { path = "../packset-daemon", version = "0.9.0" }
+packset-core = { path = "../packset-core", version = "0.10.0" }
+# The writer's: the LMDB store, the proposal log's ordered map, HTTP.
+heed = "0.20"
+indexmap = "2"
+tiny_http = "0.12"
+# The MCP surface's.
+rmcp = { version = "3.2", features = ["server", "transport-io", "transport-async-rw", "macros"] }
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 
 [dev-dependencies]
 tempfile = "3"
+ureq = { version = "2", default-features = false, features = ["json"] }

@@ -20,15 +20,16 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 ## Install
 
 ```console
-$ cargo binstall packset packset-daemon
-# or: cargo install packset packset-daemon
+$ cargo binstall packset
+# or: cargo install packset
 $ packset ensure
 PACKSET_URL=http://127.0.0.1:8761
 $ export PACKSET_URL=http://127.0.0.1:8761
 ```
 
-`packset-mcp` is the read-only MCP surface and `packset-embed` the optional
-dense encoder; the pack answers without either.
+That installs `packset`, the writer `packsetd` and the read-only MCP
+surface `packset-mcp`. `packset-embed`, the optional dense encoder, is its
+own crate; the pack answers without it.
 
 ## First minute
 
@@ -60,10 +61,10 @@ The numbers, their jobs and how to regenerate them are on the [explanation page]
 | Crate | Carries |
 |---|---|
 | `packset-core` | the atom, the prose limit, BM25+, the panel, decay, islands, the review clock |
-| `packset-daemon` | `packsetd`: LMDB store, HTTP, the encoder child |
+| `packset-daemon` | `packsetd`: LMDB store, HTTP, the encoder child; a library in the workspace, its binary ships in `packset` |
 | `packset-client` | the HTTP client every tool uses |
-| `packset-cli` | `packset` |
-| `packset-mcp` | the read-only MCP surface |
+| `packset-cli` | the `packset` crate: `packset`, `packsetd`, `packset-mcp` |
+| `packset-mcp` | the read-only MCP surface, built by `packset` from its source tree |
 | `packset-embed` | dense, late, sparse and cross-encoder models as one child |
 
 The retrieval, forgetting, islands, trust, many-clients and benchmark

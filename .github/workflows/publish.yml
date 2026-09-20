@@ -24,6 +24,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
-          for p in packset-core packset-client packset-embed packset packset-daemon packset-mcp; do
+          for p in packset-core packset-client packset-embed packset; do
             cargo publish --locked --no-verify -p "$p"
           done

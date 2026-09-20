@@ -4,7 +4,6 @@ members = [
     "crates/packset-core",
     "crates/packset-client",
     "crates/packset-cli",
-    "crates/packset-mcp",
     "crates/packset-daemon",
     "crates/packset-embed",
     "crates/packset-milli",
@@ -13,7 +12,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.9.21"
+version = "0.10.0"
 publish = true
 rust-version = "1.88"
 repository = "https://github.com/leidarljos/packset"
