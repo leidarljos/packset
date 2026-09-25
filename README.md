@@ -51,7 +51,17 @@ $ packset island fusing two ballots     # the memories a task activates
 - A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
 - Forgetting by neglect: a review left due past twice its interval lapses as a missed review would, and a never-recalled lesson missed three times is forgotten. The writer sweeps once a day; `packset sweep` runs it now.
 - Claims link by shared names; links carry weights that use strengthens; `island` returns the cluster a task activates.
-- One writer, one LMDB file. Zero errors at 32 clients, and a herd of 32 writing 6400 distinct claims into one workspace loses none of them. A second host is a second pack; a signed handover crosses.
+- One writer, one LMDB file. Zero errors at 32 clients, and a herd of 32 writing 6400 distinct claims into one workspace loses none of them. A second host is a second pack; a signed handover crosses. The hammer rerun, 200 operations a client, measured:
+
+  | Clients | Requests | Wall | Rate | Errors | Workspace |
+  |---:|---:|---:|---:|---:|---|
+  | 1 | 600 | 9.89 s | 61 req/s | 0 | separate |
+  | 4 | 2400 | 20.89 s | 115 req/s | 0 | separate |
+  | 16 | 9600 | 86.18 s | 111 req/s | 0 | separate |
+  | 32 | 19200 | 131.55 s | 146 req/s | 0 | separate |
+  | 4 | 2400 | 15.55 s | 154 req/s | 0 | shared, 799 live + 1 closed of 800 |
+  | 16 | 9600 | 105.97 s | 91 req/s | 0 | shared, 3192 live + 8 closed of 3200 |
+  | 32 | 19200 | 292.56 s | 66 req/s | 0 | shared, 6382 live + 18 closed of 6400 |
 - Trust rows and personas live in the pack and reach the seat's consensus.
 
 The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html) and in the [bench package](https://github.com/leidarljos/bench).
