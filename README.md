@@ -23,8 +23,6 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 $ cargo binstall packset
 # or: cargo install packset
 $ packset ensure
-PACKSET_URL=http://127.0.0.1:8761
-$ export PACKSET_URL=http://127.0.0.1:8761
 ```
 
 That installs `packset`, the writer `packsetd` and the read-only MCP
