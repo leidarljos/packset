@@ -32,14 +32,12 @@ Install
 
 .. code:: console
 
-   $ cargo binstall packset packset-daemon
-   $ cargo binstall packset-mcp   # optional
+   $ cargo binstall packset          # packset, packsetd and packset-mcp
    $ packset ensure
-   PACKSET_URL=http://127.0.0.1:8761
 
-``packset ensure`` starts the writer when it is down and prints the URL every
-client reads from ``PACKSET_URL``. The dense scorer is a separate binary,
-``packset-embed``, and the pack answers without it.
+``packset ensure`` starts the writer when it is down. With nothing set, every
+client uses that writer on the default port. The dense scorer is a separate
+binary, ``packset-embed``, and the pack answers without it.
 
 First minute
 ============
@@ -47,9 +45,6 @@ First minute
 .. code:: console
 
    $ packset ensure
-   PACKSET_URL=http://127.0.0.1:8761
-   INSIDE_MEMORY_URL=http://127.0.0.1:8761
-   $ export PACKSET_URL=http://127.0.0.1:8761
    $ packset remember --workspace demo "BM25+ is the default lexical scorer. It beat BM25 by two points."
    3f9c... lesson  due 2026-09-13T08:54:37.394Z
    $ packset search --workspace demo lexical scorer
