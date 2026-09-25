@@ -27,11 +27,11 @@ path = "src/main.rs"
 # internals publish nothing.
 [[bin]]
 name = "packsetd"
-path = "../packset-daemon/src/bin_root.rs"
+path = "src/bin/packsetd/bin_root.rs"
 
 [[bin]]
 name = "packset-mcp"
-path = "../packset-mcp/src/main.rs"
+path = "src/bin/packset-mcp/main.rs"
 
 [dependencies]
 anyhow.workspace = true

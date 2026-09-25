@@ -18,9 +18,11 @@ pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target
 bin-dir = "packset-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
+# The daemon source lives in packset-cli so the published packset crate
+# carries packsetd; this unpublished crate keeps the library for examples.
 [lib]
 name = "packset_daemon"
-path = "src/lib.rs"
+path = "../packset-cli/src/bin/packsetd/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
