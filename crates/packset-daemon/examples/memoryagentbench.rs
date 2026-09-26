@@ -491,8 +491,8 @@ fn main() -> anyhow::Result<()> {
     let cap: Option<usize> = std::env::var("PACKSET_MAB_ROWS")
         .ok()
         .and_then(|c| c.parse().ok());
-    let encoder = packset_daemon::embed::binary().is_some()
-        && std::env::var("PACKSET_MAB_LEXICAL").is_err();
+    let encoder =
+        packset_daemon::embed::binary().is_some() && std::env::var("PACKSET_MAB_LEXICAL").is_err();
     println!(
         "encoder: {}",
         if encoder {
