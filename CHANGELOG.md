@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A refused Remember says why and how to fix it: which sentence reads very
+  hard, its word count, the limit, and to split it at a conjunction. The
+  grade and adverb refusals name their fix too. `ljos remember` and
+  `ljos finish --lesson` print the text unchanged.
+
 - The 0.9.16 fill note quoted 236 s. Round-15 close on the build host
   was 127.3 s at 10000 claims (`hook-scale-15900`). What still grows
   per write is the linear id map (`by_id` collect) and the snapshot

@@ -271,19 +271,32 @@ pub fn refuse(text: &str, role: Role) -> Result<Report, ProseError> {
             )));
         }
         if report.very_hard_sentences > 0 {
-            return Err(ProseError("atom sentence is very hard to read".into()));
+            let (index, words) = sentences_of(text)
+                .iter()
+                .map(|s| words_of(s).len())
+                .enumerate()
+                .find(|(_, n)| *n >= VERY_HARD_WORDS)
+                .unwrap_or((0, VERY_HARD_WORDS));
+            return Err(ProseError(format!(
+                "atom sentence {} is very hard to read: {words} words, the limit is {}; \
+                 split it at a conjunction or drop a clause",
+                index + 1,
+                VERY_HARD_WORDS - 1
+            )));
         }
     }
     if report.words >= 12 {
         if let Some(grade) = report.grade {
             if grade > MAX_GRADE {
                 return Err(ProseError(format!(
-                    "readability grade {grade} exceeds {MAX_GRADE}"
+                    "readability grade {grade} exceeds {MAX_GRADE}; \
+                     use shorter sentences and shorter words"
                 )));
             }
             if report.adverb_ratio > MAX_ADVERB_RATIO {
                 return Err(ProseError(format!(
-                    "adverb ratio {} exceeds {MAX_ADVERB_RATIO}",
+                    "adverb ratio {} exceeds {MAX_ADVERB_RATIO}; \
+                     cut the -ly words or replace them with a number",
                     report.adverb_ratio
                 )));
             }
@@ -371,6 +384,16 @@ mod tests {
     fn a_very_hard_sentence_is_refused_in_an_atom_only() {
         let very = "word ".repeat(VERY_HARD_WORDS) + ".";
         assert!(refuse(&very, Role::Atom).is_err());
+        // The refusal names the sentence, its length, the limit and the fix.
+        let two = format!("Short first claim here. {very}");
+        let err = refuse(&two, Role::Atom).unwrap_err().to_string();
+        assert!(err.contains("sentence 2"), "{err}");
+        assert!(err.contains(&format!("{VERY_HARD_WORDS} words")), "{err}");
+        assert!(
+            err.contains(&format!("limit is {}", VERY_HARD_WORDS - 1)),
+            "{err}"
+        );
+        assert!(err.contains("split it"), "{err}");
         // In a card the length alone does not refuse; the grade decides.
         let report = assess(&very);
         assert_eq!(report.very_hard_sentences, 1);
