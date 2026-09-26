@@ -15,6 +15,6 @@ cd "$HOME/Git/Github/packset"
 export PACKSET_MAB_LEXICAL=1
 export PACKSET_MAB_DUMP="$HOME/var/scratch/packset-mab-protocol-${SLURM_JOB_ID}.jsonl"
 mkdir -p "$(dirname "$PACKSET_MAB_DUMP")"
-cargo test --locked -p packset-core protocol_fixture_names_all_four_and_refusal prefer_and_accept_are_seat_writes -- --nocapture
+cargo test --locked -p packset-core --lib mab -- --nocapture
 cargo run --release --locked -p packset-daemon --example memoryagentbench -- "$HOME/data/mab"
 echo MAB-PROTOCOL-DONE
