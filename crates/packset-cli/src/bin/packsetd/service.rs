@@ -2045,7 +2045,12 @@ impl Service {
             "embedder": {
                 "enabled": embed_enabled(),
                 "binary": crate::embed::binary().map(|path| path.display().to_string()),
-                "available": embed_enabled() && crate::embed::binary().is_some(),
+                // A binary that did not answer its last call is not available,
+                // whatever is on disk: the ranking is lexical until it does.
+                "available": embed_enabled()
+                    && crate::embed::binary().is_some()
+                    && crate::embed::last_dense() != Some(false),
+                "answering": crate::embed::last_dense(),
             },
             // Off unless the host asked. The locomo cost lives in the README;
             // status only says whether this writer will spend it.

@@ -6,6 +6,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -428,6 +429,21 @@ fn run_group(jobs: Vec<Pending>, query: bool) {
     }
 }
 
+/// How the last dense encode went: 0 none yet, 1 answered, 2 did not. A
+/// binary on disk is not an encoder that answers; one killed for memory
+/// leaves every search lexical until the next start succeeds.
+static LAST_DENSE: AtomicU8 = AtomicU8::new(0);
+
+/// Whether the last dense encode answered; none before the first.
+#[must_use]
+pub fn last_dense() -> Option<bool> {
+    match LAST_DENSE.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     let binary = binary()?;
     let mut held = dense_slot().lock().ok()?;
@@ -435,12 +451,16 @@ fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
         if held.as_mut().is_none_or(|running| !running.alive()) {
             *held = Encoder::start(&binary, query);
         }
-        let running = held.as_mut()?;
+        let Some(running) = held.as_mut() else {
+            break;
+        };
         if let Some(vectors) = running.encode_batch(texts, query) {
+            LAST_DENSE.store(1, Ordering::Relaxed);
             return Some(vectors);
         }
         *held = None;
     }
+    LAST_DENSE.store(2, Ordering::Relaxed);
     None
 }
 
@@ -658,6 +678,27 @@ pub(crate) static EMBED: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An encoder that is on disk but does not answer is reported as not
+    /// answering, not as available.
+    #[test]
+    fn an_encoder_that_dies_is_recorded_as_not_answering() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::var_os("PACKSET_EMBED");
+        // SAFETY: EMBED serialises every test that points PACKSET_EMBED.
+        unsafe { std::env::set_var("PACKSET_EMBED", "/bin/false") };
+        if binary().is_some() {
+            assert!(encode_now(&["a text".to_string()], false).is_none());
+            assert_eq!(last_dense(), Some(false));
+        }
+        *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+        unsafe {
+            match before {
+                Some(v) => std::env::set_var("PACKSET_EMBED", v),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+    }
 
     #[test]
     fn a_path_that_is_not_a_program_is_not_an_encoder() {
