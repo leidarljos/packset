@@ -8,7 +8,7 @@
 //! packset ensure | start | stop | status | port | url | which
 //! packset remember [--workspace WS] TEXT...
 //! packset prefer [--workspace WS] TEXT...
-//! packset search [--workspace WS] QUERY...
+//! packset search [--workspace WS] [--as-of TS] QUERY...
 //! packset due [WORKSPACE]
 //! packset islands [WORKSPACE]
 //! packset island [--workspace WS] [--fire] CUE
@@ -136,7 +136,7 @@ fn usage() -> String {
          port | url | which\n\
          remember [--workspace WS] TEXT   one lesson, two sentences at most\n\
          prefer [--workspace WS] TEXT     one standing preference\n\
-         search [--workspace WS] QUERY    ranked claims, score kind id text\n\
+         search [--workspace WS] [--as-of TS] QUERY  ranked claims live now, or at TS\n\
          due [WORKSPACE]        claims whose review clock has run out\n\
          islands [WORKSPACE]    the link graph's clusters, largest first\n\
          hubs [WORKSPACE]       the claims the link graph turns on, highest first\n\
@@ -534,16 +534,60 @@ fn write(port: u16, kind: &str, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Flags a search takes besides the question.
+#[derive(Debug)]
+struct SearchFlags {
+    workspace: Option<String>,
+    as_of: Option<String>,
+    words: Vec<String>,
+}
+
+/// `--workspace` and `--as-of` pulled out; the rest is the question.
+fn search_flags(args: &[String]) -> anyhow::Result<SearchFlags> {
+    let mut workspace = None;
+    let mut as_of = None;
+    let mut words = Vec::new();
+    let mut at = 0;
+    while at < args.len() {
+        match args[at].as_str() {
+            "--workspace" => {
+                at += 1;
+                workspace = Some(
+                    args.get(at)
+                        .ok_or_else(|| anyhow::anyhow!("--workspace needs a name"))?
+                        .to_string(),
+                );
+            }
+            "--as-of" => {
+                at += 1;
+                as_of = Some(
+                    args.get(at)
+                        .ok_or_else(|| anyhow::anyhow!("--as-of needs a timestamp"))?
+                        .to_string(),
+                );
+            }
+            other => words.push(other.to_string()),
+        }
+        at += 1;
+    }
+    Ok(SearchFlags {
+        workspace,
+        as_of,
+        words,
+    })
+}
+
 /// Ranked claims for a question: score, kind, id, text.
+/// `--as-of TS` ranks the claims whose window contained TS.
 fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
-    let (given, words) = split_workspace(args);
-    let query = words.join(" ").trim().to_string();
+    let flags = search_flags(args)?;
+    let query = flags.words.join(" ").trim().to_string();
     if query.is_empty() {
         anyhow::bail!("search: pass a question");
     }
-    let workspace = workspace(given.as_deref())?;
+    let workspace = workspace(flags.workspace.as_deref())?;
     eprintln!("packset: workspace {workspace}");
-    for hit in client(port).search(&workspace, &query, 10)? {
+    for hit in client(port).search_as_of(&workspace, &query, 10, flags.as_of.as_deref())? {
         println!(
             "{:.4}\t{}\t{}\t{}",
             hit.score,
@@ -747,6 +791,42 @@ mod tests {
         let (ws, rest) = super::split_workspace(&["only".to_string()]);
         assert!(ws.is_none());
         assert_eq!(rest, ["only"]);
+    }
+
+    #[test]
+    fn search_as_of_is_not_the_query() {
+        let args: Vec<String> = ["--as-of", "2024-06-01T00:00:00Z", "Borda"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let flags = super::search_flags(&args).unwrap();
+        assert_eq!(flags.as_of.as_deref(), Some("2024-06-01T00:00:00Z"));
+        assert_eq!(flags.words, ["Borda"]);
+        assert!(flags.workspace.is_none());
+        let both: Vec<String> = [
+            "--workspace",
+            "acme-cli",
+            "--as-of",
+            "2024-06-01T00:00:00Z",
+            "Borda",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let flags = super::search_flags(&both).unwrap();
+        assert_eq!(flags.workspace.as_deref(), Some("acme-cli"));
+        assert_eq!(flags.as_of.as_deref(), Some("2024-06-01T00:00:00Z"));
+        assert_eq!(flags.words, ["Borda"]);
+    }
+
+    #[test]
+    fn search_as_of_needs_a_timestamp() {
+        let args: Vec<String> = ["--as-of"].iter().map(|s| s.to_string()).collect();
+        let err = super::search_flags(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("--as-of needs a timestamp"),
+            "{err}"
+        );
     }
 
     #[test]

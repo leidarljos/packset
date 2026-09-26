@@ -820,4 +820,74 @@ mod tests {
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
     }
+
+    fn dated_pack() -> (tempfile::TempDir, Service) {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        svc.store()
+            .upsert(
+                &json!({
+                    "id": "old",
+                    "workspace": "w",
+                    "text": "The default fuse is Borda.",
+                    "kind": "voice",
+                    "valid_from": "2024-01-01T00:00:00.000Z",
+                    "valid_to": "2024-12-01T00:00:00.000Z"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .unwrap();
+        svc.store()
+            .upsert(
+                &json!({
+                    "id": "neu",
+                    "workspace": "w",
+                    "text": "The default fuse is CombMNZ.",
+                    "kind": "voice",
+                    "valid_from": "2024-12-01T00:00:00.000Z"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .unwrap();
+        (dir, svc)
+    }
+
+    fn hit_ids(answer: &Answer) -> Vec<&str> {
+        answer.body["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["id"].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn dated_search_returns_the_claim_live_then() {
+        let (_dir, svc) = dated_pack();
+        let panel = packset_core::Panel::default();
+        let mut q = HashMap::new();
+        q.insert("workspace".into(), "w".into());
+        q.insert("q".into(), "Borda".into());
+        q.insert("as_of".into(), "2024-06-01T00:00:00.000Z".into());
+        let then = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        assert_eq!(then.code, 200, "{:?}", then.body);
+        assert_eq!(hit_ids(&then), vec!["old"], "{:?}", then.body);
+        assert_eq!(then.body["as_of"], json!("2024-06-01T00:00:00.000Z"));
+        q.insert("as_of".into(), "not-a-date".into());
+        let bad = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        assert_eq!(bad.code, 400, "{:?}", bad.body);
+        assert_eq!(bad.body["error"], json!("as_of must be a timestamp"));
+        q.remove("as_of");
+        let now = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        assert_eq!(now.code, 200, "{:?}", now.body);
+        assert!(
+            !hit_ids(&now).contains(&"old"),
+            "live-now search still drops it: {:?}",
+            now.body
+        );
+    }
 }

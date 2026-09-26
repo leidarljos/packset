@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `packset search --as-of TS` ranks the claims whose `valid_from` /
+  `valid_to` window contained TS, the same window `GET /v1/search?as_of=`
+  and `packset atoms --as-of` already read. A stamp the pack will not
+  parse is refused. Live-now search still drops a closed claim.
+
 - A refused Remember says why and how to fix it: which sentence reads very
   hard, its word count, the limit, and to split it at a conjunction. The
   grade and adverb refusals name their fix too. `ljos remember` and

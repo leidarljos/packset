@@ -44,7 +44,7 @@ $ packset island fusing two ballots     # the memories a task activates
 
 - Writes are `remember` and `prefer`, two sentences at most, stored as given. Nothing is extracted from a transcript.
 - Every claim has a validity window and a review clock (FSRS). Retrievability scales search; on a longitudinal corpus it ranks a recalled claim first 0.947 of the time against 0.230 for words alone.
-- A later claim closes the earlier one it rewrites; the closed one keeps its window for an as-of read. `consolidate` runs the rule over what is held.
+- A later claim closes the earlier one it rewrites; the closed one keeps its window for an as-of read (`packset search --as-of TS`, `packset atoms --as-of TS`). `consolidate` runs the rule over what is held.
 - Search fuses a prefix scan, BM25+ and a dense ballot. LongMemEval_S sessions: 0.889 hit@1; MemoryAgentBench accurate retrieval 0.675 and conflict resolution 0.579 with a 7B reader.
 - A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
 - Forgetting by neglect: a review left due past twice its interval lapses as a missed review would, and a never-recalled lesson missed three times is forgotten. The writer sweeps once a day; `packset sweep` runs it now.

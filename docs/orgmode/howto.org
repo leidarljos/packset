@@ -34,14 +34,17 @@ The binary prints a JSON object with =workspace=, =set=, and =instructions=.
 
 * Ask what was live on a date
 
-Search answers live-now. A dated question reads the store, where a closed
-claim still sits:
+A closed claim keeps its window. =packset atoms --as-of TS= lists every
+claim live at =TS=; =packset search --as-of TS QUERY= ranks those same
+claims. Live-now search drops the closed window.
 
 #+begin_src console
 $ packset atoms --as-of 2026-08-01T00:00:00Z seat
+$ packset search --as-of 2026-08-01T00:00:00Z --workspace seat fusion
 #+end_src
 
-=GET /v1/search= with =as_of= runs the same window over a ranked answer.
+=GET /v1/search= with =as_of= is the same window. A stamp the pack will
+not parse is refused.
 
 * Retire a claim
 

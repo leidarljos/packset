@@ -2622,6 +2622,13 @@ mod tests {
             !now_ids.contains(&"old"),
             "live-now search still drops it: {now_hits}"
         );
+        let refused = svc
+            .search("w", "Borda", 8, None, &panel, Some("not-a-date"), false)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("as_of must be a timestamp"),
+            "{refused}"
+        );
     }
 
     #[test]
