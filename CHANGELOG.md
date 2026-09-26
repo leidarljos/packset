@@ -9,6 +9,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   and `packset atoms --as-of` already read. A stamp the pack will not
   parse is refused. Live-now search still drops a closed claim.
 
+- `packset search --rerank` runs the measured cross-encoder second stage
+  over the top 20, the same stage `GET /v1/search?rerank=1` and
+  `PACKSET_RERANK=1` on the writer already request. Off by default. An
+  absent or broken child leaves the first-stage order and reports
+  `rerank: absent`. The locomo report prints the second-stage wall.
+
 - A refused Remember says why and how to fix it: which sentence reads very
   hard, its word count, the limit, and to split it at a conjunction. The
   grade and adverb refusals name their fix too. `ljos remember` and

@@ -8,7 +8,7 @@
 //! packset ensure | start | stop | status | port | url | which
 //! packset remember [--workspace WS] TEXT...
 //! packset prefer [--workspace WS] TEXT...
-//! packset search [--workspace WS] [--as-of TS] QUERY...
+//! packset search [--workspace WS] [--as-of TS] [--rerank] QUERY...
 //! packset due [WORKSPACE]
 //! packset islands [WORKSPACE]
 //! packset island [--workspace WS] [--fire] CUE
@@ -136,7 +136,7 @@ fn usage() -> String {
          port | url | which\n\
          remember [--workspace WS] TEXT   one lesson, two sentences at most\n\
          prefer [--workspace WS] TEXT     one standing preference\n\
-         search [--workspace WS] [--as-of TS] QUERY  ranked claims live now, or at TS\n\
+         search [--workspace WS] [--as-of TS] [--rerank] QUERY  ranked claims live now, or at TS\n\
          due [WORKSPACE]        claims whose review clock has run out\n\
          islands [WORKSPACE]    the link graph's clusters, largest first\n\
          hubs [WORKSPACE]       the claims the link graph turns on, highest first\n\
@@ -539,13 +539,15 @@ fn write(port: u16, kind: &str, args: &[String]) -> anyhow::Result<()> {
 struct SearchFlags {
     workspace: Option<String>,
     as_of: Option<String>,
+    rerank: bool,
     words: Vec<String>,
 }
 
-/// `--workspace` and `--as-of` pulled out; the rest is the question.
+/// `--workspace`, `--as-of` and `--rerank` pulled out; the rest is the question.
 fn search_flags(args: &[String]) -> anyhow::Result<SearchFlags> {
     let mut workspace = None;
     let mut as_of = None;
+    let mut rerank = false;
     let mut words = Vec::new();
     let mut at = 0;
     while at < args.len() {
@@ -566,6 +568,7 @@ fn search_flags(args: &[String]) -> anyhow::Result<SearchFlags> {
                         .to_string(),
                 );
             }
+            "--rerank" => rerank = true,
             other => words.push(other.to_string()),
         }
         at += 1;
@@ -573,12 +576,14 @@ fn search_flags(args: &[String]) -> anyhow::Result<SearchFlags> {
     Ok(SearchFlags {
         workspace,
         as_of,
+        rerank,
         words,
     })
 }
 
 /// Ranked claims for a question: score, kind, id, text.
 /// `--as-of TS` ranks the claims whose window contained TS.
+/// `--rerank` runs the measured cross-encoder second stage.
 fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
     let flags = search_flags(args)?;
     let query = flags.words.join(" ").trim().to_string();
@@ -587,7 +592,9 @@ fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
     }
     let workspace = workspace(flags.workspace.as_deref())?;
     eprintln!("packset: workspace {workspace}");
-    for hit in client(port).search_as_of(&workspace, &query, 10, flags.as_of.as_deref())? {
+    for hit in
+        client(port).search_opts(&workspace, &query, 10, flags.as_of.as_deref(), flags.rerank)?
+    {
         println!(
             "{:.4}\t{}\t{}\t{}",
             hit.score,
@@ -817,6 +824,19 @@ mod tests {
         assert_eq!(flags.workspace.as_deref(), Some("acme-cli"));
         assert_eq!(flags.as_of.as_deref(), Some("2024-06-01T00:00:00Z"));
         assert_eq!(flags.words, ["Borda"]);
+        assert!(!flags.rerank);
+    }
+
+    #[test]
+    fn search_rerank_is_not_the_query() {
+        let args: Vec<String> = ["--rerank", "fusion"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let flags = super::search_flags(&args).unwrap();
+        assert!(flags.rerank);
+        assert_eq!(flags.words, ["fusion"]);
+        assert!(flags.as_of.is_none());
     }
 
     #[test]

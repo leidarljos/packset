@@ -890,4 +890,157 @@ mod tests {
             now.body
         );
     }
+
+    fn write_embed_stub(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("packset-embed");
+        std::fs::write(&path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&path, perm).unwrap();
+        (dir, path)
+    }
+
+    fn two_claim_pack() -> (tempfile::TempDir, Service) {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        svc.add(
+            json!({
+                "workspace": "w",
+                "text": "Reviews open with a check.",
+                "kind": "voice"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        svc.add(
+            json!({
+                "workspace": "w",
+                "text": "Prefer ripgrep for search.",
+                "kind": "voice"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        (dir, svc)
+    }
+
+    fn search_query(rerank: Option<&str>) -> HashMap<String, String> {
+        let mut q = HashMap::new();
+        q.insert("workspace".into(), "w".into());
+        q.insert("q".into(), "reviews search".into());
+        if let Some(flag) = rerank {
+            q.insert("rerank".into(), flag.into());
+        }
+        q
+    }
+
+    #[test]
+    fn a_working_child_reorders_live_search() {
+        let (_pack, svc) = two_claim_pack();
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::embed::reset_for_test();
+        let (_stub, path) = write_embed_stub(
+            r#"#!/usr/bin/env python3
+import json, sys
+if "--rerank" not in sys.argv:
+    sys.exit(1)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    n = len(req.get("d") or [])
+    print(json.dumps({"id": req.get("id", "q"), "s": [float(i) for i in range(n)]}), flush=True)
+"#,
+        );
+        let old = std::env::var_os("PACKSET_EMBED");
+        unsafe { std::env::set_var("PACKSET_EMBED", &path) };
+        let off = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &search_query(None),
+            &Map::new(),
+        );
+        let on = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &search_query(Some("1")),
+            &Map::new(),
+        );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        assert_eq!(off.code, 200, "{:?}", off.body);
+        assert_eq!(on.code, 200, "{:?}", on.body);
+        assert_eq!(off.body["rerank"], json!("off"), "{:?}", off.body);
+        assert_eq!(on.body["rerank"], json!("cross-encoder"), "{:?}", on.body);
+        let off_ids = hit_ids(&off);
+        let on_ids = hit_ids(&on);
+        assert_eq!(off_ids.len(), 2, "{:?}", off.body);
+        assert_eq!(on_ids.len(), 2, "{:?}", on.body);
+        assert_eq!(on_ids[0], off_ids[1], "{on_ids:?} vs {off_ids:?}");
+        assert_eq!(on_ids[1], off_ids[0], "{on_ids:?} vs {off_ids:?}");
+    }
+
+    #[test]
+    fn a_broken_child_leaves_live_search_order() {
+        let (_pack, svc) = two_claim_pack();
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::embed::reset_for_test();
+        let (_stub, path) = write_embed_stub("#!/bin/sh\nexit 1\n");
+        let old = std::env::var_os("PACKSET_EMBED");
+        unsafe { std::env::set_var("PACKSET_EMBED", &path) };
+        let off = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &search_query(None),
+            &Map::new(),
+        );
+        let on = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &search_query(Some("1")),
+            &Map::new(),
+        );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        assert_eq!(on.body["rerank"], json!("absent"), "{:?}", on.body);
+        assert_eq!(off.body["rerank"], json!("off"), "{:?}", off.body);
+        assert_eq!(
+            hit_ids(&on),
+            hit_ids(&off),
+            "{:?} vs {:?}",
+            on.body,
+            off.body
+        );
+    }
 }

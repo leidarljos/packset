@@ -11,7 +11,7 @@
 | =packset port= / =url= / =which= | the port, the URL, the daemon binary |
 | =packset remember [--workspace WS] TEXT= | one lesson |
 | =packset prefer [--workspace WS] TEXT= | one standing preference |
-| =packset search [--workspace WS] [--as-of TS] QUERY= | ranked claims live now, or those live at =TS=: score, kind, id, text |
+| =packset search [--workspace WS] [--as-of TS] [--rerank] QUERY= | ranked claims live now, or those live at =TS=: score, kind, id, text; =--rerank= runs the measured cross-encoder over the top 20 |
 | =packset due [WS]= | claims whose review clock has run out, soonest first |
 | =packset islands [WS]= | the link graph's clusters, largest first: size and first claim |
 | =packset hubs [WS]= | the claims the link graph turns on, highest first: a weighted PageRank over the links |

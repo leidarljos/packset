@@ -2793,7 +2793,9 @@ mod tests {
         let panel = packset_core::Panel::default();
         // Point at a program that is not a reranker, so PATH cannot supply
         // a real packset-embed and turn this into a model call.
-        let _guard = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::embed::reset_for_test();
         let stub = broken_reranker();
         let old = std::env::var_os("PACKSET_EMBED");
@@ -2837,7 +2839,9 @@ mod tests {
         svc.add(atom("Reviews open with a check.")).unwrap();
         svc.add(atom("Prefer ripgrep for search.")).unwrap();
         let panel = packset_core::Panel::default();
-        let _guard = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::embed::reset_for_test();
         let stub = scoring_reranker();
         let old = std::env::var_os("PACKSET_EMBED");
@@ -2887,7 +2891,9 @@ mod tests {
         svc.add(atom("Prefer ripgrep for search.")).unwrap();
         svc.add(atom("Prefer fd for finding files.")).unwrap();
         let panel = packset_core::Panel::default();
-        let _guard = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::embed::reset_for_test();
         let stub = scoring_reranker();
         let old = std::env::var_os("PACKSET_EMBED");
@@ -2914,8 +2920,6 @@ mod tests {
         // measured depth, the last of the three can become the only hit.
         assert_ne!(on["hits"][0]["id"], off["hits"][0]["id"], "{on} vs {off}");
     }
-
-    static EMBED: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct StubEmbed {
         path: std::path::PathBuf,

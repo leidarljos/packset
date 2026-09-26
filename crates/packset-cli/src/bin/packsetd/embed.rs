@@ -650,6 +650,11 @@ pub fn reset_for_test() {
     }
 }
 
+/// Held while a test points `PACKSET_EMBED` at a stub, so two tests cannot
+/// hand each other a child.
+#[cfg(test)]
+pub(crate) static EMBED: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

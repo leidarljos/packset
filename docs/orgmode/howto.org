@@ -128,9 +128,13 @@ $ packset status seat | jq .dense
 * Run the second stage on one question
 
 The cross-encoder rerank is measured and off by default. Ask for it per
-query, or set =PACKSET_RERANK=1= on the writer:
+query with =packset search --rerank=, =GET /v1/search?rerank=1=, or set
+=PACKSET_RERANK=1= on the writer. The stage is a forward pass over the
+top 20. An absent or broken =packset-embed= leaves the first-stage
+order and reports =rerank: absent=.
 
 #+begin_src console
+$ packset search --rerank --workspace seat fusion
 $ curl -s "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rerank=1" | jq '.rerank'
 #+end_src
 
