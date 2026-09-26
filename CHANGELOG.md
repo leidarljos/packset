@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- MemoryAgentBench protocol run covers all four competencies. Writes
+  are Remember / Prefer / Accept; a raw unit is a refusal, then kept as
+  `Remember: ` of the same words. Retrieval is over admitted claims.
+  The table names every competency and a refusal row; an un-run split
+  prints `—`. Replay: `cargo run --release -p packset-daemon --example
+  memoryagentbench -- data/mab`. The fixture
+  `data/mab_protocol.jsonl` is the rerun test.
+
 - `packset search --as-of TS` ranks the claims whose `valid_from` /
   `valid_to` window contained TS, the same window `GET /v1/search?as_of=`
   and `packset atoms --as-of` already read. A stamp the pack will not

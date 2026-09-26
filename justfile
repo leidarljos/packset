@@ -34,3 +34,7 @@ embed:
 
 ensure:
     bin/packset ensure
+
+# MemoryAgentBench write protocol: Remember / Prefer / Accept, four competencies.
+mab dir="data/mab":
+    cargo run --release -p packset-daemon --example memoryagentbench -- {{dir}}

@@ -1,11 +1,9 @@
 //! Retrieval on MemoryAgentBench (doi:10.48550/arXiv.2507.05257): one long
-//! record injected once, many questions asked of it. Two of its four
-//! competencies are a retriever's to win: accurate retrieval (document QA,
-//! LongMemEval, EventQA) and conflict resolution (FactConsolidation: a list
-//! of facts in which a later fact overwrites an earlier one about the same
-//! subject). The harness chunks each record the way the benchmark does,
-//! ranks chunks for every question under the pack's ballots, and writes the
-//! seam a reader model answers from. Nothing reads here.
+//! record injected once, many questions asked of it. All four competencies
+//! run: accurate retrieval, test-time learning, long-range understanding,
+//! and conflict resolution. The harness chunks each record the way the
+//! benchmark does, keeps a unit only as Remember / Prefer / Accept, ranks
+//! those claims, and writes the seam a reader model answers from.
 //!
 //! ```console
 //! $ # the parquet files from ai-hyz/MemoryAgentBench as JSONL, one row a line
@@ -13,12 +11,14 @@
 //!     cargo run --release -p packset-daemon --example memoryagentbench -- data/mab
 //! ```
 //!
-//! Ingest goes through `admit_seat_write`: Remember / Prefer / Accept
-//! only. A raw record is a refusal, not an atom.
+//! Ingest goes through `ProtocolReport::keep`: Remember / Prefer / Accept
+//! only. A raw record is a refusal, then offered as `Remember: ` of the
+//! same words. Retrieval is over admitted claims. The protocol table names
+//! every competency; an un-run split prints `—`, not 0.000.
 //!
 //! The retrieval number reported here is a proxy: whether one of the answer
 //! strings appears in the retrieved text. It is exact for the fact lists and
-//! the document QA, where the answer is a span, and weak for EventQA and the
+//! the document QA, where the answer is a span, and weak for summaries and
 //! chat questions, where it is a sentence; the reader's accuracy over the
 //! dump is the benchmark's own metric.
 
@@ -27,6 +27,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use packset_core::bm25::Index;
+use packset_core::mab::{ProtocolReport, COMPETENCIES};
 use packset_core::panel::Panel;
 use packset_core::search::{atom_tokens, cosine, merge_ballots, Record};
 use serde_json::{json, Value};
@@ -400,14 +401,13 @@ fn read_rows(path: &Path, expected: usize) -> Option<Vec<Vec<f32>>> {
     Some(rows)
 }
 
-fn vectors(row: &Row) -> Vec<Vec<f32>> {
+fn vectors(row: &Row, docs: &[Document]) -> Vec<Vec<f32>> {
     let model = std::env::var("PACKSET_EMBED_MODEL").unwrap_or_else(|_| "default".into());
     let file = cache_dir().map(|d| d.join(format!("{model}-{}-{}.bin", row.split, row.nth)));
-    if let Some(rows) = file.as_deref().and_then(|p| read_rows(p, row.docs.len())) {
+    if let Some(rows) = file.as_deref().and_then(|p| read_rows(p, docs.len())) {
         return rows;
     }
-    let fresh: Vec<Vec<f32>> = row
-        .docs
+    let fresh: Vec<Vec<f32>> = docs
         .iter()
         .map(|d| packset_daemon::embed::encode_document(&d.text).unwrap_or_default())
         .collect();
@@ -481,15 +481,18 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| "data/mab".to_string()),
     );
     let splits: Vec<String> = std::env::var("PACKSET_MAB_SPLITS")
-        .unwrap_or_else(|_| "Accurate_Retrieval,Conflict_Resolution".to_string())
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+        .map(|s| {
+            s.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|_| COMPETENCIES.iter().map(|s| (*s).to_string()).collect());
     let cap: Option<usize> = std::env::var("PACKSET_MAB_ROWS")
         .ok()
         .and_then(|c| c.parse().ok());
-    let encoder = packset_daemon::embed::binary().is_some();
+    let encoder = packset_daemon::embed::binary().is_some()
+        && std::env::var("PACKSET_MAB_LEXICAL").is_err();
     println!(
         "encoder: {}",
         if encoder {
@@ -525,7 +528,7 @@ fn main() -> anyhow::Result<()> {
     // (source, arm) -> tally
     let mut tallies: BTreeMap<(String, String), Tally> = BTreeMap::new();
     let mut asked_total = 0usize;
-    let mut protocol = packset_core::ProtocolReport::new();
+    let mut protocol = ProtocolReport::new();
     for split in &splits {
         let mut all = rows(&dir, split)?;
         if let Some(c) = cap {
@@ -540,25 +543,35 @@ fn main() -> anyhow::Result<()> {
                 row.docs.len(),
                 row.questions.len()
             );
+            let mut admitted: Vec<Document> = Vec::new();
             for doc in &row.docs {
-                protocol.ingest(&doc.text);
-                protocol.ingest(&format!("Remember: {}", doc.text));
+                if let Some(claim) = protocol.keep(&doc.text) {
+                    admitted.push(Document {
+                        position: doc.position,
+                        tokens: tokens(&claim),
+                        text: claim,
+                    });
+                }
             }
             if let Some(d) = &chunks_dir {
-                let texts: Vec<&str> = row.docs.iter().map(|d| d.text.as_str()).collect();
+                let texts: Vec<&str> = admitted.iter().map(|d| d.text.as_str()).collect();
                 std::fs::write(
                     d.join(format!("{split}-{}.json", row.nth)),
                     serde_json::to_string(&texts)?,
                 )?;
             }
-            let index = Index::build(row.docs.iter().map(|d| d.tokens.as_slice()));
-            let vecs = if encoder { vectors(row) } else { Vec::new() };
-            let alive = if facts { live(&row.docs) } else { Vec::new() };
+            let index = Index::build(admitted.iter().map(|d| d.tokens.as_slice()));
+            let vecs = if encoder {
+                vectors(row, &admitted)
+            } else {
+                Vec::new()
+            };
+            let alive = if facts { live(&admitted) } else { Vec::new() };
             let gnn = if facts {
                 std::env::var_os("PACKSET_MAB_GNN").and_then(|dir| {
                     read_gnn(
                         &PathBuf::from(dir).join(format!("{split}-{}.json", row.nth)),
-                        row.docs.len(),
+                        admitted.len(),
                     )
                 })
             } else {
@@ -568,7 +581,7 @@ fn main() -> anyhow::Result<()> {
                 std::env::var_os("PACKSET_MAB_SURVEY").and_then(|dir| {
                     read_survey(
                         &PathBuf::from(dir).join(format!("{split}-{}.json", row.nth)),
-                        row.docs.len(),
+                        admitted.len(),
                     )
                 })
             } else {
@@ -582,14 +595,17 @@ fn main() -> anyhow::Result<()> {
                     tallies
                         .entry((row.source.clone(), arm.to_string()))
                         .or_insert_with(Tally::new)
-                        .add(&top, &row.docs, &answers);
+                        .add(&top, &admitted, &answers);
                     retrieved.insert(arm.to_string(), top.into_iter().take(KEEP).collect());
                 };
                 let firsts = |r: &[(usize, f64)]| -> Vec<usize> {
                     r.iter().take(KEEP).map(|(i, _)| *i).collect()
                 };
                 let lex_top = firsts(&lex);
-                protocol.mark(split, bearing(&lex_top, &row.docs, &answers, 1));
+                protocol.mark(
+                    split,
+                    bearing(&lex_top, &admitted, &answers, packset_core::mab::TOP),
+                );
                 record("lexical", lex_top);
                 let best: Vec<(usize, f64)> = if encoder {
                     let query = packset_daemon::embed::encode_query(question).unwrap_or_default();
@@ -603,14 +619,14 @@ fn main() -> anyhow::Result<()> {
                 };
                 if facts {
                     let base = if encoder { "fused" } else { "lexical" };
-                    record(&format!("{base} latest"), latest_first(&best, &row.docs));
+                    record(&format!("{base} latest"), latest_first(&best, &admitted));
                     // Only live facts answer, latest first among them.
                     let living: Vec<(usize, f64)> = best
                         .iter()
                         .filter(|(i, _)| alive.get(*i).copied().unwrap_or(true))
                         .copied()
                         .collect();
-                    record(&format!("{base} live"), latest_first(&living, &row.docs));
+                    record(&format!("{base} live"), latest_first(&living, &admitted));
                     // Two hops over the live facts: the objects of the first
                     // hop's strongest facts are asked about in turn, and the
                     // second hop's live facts follow the first's. A question
@@ -621,7 +637,7 @@ fn main() -> anyhow::Result<()> {
                         living.iter().take(HOP_SEEDS).map(|(i, _)| *i).collect();
                     let mut second: Vec<(usize, f64)> = Vec::new();
                     for &i in chain.clone().iter() {
-                        let Some(object) = object_of(&row.docs[i].text) else {
+                        let Some(object) = object_of(&admitted[i].text) else {
                             continue;
                         };
                         let hop_query = format!("{question} {object}");

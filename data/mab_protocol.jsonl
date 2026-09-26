@@ -1,0 +1,5 @@
+{"competency":"Accurate_Retrieval","metadata":{"source":"fixture_ar"},"context":"The user lives in Berlin and likes tea.","questions":["What is the dog named?"],"answers":[["Rex"]]}
+{"competency":"Accurate_Retrieval","metadata":{"source":"fixture_ar"},"context":"Remember: the user lives in Berlin now","questions":["Where does the user live?"],"answers":[["Berlin"]]}
+{"competency":"Test_Time_Learning","metadata":{"source":"fixture_ttl"},"context":"Prefer: label 28 is a disposable card that is not working","questions":["Are there restrictions for my disposable card since it does not seem to be working?"],"answers":[["28"]]}
+{"competency":"Long_Range_Understanding","metadata":{"source":"fixture_lru"},"context":"Remember: Jennifer marries Mina Loris and later leaves the household in the last chapter","questions":["Who does Jennifer marry?"],"answers":[["Mina Loris"]]}
+{"competency":"Conflict_Resolution","metadata":{"source":"factconsolidation_sh_fixture"},"context":"0. Roy Rogers is married to Dale Evans.\n1. Roy Rogers is married to John McVie.","questions":["Who is Roy Rogers married to?"],"answers":[["John McVie"]]}
