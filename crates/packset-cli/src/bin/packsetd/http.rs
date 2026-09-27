@@ -179,24 +179,58 @@ fn route(
         },
         (Method::Get, "/v1/atoms") => match required(query, "workspace") {
             Err(a) => a,
-            Ok(workspace) => match as_of_stamp(query) {
-                Err(a) => a,
-                Ok(Some(at)) => answer(service.as_of(&workspace, &at)),
-                Ok(None) => match service.store().live(&workspace) {
-                    // `kind` narrows the answer to one kind, so a roster of
-                    // personas does not carry every lesson's embedding.
-                    Ok(atoms) => match query.get("kind").map(String::as_str) {
-                        Some(kind) if !kind.is_empty() => Answer::ok(json!({
-                            "atoms": atoms
-                                .iter()
-                                .filter(|a| a.get("kind").and_then(Value::as_str) == Some(kind))
-                                .collect::<Vec<_>>()
-                        })),
-                        _ => Answer::ok(json!({ "atoms": atoms.as_ref() })),
+            Ok(workspace) => {
+                // `embedding=omit` leaves the vectors out: they are nine
+                // tenths of the listing, and a client reading texts, review
+                // clocks or rules parses every float for nothing.
+                let omit = query.get("embedding").map(String::as_str) == Some("omit");
+                let lean = |atom: &Map<String, Value>| {
+                    let mut atom = atom.clone();
+                    if omit {
+                        atom.remove("embedding");
+                    }
+                    Value::Object(atom)
+                };
+                match as_of_stamp(query) {
+                    Err(a) => a,
+                    Ok(Some(at)) => answer(service.as_of(&workspace, &at).map(|mut body| {
+                        if omit {
+                            if let Some(atoms) = body["atoms"].as_array_mut() {
+                                for atom in atoms.iter_mut() {
+                                    if let Some(map) = atom.as_object_mut() {
+                                        map.remove("embedding");
+                                    }
+                                }
+                            }
+                        }
+                        body
+                    })),
+                    Ok(None) => match service.store().live(&workspace) {
+                        // `kind` narrows the answer to one kind, so a roster
+                        // of personas does not carry every lesson's embedding.
+                        Ok(atoms) => {
+                            let kind = query
+                                .get("kind")
+                                .map(String::as_str)
+                                .filter(|k| !k.is_empty());
+                            if kind.is_none() && !omit {
+                                Answer::ok(json!({ "atoms": atoms.as_ref() }))
+                            } else {
+                                Answer::ok(json!({
+                                    "atoms": atoms
+                                        .iter()
+                                        .filter(|a| kind.is_none_or(|k| {
+                                            a.get("kind").and_then(Value::as_str) == Some(k)
+                                        }))
+                                        .map(lean)
+                                        .collect::<Vec<_>>()
+                                }))
+                            }
+                        }
+                        Err(e) => Answer::err(400, e),
                     },
-                    Err(e) => Answer::err(400, e),
-                },
-            },
+                }
+            }
         },
         // The deed accessions a workspace's live atoms cite, so `deedar
         // evidence -` and `deedar current -` cover a pack the way they cover a
@@ -928,6 +962,32 @@ mod tests {
         )
         .unwrap();
         (dir, svc)
+    }
+
+    #[test]
+    fn atoms_leave_the_vectors_out_when_asked() {
+        let (_pack, svc) = two_claim_pack();
+        let panel = packset_core::Panel::default();
+        let list = |extra: &[(&str, &str)]| {
+            let mut q = HashMap::new();
+            q.insert("workspace".to_string(), "w".to_string());
+            for (k, v) in extra {
+                q.insert((*k).to_string(), (*v).to_string());
+            }
+            let a = route(&svc, &panel, &Method::Get, "/v1/atoms", &q, &Map::new());
+            a.body["atoms"].as_array().cloned().unwrap_or_default()
+        };
+        let full = list(&[]);
+        assert_eq!(full.len(), 2);
+        assert!(full.iter().all(|a| a.get("embedding").is_some()));
+        let lean = list(&[("embedding", "omit")]);
+        assert_eq!(lean.len(), 2);
+        assert!(lean.iter().all(|a| a.get("embedding").is_none()));
+        assert!(lean.iter().all(|a| a.get("text").is_some()));
+        let voices = list(&[("embedding", "omit"), ("kind", "voice")]);
+        assert_eq!(voices.len(), 2);
+        assert!(voices.iter().all(|a| a.get("embedding").is_none()));
+        assert!(list(&[("embedding", "omit"), ("kind", "lesson")]).is_empty());
     }
 
     fn search_query(rerank: Option<&str>) -> HashMap<String, String> {

@@ -283,10 +283,38 @@ impl PacksetClient {
         if let Some(at) = as_of {
             req = req.query("as_of", at);
         }
-        let body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        let mut body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
         let atoms = body
-            .get("atoms")
-            .cloned()
+            .get_mut("atoms")
+            .map(serde_json::Value::take)
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        Ok(serde_json::from_value(atoms)?)
+    }
+
+    /// [`Self::atoms_as_of`] without the dense vectors, for a reader of
+    /// texts, review clocks or rules: the vectors are most of the bytes. A
+    /// writer older than the `embedding=omit` query sends them anyway.
+    ///
+    /// # Errors
+    ///
+    /// The pack not answering, or an answer that is not atoms.
+    pub fn atoms_without_vectors(
+        &self,
+        workspace: &str,
+        as_of: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        let url = format!("{}/v1/atoms", self.base);
+        let mut req = ureq::get(&url)
+            .query("workspace", workspace)
+            .query("embedding", "omit")
+            .timeout(timeout());
+        if let Some(at) = as_of {
+            req = req.query("as_of", at);
+        }
+        let mut body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        let atoms = body
+            .get_mut("atoms")
+            .map(serde_json::Value::take)
             .unwrap_or(serde_json::Value::Array(vec![]));
         Ok(serde_json::from_value(atoms)?)
     }
