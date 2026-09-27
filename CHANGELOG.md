@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A write refuses a private key block, an age secret key, GitHub, Slack
+  and AWS tokens and a JSON Web Token, and text that tells the model
+  reading it to ignore its instructions. The refusal names the kind it
+  found; the generic key-assignment refusal reads as before.
+
 - A claim that was fired counts a use in its review record, and the sweep
   no longer forgets a used claim by neglect; it still lapses. Before this a
   lesson nobody graded was tombstoned after three missed reviews, however
