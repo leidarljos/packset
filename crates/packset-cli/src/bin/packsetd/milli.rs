@@ -455,15 +455,19 @@ pub fn filter_atom_hits(hits: &[Value], live: &[Record], set: Option<&str>) -> V
                     return None;
                 }
             }
-            // The index stores what it scores; the stamp, the kind and the
-            // review date come from the pack's own record.
+            // The index stores what it scores; the stamp, the kind, the
+            // review date and the claim's source come from the pack's own
+            // record, and so do its entities, which the index holds joined.
             let mut hit = hit.clone();
-            for key in ["ts", "kind", "due_at"] {
+            for key in ["ts", "kind", "due_at", "source"] {
                 if hit.get(key).is_none_or(Value::is_null) {
-                    if let Some(value) = atom.get(key) {
+                    if let Some(value) = atom.get(key).filter(|v| !v.is_null()) {
                         hit[key] = value.clone();
                     }
                 }
+            }
+            if let Some(entities) = atom.get("entities").filter(|v| v.is_array()) {
+                hit["entities"] = entities.clone();
             }
             Some(hit)
         })
@@ -570,6 +574,20 @@ mod tests {
 
     fn record(value: Value) -> Record {
         value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn an_index_hit_carries_the_records_source_and_entities() {
+        let live = vec![record(json!({
+            "id": "a1", "kind": "lesson", "text": "one",
+            "entities": ["seat:acme", "issue:brio-1"],
+            "source": {"harness": "acme", "host": "brio"}
+        }))];
+        let hits = vec![json!({"field": "atom", "id": "a1", "text": "one",
+            "entities": "seat:acme issue:brio-1", "score": 1.0})];
+        let kept = filter_atom_hits(&hits, &live, None);
+        assert_eq!(kept[0]["source"]["harness"], json!("acme"));
+        assert_eq!(kept[0]["entities"], json!(["seat:acme", "issue:brio-1"]));
     }
 
     #[test]
