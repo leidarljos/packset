@@ -4,6 +4,25 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A claim that was fired counts a use in its review record, and the sweep
+  no longer forgets a used claim by neglect; it still lapses. Before this a
+  lesson nobody graded was tombstoned after three missed reviews, however
+  often a sitting fired it.
+
+- A search hit carries the `source` of the claim it names on both engines,
+  and a milli hit returns the claim's entities as a list from the pack's
+  record rather than the index's joined string.
+
+- A search waits for a projection flush already running, so two searches a
+  moment apart rank on the same engine. `packset stop` returns once the
+  port is free, so `packset ensure` straight after it starts a writer.
+
+- `GET /v1/atoms?embedding=omit` lists atoms without their vectors, and the
+  client reads them that way. An encoder that did not answer is reported
+  unavailable in status.
+
+- The landing page shows the first command and what it answers.
+
 - MemoryAgentBench protocol run covers all four competencies. Writes
   are Remember / Prefer / Accept; a raw unit is a refusal, then kept as
   `Remember: ` of the same words. Retrieval is over admitted claims.
