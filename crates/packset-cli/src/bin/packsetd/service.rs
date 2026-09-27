@@ -301,23 +301,19 @@ impl Service {
                 }
             }
             scheduled.store(false, Ordering::Release);
-            let ops: Vec<ProjectionOp> = pending
-                .lock()
-                .map(|mut p| std::mem::take(&mut *p))
-                .unwrap_or_default();
-            flush_projection_ops(ops, &dir);
+            // The queue stays locked until the index holds what was taken
+            // from it, so a search's own flush waits for this one rather
+            // than finding the queue empty and reading a half-written index.
+            let mut queue = pending.lock().unwrap_or_else(|e| e.into_inner());
+            flush_projection_ops(std::mem::take(&mut *queue), &dir);
         });
     }
 
     /// Bring the search index level with every write so far, now. A read
     /// of the index calls this first, so a search sees its own writes.
     pub fn flush_projection(&self) {
-        let ops: Vec<ProjectionOp> = self
-            .projection
-            .lock()
-            .map(|mut p| std::mem::take(&mut *p))
-            .unwrap_or_default();
-        flush_projection_ops(ops, &self.home.milli_dir());
+        let mut queue = self.projection.lock().unwrap_or_else(|e| e.into_inner());
+        flush_projection_ops(std::mem::take(&mut *queue), &self.home.milli_dir());
     }
 
     /// Forgetting by neglect: a claim left due for longer than twice its
