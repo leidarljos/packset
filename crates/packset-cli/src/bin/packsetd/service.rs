@@ -324,7 +324,7 @@ impl Service {
     /// interval and never graded is what a person would have forgotten. The
     /// sweep lapses it as a missed review does, halving its stability, and
     /// counts the neglect; a forgettable claim neglected [`NEGLECT_LIMIT`]
-    /// times and never once recalled is tombstoned, marked
+    /// times, never once recalled and never fired is tombstoned, marked
     /// `forgotten: neglect`. A preference, rule, reading, goal, trust row or
     /// persona lapses but is never forgotten this way. Returns how many
     /// lapsed and how many were forgotten.
@@ -362,9 +362,14 @@ impl Service {
                 .unwrap_or(0)
                 + 1;
             let recalls = review.map_or(0, record::recalls_of);
+            let used = review
+                .and_then(|r| r.get("used"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let mut changed = atom.clone();
             if neglected >= NEGLECT_LIMIT
                 && recalls == 0
+                && used == 0
                 && FORGETTABLE_KINDS.contains(&kind)
                 && changed.get("pinned").and_then(Value::as_bool) != Some(true)
             {
@@ -1616,7 +1621,19 @@ impl Service {
                     .position(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
             })
             .collect();
-        let changed = packset_core::island::fire_as(&mut atoms, &fired, lens);
+        let mut changed = packset_core::island::fire_as(&mut atoms, &fired, lens);
+        // A fired claim served the work it was fired for: count the use in
+        // its review record, so the sweep does not forget it by neglect.
+        let once: std::collections::BTreeSet<usize> = fired.iter().copied().collect();
+        for &i in &once {
+            if let Some(Value::Object(r)) = atoms[i].get_mut("review") {
+                let used = r.get("used").and_then(Value::as_u64).unwrap_or(0) + 1;
+                r.insert("used".into(), json!(used));
+                if !changed.contains(&i) {
+                    changed.push(i);
+                }
+            }
+        }
         if !changed.is_empty() {
             let now = clock::utcnow();
             let batch: Vec<Record> = changed
@@ -2139,6 +2156,50 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn a_fired_claim_lapses_by_neglect_and_is_not_forgotten() {
+        let (_dir, svc) = service();
+        let mut rows = Vec::new();
+        for id in [
+            "lesson000000000000000000000000000f",
+            "lesson000000000000000000000000000g",
+        ] {
+            let mut a = atom(&format!(
+                "Claim {id} served a sitting and was never graded."
+            ));
+            a.insert("id".into(), json!(id));
+            a.insert("kind".into(), json!("lesson"));
+            a.insert("ts".into(), json!("2025-01-01T00:00:00.000Z"));
+            a.insert("due_at".into(), json!("2025-02-01T00:00:00.000Z"));
+            a.insert(
+                "review".into(),
+                json!({"reps": 0, "interval_s": 86400, "stability": 2.0, "last": "2025-01-31T00:00:00.000Z", "neglected": 2}),
+            );
+            rows.push(a);
+        }
+        svc.store().upsert_many(&rows).unwrap();
+        let ids = vec![
+            "lesson000000000000000000000000000f".to_string(),
+            "lesson000000000000000000000000000f".to_string(),
+        ];
+        svc.fire("w", &ids).unwrap();
+        let live = svc.store().live("w").unwrap();
+        let f = live
+            .iter()
+            .find(|a| {
+                a.get("id").and_then(Value::as_str) == Some("lesson000000000000000000000000000f")
+            })
+            .unwrap();
+        assert_eq!(f["review"]["used"], json!(1), "one fire, one use");
+        let report = svc.sweep("w").unwrap();
+        assert_eq!(
+            report["forgotten_ids"],
+            json!(["lesson000000000000000000000000000g"]),
+            "{report}"
+        );
+        assert_eq!(report["lapsed"], json!(1), "{report}");
     }
 
     #[test]
