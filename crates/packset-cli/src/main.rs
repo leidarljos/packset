@@ -370,6 +370,15 @@ fn stop(port: u16) -> anyhow::Result<()> {
         return Ok(());
     };
     procfs::terminate(pid)?;
+    // A writer flushes on the signal before it lets the port go; `stop`
+    // returns once the port is free, so an `ensure` after it starts one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while procfs::listening(port) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if procfs::listening(port) {
+        anyhow::bail!("packset: signalled {pid}, and {port} is still held after 10s");
+    }
     eprintln!("packset: stopped {pid}");
     Ok(())
 }
