@@ -321,7 +321,7 @@ impl<'a> TopK<'a> {
 
 /// The hit a caller reads.
 fn atom_hit(atom: &Record, score: f64) -> Value {
-    json!({
+    let mut hit = json!({
         "field": "atom",
         "id": atom.get("id").cloned().unwrap_or(Value::Null),
         "kind": atom.get("kind").cloned().unwrap_or(Value::Null),
@@ -330,7 +330,12 @@ fn atom_hit(atom: &Record, score: f64) -> Value {
         "due_at": atom.get("due_at").cloned().unwrap_or(Value::Null),
         "entities": atom.get("entities").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "score": score,
-    })
+    });
+    // Where the claim was written, for an audit that reads a hit's lineage.
+    if let Some(source) = atom.get("source").filter(|s| !s.is_null()) {
+        hit["source"] = source.clone();
+    }
+    hit
 }
 
 /// The id an atom sorts by on a tie.
@@ -803,6 +808,22 @@ pub fn front_due(due: Vec<Value>, ranked: Vec<Value>, limit: usize) -> Vec<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hit_carries_its_claims_source_when_it_has_one() {
+        let with = json!({"id": "a", "kind": "lesson", "text": "t",
+            "source": {"harness": "acme", "host": "brio"}})
+        .as_object()
+        .unwrap()
+        .clone();
+        let hit = atom_hit(&with, 1.0);
+        assert_eq!(hit["source"]["harness"], "acme");
+        let without = json!({"id": "b", "kind": "lesson", "text": "t"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(atom_hit(&without, 1.0).get("source").is_none());
+    }
 
     /// The scan over cached tokens is the scan, entities and a partial list
     /// included.
