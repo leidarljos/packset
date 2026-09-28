@@ -38,6 +38,19 @@ const ACTIVATION_HOPS: usize = 2;
 const CONSOLIDATE_BUCKET_MAX: usize = 64;
 /// How many of an island's strongest claims fire together when asked.
 const FIRE_TOP: usize = 8;
+
+/// Entities with `horizon:standing` and without `horizon:transient`.
+/// A recalled review and a consolidation survivor both call this.
+fn promoted_entities(atom: &Record) -> Value {
+    let mut list: Vec<Value> = atom
+        .get("entities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    list.retain(|v| v.as_str().is_none_or(|s| !s.starts_with("horizon:")));
+    list.push(json!("horizon:standing"));
+    Value::Array(list)
+}
 /// How long the same claims stay fired: a second fire inside it is held.
 const FIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -983,6 +996,11 @@ impl Service {
         let mut fields = Map::new();
         fields.insert("due_at".into(), atom["due_at"].clone());
         fields.insert("review".into(), atom["review"].clone());
+        // A recalled review is rehearsal. The episode becomes a standing
+        // rule. A lapse is not rehearsal and leaves the horizon alone.
+        if recalled {
+            fields.insert("entities".into(), promoted_entities(&atom));
+        }
         self.update_unlocked(workspace, id, &fields)
     }
 
@@ -1748,6 +1766,9 @@ impl Service {
                         ids.push(Value::String(old_id));
                     }
                 }
+                // The claim that replaced another is the rule that survived.
+                let entities = promoted_entities(&atoms[*i]);
+                atoms[*i].insert("entities".into(), entities);
                 touched.insert(*i);
                 touched.insert(*j);
             }
@@ -2152,6 +2173,22 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn a_recalled_review_replaces_the_horizon_tag() {
+        let mut episode = atom("A lesson stored before anyone reviewed it.");
+        episode.insert("entities".into(), json!(["seat:grok", "horizon:transient"]));
+        let promoted = promoted_entities(&episode);
+        let tags: Vec<&str> = promoted
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.contains(&"horizon:standing"), "{tags:?}");
+        assert!(!tags.iter().any(|t| *t == "horizon:transient"), "{tags:?}");
+        assert!(tags.contains(&"seat:grok"), "{tags:?}");
     }
 
     #[test]

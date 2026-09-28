@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A recalled review promotes the claim to `horizon:standing`.
+  Consolidation does the same for the claim that replaced an earlier
+  one. A lapse leaves the horizon as it was.
+
 - A write refuses a private key block, an age secret key, GitHub, Slack
   and AWS tokens and a JSON Web Token, and text that tells the model
   reading it to ignore its instructions. The refusal names the kind it
