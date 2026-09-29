@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A search that finds the cross-encoder busy waits 400 ms, then keeps its
+  first-stage order and reports the stage absent, instead of queueing
+  behind every other search. The cross-encoder reads at most 192 tokens a
+  pair (`PACKSET_RERANK_MAX_LENGTH`).
+
 - A recalled review promotes the claim to `horizon:standing`.
   Consolidation does the same for the claim that replaced an earlier
   one. A lapse leaves the horizon as it was.
