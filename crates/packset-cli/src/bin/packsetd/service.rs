@@ -2187,7 +2187,7 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert!(tags.contains(&"horizon:standing"), "{tags:?}");
-        assert!(!tags.iter().any(|t| *t == "horizon:transient"), "{tags:?}");
+        assert!(!tags.contains(&"horizon:transient"), "{tags:?}");
         assert!(tags.contains(&"seat:grok"), "{tags:?}");
     }
 
