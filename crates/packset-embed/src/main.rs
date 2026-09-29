@@ -431,7 +431,17 @@ fn cross_encode() -> anyhow::Result<()> {
         "jina-v2" => RerankerModel::JINARerankerV2BaseMultiligual,
         other => anyhow::bail!("unknown reranker `{other}`; known: {RERANKERS}"),
     };
-    let mut options = RerankInitOptions::new(model).with_show_download_progress(false);
+    // A batch pads to its longest pair, so one long card among twenty short
+    // claims ran the whole batch at 512 tokens: 2.7 s a prompt on a laptop.
+    // A claim is a sentence or two; 192 tokens holds it and the question.
+    let max_length = std::env::var("PACKSET_RERANK_MAX_LENGTH")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n >= 32)
+        .unwrap_or(RERANK_MAX_LENGTH);
+    let mut options = RerankInitOptions::new(model)
+        .with_show_download_progress(false)
+        .with_max_length(max_length);
     if let Some(dir) = cache_dir() {
         options = options.with_cache_dir(dir);
     }
@@ -515,6 +525,10 @@ fn learned_sparse() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tokens a question and a claim may take together in the cross-encoder;
+/// `PACKSET_RERANK_MAX_LENGTH` sets another.
+const RERANK_MAX_LENGTH: usize = 192;
+
 /// Every reranker [`cross_encode`] answers to, for the error that lists them.
 const RERANKERS: &str = "bge-reranker-base, bge-reranker-v2-m3, jina-turbo, jina-v2";
 
@@ -534,6 +548,7 @@ const USAGE: &str = "packset-embed: text in, vectors out\n\
                               e5-base, e5-large (multilingual), gte-large,\n\
                               mxbai-large, or e5-large-v2 from files under\n\
                               PACKSET_EMBED_CACHE/user/e5-large-v2/\n\
+        PACKSET_RERANK_MAX_LENGTH  tokens a question and a claim take together (192)\n\
         PACKSET_RERANK_MODEL  bge-reranker-base (default), bge-reranker-v2-m3,\n\
                               jina-turbo, jina-v2";
 
