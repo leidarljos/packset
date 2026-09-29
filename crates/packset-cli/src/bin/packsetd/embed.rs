@@ -625,6 +625,30 @@ pub fn rerank_hits(question: &str, hits: &[Value]) -> Option<Vec<Value>> {
     apply_rerank(hits, &scores)
 }
 
+/// How long a search waits for a busy cross-encoder before it answers
+/// without the second stage.
+pub const RERANK_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The slot's lock, if it can be had within `wait`.
+fn wait_for(
+    slot: &Slot,
+    wait: std::time::Duration,
+) -> Option<std::sync::MutexGuard<'_, Option<Encoder>>> {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        match slot.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= until {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 /// The kept cross-encoder, a fourth child.
 fn rerank_slot() -> &'static Slot {
     static RERANK: OnceLock<Slot> = OnceLock::new();
@@ -644,7 +668,11 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
         return Some(Vec::new());
     }
     let binary = binary()?;
-    let mut held = rerank_slot().lock().ok()?;
+    // One cross-encoder answers one question at a time. A search that finds
+    // it busy for longer than a moment keeps its first-stage order and says
+    // the stage was absent, rather than queue behind every other search: six
+    // prompts at once made the last wait eight seconds for a two-second pass.
+    let mut held = wait_for(rerank_slot(), RERANK_WAIT)?;
     for attempt in 0..2 {
         if held.as_mut().is_none_or(|running| !running.alive()) {
             *held = Encoder::start_rerank(&binary);
@@ -678,6 +706,17 @@ pub(crate) static EMBED: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_cross_encoder_is_skipped_after_a_short_wait() {
+        let slot: Slot = Mutex::new(None);
+        let held = slot.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert!(wait_for(&slot, std::time::Duration::from_millis(50)).is_none());
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        drop(held);
+        assert!(wait_for(&slot, std::time::Duration::from_millis(50)).is_some());
+    }
 
     /// An encoder that is on disk but does not answer is reported as not
     /// answering, not as available.
