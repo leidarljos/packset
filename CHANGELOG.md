@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.11.0 (2026-09-29)
 
 - A search that finds the cross-encoder busy waits 400 ms, then keeps its
   first-stage order and reports the stage absent, instead of queueing
