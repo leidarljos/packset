@@ -107,9 +107,30 @@ fn words_of(text: &str) -> Vec<&str> {
     out
 }
 
+/// Words whose full stop abbreviates rather than ends a sentence.
+const ABBREVIATIONS: &[&str] = &[
+    "al", "e.g", "i.e", "cf", "vs", "etc", "approx", "fig", "figs", "eq", "eqs", "ref", "refs",
+    "sec", "no", "vol", "pp", "dr", "prof", "st", "ca",
+];
+
+/// Whether the full stop at `at` closes an abbreviation (`et al.`, `e.g.`,
+/// `Fig.`) or a single-letter initial (`J. Smith`).
+fn abbreviation_before(text: &str, at: usize) -> bool {
+    let word = text[..at]
+        .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '[')
+        .next()
+        .unwrap_or("");
+    if word.chars().count() == 1 && word.chars().all(|c| c.is_alphabetic()) {
+        return true;
+    }
+    let lower = word.to_ascii_lowercase();
+    ABBREVIATIONS.contains(&lower.as_str())
+}
+
 /// Sentences, split at a `.`, `!` or `?` that ends a run of terminators and
 /// is followed by whitespace or the end of the text. A full stop inside a
-/// token (`0.9.3`, `127.0.0.1`, `Cargo.lock`) is not a boundary.
+/// token (`0.9.3`, `127.0.0.1`, `Cargo.lock`) is not a boundary, nor is one
+/// after an abbreviation or an initial (`et al. 2021`, `J. Smith`).
 fn sentences_of(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let terminator = |b: u8| matches!(b, b'.' | b'!' | b'?');
@@ -124,6 +145,9 @@ fn sentences_of(text: &str) -> Vec<&str> {
             Some(&next) => next.is_ascii_whitespace(),
         };
         if !ends {
+            continue;
+        }
+        if b == b'.' && bytes.get(at + 1).is_some() && abbreviation_before(text, at) {
             continue;
         }
         out.push(&text[start..at]);
@@ -333,6 +357,27 @@ mod tests {
         assert_eq!(sentences_of("One. Two! Three?").len(), 3);
         assert_eq!(sentences_of("no terminator at all").len(), 1);
         assert_eq!(sentences_of("...").len(), 0);
+    }
+
+    #[test]
+    fn an_abbreviation_or_citation_does_not_end_a_sentence() {
+        let lesson = "Raw per-atom gyration radius does not separate reactive \
+                      protons in TRPMD (Hu et al. 2021, doi 10.3389/fchem.2021.624937). \
+                      A spread descriptor must subtract the reactant spread.";
+        assert_eq!(sentences_of(lesson).len(), 2);
+        assert_eq!(
+            sentences_of("Use a ring, e.g. the instanton. It converges.").len(),
+            2
+        );
+        assert_eq!(
+            sentences_of("See Fig. 3 and Eq. 2 for the rate. Done.").len(),
+            2
+        );
+        assert_eq!(
+            sentences_of("J. O. Richardson derived it. It holds.").len(),
+            2
+        );
+        assert_eq!(sentences_of("It stopped. 3 tests failed.").len(), 2);
     }
 
     #[test]
