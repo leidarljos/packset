@@ -197,7 +197,7 @@ pub fn first_sentence(text: &str) -> String {
         .next()
         .unwrap_or_else(|| text.to_string())
         .trim()
-        .trim_end_matches(['.', ',', ';', ':'])
+        .trim_end_matches(['.', '!', '?', ',', ';', ':'])
         .trim_end()
         .to_string()
 }
