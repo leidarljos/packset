@@ -2176,6 +2176,31 @@ mod tests {
     }
 
     #[test]
+    fn a_restatement_closes_the_claim_it_restates() {
+        let (_dir, svc) = service();
+        let mut first = atom("Remember: the probe gauge reads zeta after the eta valve opens.");
+        first.insert("kind".into(), json!("lesson"));
+        let old = svc.add(first).unwrap();
+        let mut second = atom("The probe gauge reads zeta after the eta valve opens.");
+        second.insert("kind".into(), json!("lesson"));
+        let new = svc.add(second).unwrap();
+        let live: Vec<String> = svc
+            .store()
+            .live("w")
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(
+            live,
+            vec![new["id"].as_str().unwrap().to_string()],
+            "old {}",
+            old["id"]
+        );
+        assert_eq!(new["supersedes"], json!([old["id"]]));
+    }
+
+    #[test]
     fn a_recalled_review_replaces_the_horizon_tag() {
         let mut episode = atom("A lesson stored before anyone reviewed it.");
         episode.insert("entities".into(), json!(["seat:grok", "horizon:transient"]));

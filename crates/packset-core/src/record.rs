@@ -596,6 +596,11 @@ pub fn is_due(atom: &Map<String, Value>, now: &str) -> bool {
 /// say whose claim it is; it is not a topic, so it links and matches nothing.
 pub const PROVENANCE_PREFIX: &str = "seat:";
 
+/// Prefixes in `entities` that say how a claim is held, not what it is
+/// about: the writing seat and the claim's horizon (`horizon:standing`).
+/// Neither is a topic, so neither links, matches or gates a replacement.
+pub const NON_TOPIC_PREFIXES: &[&str] = &[PROVENANCE_PREFIX, "horizon:"];
+
 /// The names an atom is about: the declared `entities` less the provenance
 /// ones, else capitalised runs and backtick names.
 #[must_use]
@@ -604,7 +609,7 @@ pub fn entities_of(atom: &Map<String, Value>) -> BTreeSet<String> {
         return items
             .iter()
             .map(|item| value_text(item).trim().to_string())
-            .filter(|s| !s.is_empty() && !s.starts_with(PROVENANCE_PREFIX))
+            .filter(|s| !s.is_empty() && !NON_TOPIC_PREFIXES.iter().any(|p| s.starts_with(p)))
             .collect();
     }
     let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1031,16 +1036,33 @@ pub struct Shape {
     pub tokens: BTreeSet<String>,
     pub head: Vec<String>,
     pub entities: BTreeSet<String>,
+    /// The entities a rewrite must share: [`Self::entities`] less a
+    /// capitalised first word read off the text (`The`, `Remember`), which
+    /// opens a sentence rather than naming its subject.
+    pub gate: BTreeSet<String>,
 }
 
 impl Shape {
     #[must_use]
     pub fn of(atom: &Map<String, Value>) -> Self {
         let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+        let entities = entities_of(atom);
+        let mut gate = entities.clone();
+        let first = text
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .find(|w| !w.is_empty());
+        if let Some(first) = first {
+            if !atom.contains_key("entities")
+                && first.chars().skip(1).all(|c| c.is_ascii_lowercase())
+            {
+                gate.remove(first);
+            }
+        }
         Self {
             tokens: tokens(text),
             head: head_tokens(text),
-            entities: entities_of(atom),
+            entities,
+            gate,
         }
     }
 }
@@ -1093,7 +1115,12 @@ pub fn replaces_shaped(
         .intersection(&old_shape.entities)
         .next()
         .is_some();
-    if !new_shape.entities.is_empty() && !old_shape.entities.is_empty() && !shared {
+    let gate_shared = new_shape
+        .gate
+        .intersection(&old_shape.gate)
+        .next()
+        .is_some();
+    if !new_shape.gate.is_empty() && !old_shape.gate.is_empty() && !gate_shared {
         return false;
     }
     if new.get("kind").and_then(Value::as_str) == Some("correction") && shared {
@@ -1497,6 +1524,55 @@ mod tests {
         let both = atom(json!({"tombstone": true, "due_at": "2025-01-01T00:00:00.000Z"}));
         assert!(!is_live(&both, now));
         assert!(is_due(&both, now));
+    }
+
+    #[test]
+    fn a_horizon_tag_is_not_a_topic_and_an_opening_word_does_not_gate_a_rewrite() {
+        let held: Map<String, Value> =
+            json!({"text": "x", "entities": ["seat:brio", "horizon:standing", "repo:a/b"]})
+                .as_object()
+                .unwrap()
+                .clone();
+        assert_eq!(
+            entities_of(&held).into_iter().collect::<Vec<_>>(),
+            vec!["repo:a/b".to_string()]
+        );
+        let lesson = |text: &str, entities: Option<Value>| {
+            let mut a = atom(json!({"kind": "lesson", "text": text, "id": text.len().to_string()}));
+            if let Some(e) = entities {
+                a.insert("entities".into(), e);
+            }
+            a
+        };
+        let old = lesson(
+            "Remember: the probe gauge reads zeta after the eta valve opens.",
+            None,
+        );
+        let new = lesson(
+            "The probe gauge reads zeta after the eta valve opens.",
+            None,
+        );
+        assert!(
+            replaces(&new, &old),
+            "a restatement without its label closes it"
+        );
+        let seat = lesson(
+            "The probe gauge reads zeta after the eta valve opens.",
+            Some(json!(["seat:claude", "horizon:transient"])),
+        );
+        assert!(
+            replaces(&seat, &old),
+            "a seat's horizon tag does not gate it"
+        );
+        let other = lesson("The Vasp gauge reads zeta after the eta valve opens.", None);
+        let named = lesson(
+            "The Cvmfs gauge reads zeta after the eta valve opens.",
+            None,
+        );
+        assert!(
+            !replaces(&other, &named),
+            "a different named subject still gates"
+        );
     }
 
     #[test]
