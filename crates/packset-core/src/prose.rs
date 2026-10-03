@@ -107,7 +107,8 @@ fn words_of(text: &str) -> Vec<&str> {
     out
 }
 
-/// The text's sentences, by snapper's splitter: a full stop inside a token
+/// The text's sentences, by snapper's splitter with lowercase starts on, so
+/// `Restart it. packsetd reloads.` is two claims. A full stop inside a token
 /// (`0.9.3`, `127.0.0.1`, `Cargo.lock`), after an abbreviation or an
 /// initial (`et al. 2021`, `J. Smith`) is not a boundary. Pieces with no
 /// word are dropped.
@@ -117,7 +118,10 @@ pub fn sentences(text: &str) -> Vec<String> {
     static SPLITTER: std::sync::OnceLock<snapper_fmt::sentence::unicode::UnicodeSentenceSplitter> =
         std::sync::OnceLock::new();
     SPLITTER
-        .get_or_init(snapper_fmt::sentence::unicode::UnicodeSentenceSplitter::new)
+        .get_or_init(|| {
+            snapper_fmt::sentence::unicode::UnicodeSentenceSplitter::new()
+                .with_lowercase_starts(true)
+        })
         .split(text)
         .into_iter()
         .filter(|piece| !words_of(piece).is_empty())

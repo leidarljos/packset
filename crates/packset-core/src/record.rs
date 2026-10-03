@@ -1040,6 +1040,8 @@ pub struct Shape {
     /// capitalised first word read off the text (`The`, `Remember`), which
     /// opens a sentence rather than naming its subject.
     pub gate: BTreeSet<String>,
+    /// Whether the entities were declared rather than read off the text.
+    pub declared: bool,
 }
 
 impl Shape {
@@ -1063,6 +1065,7 @@ impl Shape {
             head: head_tokens(text),
             entities,
             gate,
+            declared: atom.contains_key("entities"),
         }
     }
 }
@@ -1115,18 +1118,23 @@ pub fn replaces_shaped(
         .intersection(&old_shape.entities)
         .next()
         .is_some();
-    let gate_shared = new_shape
-        .gate
-        .intersection(&old_shape.gate)
-        .next()
-        .is_some();
-    if !new_shape.gate.is_empty() && !old_shape.gate.is_empty() && !gate_shared {
+    // Declared subjects that differ are two claims, whatever the text. Names
+    // read off the text gate only a rewrite: under the same head a new
+    // object is a new name by definition (`... is Borda` to `... is CombMNZ`).
+    let meets = new_shape.gate.is_empty()
+        || old_shape.gate.is_empty()
+        || new_shape
+            .gate
+            .intersection(&old_shape.gate)
+            .next()
+            .is_some();
+    if new_shape.declared && old_shape.declared && !meets {
         return false;
     }
     if new.get("kind").and_then(Value::as_str) == Some("correction") && shared {
         return true;
     }
-    shape_jaccard(&new_shape.tokens, &old_shape.tokens) >= 0.6
+    (meets && shape_jaccard(&new_shape.tokens, &old_shape.tokens) >= 0.6)
         || same_head(&new_shape.head, &old_shape.head)
 }
 
