@@ -13,6 +13,7 @@ description = "Atom schema, named fuse/diversify panel, decay, extract filters"
 [dependencies]
 rust-stemmers.workspace = true
 serde.workspace = true
+snapper-fmt.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

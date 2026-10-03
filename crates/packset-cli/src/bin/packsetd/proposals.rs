@@ -189,11 +189,13 @@ pub fn fidelity_verdict(claim: &str, transcript: Option<&str>) -> &'static str {
     }
 }
 
-/// The head of the text up to its first sentence end.
+/// The text's first sentence, its closing punctuation off.
 #[must_use]
 pub fn first_sentence(text: &str) -> String {
-    let end = text.find(['.', '!', '?']).unwrap_or(text.len());
-    text[..end]
+    packset_core::prose::sentences(text)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| text.to_string())
         .trim()
         .trim_end_matches(['.', ',', ';', ':'])
         .to_string()

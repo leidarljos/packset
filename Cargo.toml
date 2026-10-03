@@ -22,6 +22,7 @@ homepage = "https://leidarljos.github.io/packset/"
 anyhow = "1"
 # Snowball, which is Porter's suffix stripping as its author later revised it.
 rust-stemmers = "1"
+snapper-fmt = { version = "0.11.7", default-features = false }
 serde = { version = "1", features = ["derive"] }
 # preserve_order so a record written by the other writer round-trips with its
 # fields in the order that writer put them.

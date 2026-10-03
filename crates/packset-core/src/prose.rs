@@ -107,56 +107,19 @@ fn words_of(text: &str) -> Vec<&str> {
     out
 }
 
-/// Words whose full stop abbreviates rather than ends a sentence.
-const ABBREVIATIONS: &[&str] = &[
-    "al", "e.g", "i.e", "cf", "vs", "etc", "approx", "fig", "figs", "eq", "eqs", "ref", "refs",
-    "sec", "no", "vol", "pp", "dr", "prof", "st", "ca",
-];
-
-/// Whether the full stop at `at` closes an abbreviation (`et al.`, `e.g.`,
-/// `Fig.`) or a single-letter initial (`J. Smith`).
-fn abbreviation_before(text: &str, at: usize) -> bool {
-    let word = text[..at]
-        .rsplit(|c: char| c.is_whitespace() || c == '(' || c == '[')
-        .next()
-        .unwrap_or("");
-    if word.chars().count() == 1 && word.chars().all(|c| c.is_alphabetic()) {
-        return true;
-    }
-    let lower = word.to_ascii_lowercase();
-    ABBREVIATIONS.contains(&lower.as_str())
-}
-
-/// Sentences, split at a `.`, `!` or `?` that ends a run of terminators and
-/// is followed by whitespace or the end of the text. A full stop inside a
-/// token (`0.9.3`, `127.0.0.1`, `Cargo.lock`) is not a boundary, nor is one
-/// after an abbreviation or an initial (`et al. 2021`, `J. Smith`).
-fn sentences_of(text: &str) -> Vec<&str> {
-    let bytes = text.as_bytes();
-    let terminator = |b: u8| matches!(b, b'.' | b'!' | b'?');
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    for (at, &b) in bytes.iter().enumerate() {
-        if !terminator(b) {
-            continue;
-        }
-        let ends = match bytes.get(at + 1) {
-            None => true,
-            Some(&next) => next.is_ascii_whitespace(),
-        };
-        if !ends {
-            continue;
-        }
-        if b == b'.' && bytes.get(at + 1).is_some() && abbreviation_before(text, at) {
-            continue;
-        }
-        out.push(&text[start..at]);
-        start = at + 1;
-    }
-    if start < text.len() {
-        out.push(&text[start..]);
-    }
-    out.into_iter()
+/// The text's sentences, by snapper's splitter: a full stop inside a token
+/// (`0.9.3`, `127.0.0.1`, `Cargo.lock`), after an abbreviation or an
+/// initial (`et al. 2021`, `J. Smith`) is not a boundary. Pieces with no
+/// word are dropped.
+#[must_use]
+pub fn sentences(text: &str) -> Vec<String> {
+    use snapper_fmt::sentence::SentenceSplitter as _;
+    static SPLITTER: std::sync::OnceLock<snapper_fmt::sentence::unicode::UnicodeSentenceSplitter> =
+        std::sync::OnceLock::new();
+    SPLITTER
+        .get_or_init(snapper_fmt::sentence::unicode::UnicodeSentenceSplitter::new)
+        .split(text)
+        .into_iter()
         .filter(|piece| !words_of(piece).is_empty())
         .collect()
 }
@@ -210,12 +173,12 @@ fn has_participle(sentence: &str) -> bool {
 #[must_use]
 pub fn assess(text: &str) -> Report {
     let words = words_of(text);
-    let mut sentences: Vec<&str> = sentences_of(text);
-    if sentences.is_empty() && !words.is_empty() {
-        sentences = vec![text];
+    let mut pieces = sentences(text);
+    if pieces.is_empty() && !words.is_empty() {
+        pieces = vec![text.to_string()];
     }
     let n_words = words.len();
-    let n_sent = sentences.len().max(1);
+    let n_sent = pieces.len().max(1);
     let n_chars: usize = words.iter().map(|w| w.len()).sum();
     let n_syl: usize = words.iter().map(|w| syllables(w)).sum();
 
@@ -223,7 +186,7 @@ pub fn assess(text: &str) -> Report {
     let mut passives = 0usize;
     let mut hard = 0usize;
     let mut very_hard = 0usize;
-    for sentence in &sentences {
+    for sentence in &pieces {
         let n = words_of(sentence).len();
         if n >= VERY_HARD_WORDS {
             very_hard += 1;
@@ -259,7 +222,7 @@ pub fn assess(text: &str) -> Report {
 
     Report {
         words: n_words,
-        sentences: if words.is_empty() { 0 } else { sentences.len() },
+        sentences: if words.is_empty() { 0 } else { pieces.len() },
         grade,
         ease,
         adverbs,
@@ -295,7 +258,7 @@ pub fn refuse(text: &str, role: Role) -> Result<Report, ProseError> {
             )));
         }
         if report.very_hard_sentences > 0 {
-            let (index, words) = sentences_of(text)
+            let (index, words) = sentences(text)
                 .iter()
                 .map(|s| words_of(s).len())
                 .enumerate()
@@ -337,26 +300,25 @@ mod tests {
     #[test]
     fn a_decimal_point_does_not_end_a_sentence() {
         assert_eq!(
-            sentences_of("BM25+ beats BM25: 0.635 vs 0.615 hit@1 on turns. It is the default.")
-                .len(),
+            sentences("BM25+ beats BM25: 0.635 vs 0.615 hit@1 on turns. It is the default.").len(),
             2
         );
         assert_eq!(
-            sentences_of("Cargo.lock pins the client. Bump it with cargo update.").len(),
+            sentences("Cargo.lock pins the client. Bump it with cargo update.").len(),
             2
         );
         assert_eq!(
-            sentences_of("packsetd listens on 127.0.0.1 only and never on localhost.").len(),
+            sentences("packsetd listens on 127.0.0.1 only and never on localhost.").len(),
             1
         );
-        assert_eq!(sentences_of("Really?! Yes. No").len(), 3);
+        assert_eq!(sentences("Really?! Yes. No").len(), 3);
         assert_eq!(
-            sentences_of("the tracker has 0.9.3 now, but keep at it.").len(),
+            sentences("the tracker has 0.9.3 now, but keep at it.").len(),
             1
         );
-        assert_eq!(sentences_of("One. Two! Three?").len(), 3);
-        assert_eq!(sentences_of("no terminator at all").len(), 1);
-        assert_eq!(sentences_of("...").len(), 0);
+        assert_eq!(sentences("One. Two! Three?").len(), 3);
+        assert_eq!(sentences("no terminator at all").len(), 1);
+        assert_eq!(sentences("...").len(), 0);
     }
 
     #[test]
@@ -364,20 +326,17 @@ mod tests {
         let lesson = "Raw per-atom gyration radius does not separate reactive \
                       protons in TRPMD (Hu et al. 2021, doi 10.3389/fchem.2021.624937). \
                       A spread descriptor must subtract the reactant spread.";
-        assert_eq!(sentences_of(lesson).len(), 2);
+        assert_eq!(sentences(lesson).len(), 2);
         assert_eq!(
-            sentences_of("Use a ring, e.g. the instanton. It converges.").len(),
+            sentences("Use a ring, e.g. the instanton. It converges.").len(),
             2
         );
         assert_eq!(
-            sentences_of("See Fig. 3 and Eq. 2 for the rate. Done.").len(),
+            sentences("See Fig. 3 and Eq. 2 for the rate. Done.").len(),
             2
         );
-        assert_eq!(
-            sentences_of("J. O. Richardson derived it. It holds.").len(),
-            2
-        );
-        assert_eq!(sentences_of("It stopped. 3 tests failed.").len(), 2);
+        assert_eq!(sentences("J. O. Richardson derived it. It holds.").len(), 2);
+        assert_eq!(sentences("It stopped. 3 tests failed.").len(), 2);
     }
 
     #[test]
