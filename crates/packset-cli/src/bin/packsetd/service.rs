@@ -171,11 +171,15 @@ fn head_key(shape: &record::Shape) -> Option<String> {
         .then(|| format!("h:{}", shape.head[..record::HEAD_MIN].join(" ")))
 }
 
-/// Whether a stored claim says what the new one says: same text, kind and set.
+/// Whether a stored claim says what the new one says: same text, kind and
+/// set, and for a rule the same pattern and verdict. Two rules that share a
+/// reason and differ in glob or verdict are two laws.
 fn same_claim(existing: &Record, atom: &Record) -> bool {
     existing.get("text") == atom.get("text")
         && existing.get("kind") == atom.get("kind")
         && existing.get("set") == atom.get("set")
+        && existing.get("pattern") == atom.get("pattern")
+        && existing.get("verdict") == atom.get("verdict")
 }
 
 /// One change the search index has yet to see.
@@ -2453,6 +2457,27 @@ mod tests {
         let again = svc.add(atom("Reviews open with a check.")).unwrap();
         assert_eq!(first["id"], again["id"], "a retry is not a second claim");
         assert_eq!(svc.store().current("w", None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rules_with_one_reason_and_two_patterns_are_two_atoms() {
+        let (_dir, svc) = service();
+        let mut a = atom("Cloudflare Pages settings change through the dashboard.");
+        a.insert("kind".into(), json!("rule"));
+        a.insert("pattern".into(), json!("*api.cloudflare.com*/pages/projects/*-X PATCH*"));
+        a.insert("verdict".into(), json!("ask"));
+        let mut b = a.clone();
+        b.insert("pattern".into(), json!("*-X PATCH*api.cloudflare.com*/pages/projects/*"));
+        let mut c = a.clone();
+        c.insert("verdict".into(), json!("deny"));
+        let a1 = svc.add(a.clone()).unwrap();
+        let b1 = svc.add(b).unwrap();
+        let c1 = svc.add(c).unwrap();
+        let a2 = svc.add(a).unwrap();
+        assert_ne!(a1["id"], b1["id"], "a second glob is a second rule");
+        assert_ne!(a1["id"], c1["id"], "a second verdict is a second rule");
+        assert_eq!(a1["id"], a2["id"], "the same rule twice is one atom");
+        assert_eq!(svc.store().current("w", None).unwrap().len(), 3);
     }
 
     #[test]
