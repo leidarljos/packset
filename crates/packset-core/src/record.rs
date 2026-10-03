@@ -1113,6 +1113,9 @@ pub fn replaces_shaped(
             }
         }
     }
+    if new.get("pattern") != old.get("pattern") || new.get("verdict") != old.get("verdict") {
+        return false;
+    }
     let shared = new_shape
         .entities
         .intersection(&old_shape.entities)
