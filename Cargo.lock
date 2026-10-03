@@ -3950,8 +3950,7 @@ checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 [[package]]
 name = "snapper-fmt"
 version = "0.11.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ecaf0e77cdf651d7c1b12a4f32ba17f7ec164369de8a964d1a4fd04b0344cfc"
+source = "git+https://github.com/TurtleTech-ehf/snapper?branch=fix%2Fsentence-starts#ee1f49e9101a6cef5055273f883f0929002078ba"
 dependencies = [
  "anyhow",
  "imara-diff",
