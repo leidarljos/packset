@@ -1,11 +1,11 @@
 //! Store-agnostic packset algorithms.
 //!
 //! Host merge is a named fuse then diversify then decay panel.
-//! Default fuse is Borda (`k - position`). Reciprocal Rank Fusion,
-//! CombSUM / CombMNZ, Dowdall, Kemeny-Young, Schulze, Copeland,
-//! and Tideman are named fuse voters. Default diversify is MMR.
+//! Default fuse is CombMNZ. Reciprocal Rank Fusion, CombSUM, Borda,
+//! Dowdall, Kemeny-Young, Schulze, Copeland, and Tideman are named
+//! fuse voters. Borda is optional. Default diversify is MMR.
 //! A Determinantal Point Process is a named diversify voter.
-//! Default decay is off. The host reads `PACKSET_FUSE`,
+//! Default decay is FSRS. The host reads `PACKSET_FUSE`,
 //! `PACKSET_DIVERSIFY`, and `PACKSET_DECAY`. Clients do not
 //! choose this.
 
@@ -52,7 +52,9 @@ pub use jury::may_report;
 pub use kemeny::kemeny_merge;
 pub use mab::{ProtocolReport, COMPETENCIES as MAB_COMPETENCIES};
 pub use mmr::mmr_rerank;
-pub use panel::{Decay, Diversify, Fuse, Panel, UnknownVoter};
+pub use panel::{
+    shipped_panel_report, Decay, Diversify, Fuse, Panel, UnknownVoter,
+};
 pub use paper_a::{PaperATable, BENCHES as PAPER_A_BENCHES};
 pub use prose::{refuse as prose_refuse, ProseError, Role as ProseRole};
 pub use record::{validate, AtomError};

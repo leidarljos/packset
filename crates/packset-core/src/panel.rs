@@ -1,7 +1,7 @@
 //! Named fuse then diversify then decay. Host picks the sequence.
 //!
 //! Default fuse is CombMNZ. Default diversify is MMR. Default decay
-//! is off. Names come from `PACKSET_FUSE`, `PACKSET_DIVERSIFY`,
+//! is FSRS. Names come from `PACKSET_FUSE`, `PACKSET_DIVERSIFY`,
 //! and `PACKSET_DECAY`, or from packsetd flags. Clients do not
 //! choose this. Unknown names fail closed. Later voters add a
 //! variant and a match arm; they do not change the default.
@@ -322,6 +322,27 @@ fn ranks_as_scored<T: Clone>(ballots: &[Ballot<T>]) -> Vec<ScoredBallot<T>> {
 }
 
 #[cfg(test)]
+/// Two scored lists used by the manuscript printer.
+pub fn combmnz_fixture() -> Vec<ScoredBallot<&'static str>> {
+    vec![
+        vec![("c", 1.0), ("d", 0.4), ("low", 0.0)],
+        vec![("hi", 1.0), ("d", 0.25), ("lo", 0.0)],
+    ]
+}
+
+/// The shipped default panel and the CombMNZ order of [`combmnz_fixture`].
+pub fn shipped_panel_report() -> String {
+    let panel = Panel::default();
+    let order = combmnz_merge(&combmnz_fixture());
+    format!(
+        "default-fuse {}\ndefault-diversify {}\ndefault-decay {}\ncombmnz-order {}\n",
+        panel.fuse.as_str(),
+        panel.diversify.as_str(),
+        panel.decay.as_str(),
+        order.join(" ")
+    )
+}
+
 mod tests {
     /// Every voter, over ballots that disagree about order and about which
     /// candidates exist at all.
@@ -398,6 +419,17 @@ mod tests {
                     .collect(),
             },
         ]
+    }
+
+    #[test]
+    fn combmnz_fixture_order_is_the_shipped_merge() {
+        let order = combmnz_merge(&combmnz_fixture());
+        let report = shipped_panel_report();
+        println!("{report}");
+        assert!(report.contains(&order.join(" ")), "{report}");
+        assert!(report.contains("default-fuse combmnz"), "{report}");
+        assert!(report.contains("default-diversify mmr"), "{report}");
+        assert!(report.contains("default-decay fsrs"), "{report}");
     }
 
     #[test]
