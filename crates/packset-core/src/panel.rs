@@ -321,7 +321,6 @@ fn ranks_as_scored<T: Clone>(ballots: &[Ballot<T>]) -> Vec<ScoredBallot<T>> {
         .collect()
 }
 
-#[cfg(test)]
 /// Two scored lists used by the manuscript printer.
 pub fn combmnz_fixture() -> Vec<ScoredBallot<&'static str>> {
     vec![
