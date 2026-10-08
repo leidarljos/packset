@@ -171,12 +171,21 @@ fn log_path() -> PathBuf {
 }
 
 fn client(port: u16) -> PacksetClient {
-    PacksetClient::new(format!("http://127.0.0.1:{port}"))
+    // A named PACKSET_URL (INSIDE_MEMORY_URL is its alias) wins; the
+    // loopback port is only the fallback. The CLI once ignored the URL
+    // and wrote to the wrong store, so data commands resolve exactly
+    // like the library client does; `off` keeps the old fallback.
+    match packset_client::PacksetClient::from_env() {
+        Ok(named) => named,
+        Err(_) => PacksetClient::new(format!("http://127.0.0.1:{port}")),
+    }
 }
 
-/// Whether the writer on this port is one of ours.
+/// Whether the writer on this port is one of ours. Port-pinned on
+/// purpose: writer management answers about the port even when a named
+/// PACKSET_URL points the data commands elsewhere.
 fn is_ours(port: u16) -> bool {
-    client(port)
+    PacksetClient::new(format!("http://127.0.0.1:{port}"))
         .health()
         .is_ok_and(|body| OURS.iter().any(|name| body.trim_start().starts_with(name)))
 }
@@ -389,15 +398,22 @@ fn print_url(port: u16) {
 }
 
 fn status(port: u16, given: Option<&str>) -> anyhow::Result<()> {
-    if !procfs::listening(port) {
+    let client = client(port);
+    // A named PACKSET_URL points the read at that writer; the loopback
+    // port gates only when the URL did not name one.
+    if client.base() == format!("http://127.0.0.1:{port}") {
+        if !procfs::listening(port) {
+            anyhow::bail!("down");
+        }
+        if !is_ours(port) {
+            anyhow::bail!("port {port} is held by another process");
+        }
+    }
+    let health = client.health().unwrap_or_default();
+    if health.is_empty() {
         anyhow::bail!("down");
     }
-    if !is_ours(port) {
-        anyhow::bail!("port {port} is held by another process");
-    }
-    let client = client(port);
-    let health = client.health().unwrap_or_default();
-    println!("packset: up on 127.0.0.1:{port} ({})", health.trim());
+    println!("packset: up on {} ({})", client.base(), health.trim());
     let scope = if is_all_workspaces(given) {
         None
     } else {

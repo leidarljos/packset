@@ -4,6 +4,17 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The `packset` CLI honors a named `PACKSET_URL` (`INSIDE_MEMORY_URL`
+  is its alias) on data commands: it used to ignore the URL and talk
+  to the loopback port, silently writing to the wrong store, while the
+  library client and the seat honored it. Data commands now resolve
+  exactly like `PacksetClient::from_env`; `status` health-checks the
+  named writer instead of gating on the port, and writer management
+  (`ensure`, `start`, `stop`) stays port-pinned on purpose. Verified
+  live: status, remember, and search through a named URL against a
+  scratch writer, with the port fallback and management path
+  unchanged.
+
 - Every DOI the explanation cites resolves to the cited work (Crossref
   titles, doi.org redirects, Semantic Scholar second witness): the two
   records Crossref's metadata API 500s on -- Anderson and Schooler's
