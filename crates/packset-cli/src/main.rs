@@ -91,22 +91,21 @@ fn run() -> anyhow::Result<()> {
             println!("{}", daemon.display());
             Ok(())
         }
-        "remember" => write(port, "lesson", rest),
-        "prefer" => write(port, "preference", rest),
-        "search" => search(port, rest),
-        "due" => due(port, rest.first().map(String::as_str)),
-        "sweep" => sweep(port, rest.first().map(String::as_str)),
-        "islands" => islands(port, rest.first().map(String::as_str)),
-        "hubs" => hubs(port, rest.first().map(String::as_str)),
-        "island" => island(port, rest),
-        "fire" => fire(port, rest),
-        "grade" => grade(port, rest),
-        "pin" => pin(port, rest.first().map(String::as_str)),
-        "accessions" => accessions(port, rest.first().map(String::as_str)),
-        "atoms" => atoms(port, rest),
-        "export" => export(port, rest),
+        "remember" => write("lesson", rest),
+        "prefer" => write("preference", rest),
+        "search" => search(rest),
+        "due" => due(rest.first().map(String::as_str)),
+        "sweep" => sweep(rest.first().map(String::as_str)),
+        "islands" => islands(rest.first().map(String::as_str)),
+        "hubs" => hubs(rest.first().map(String::as_str)),
+        "island" => island(rest),
+        "fire" => fire(rest),
+        "grade" => grade(rest),
+        "pin" => pin(rest.first().map(String::as_str)),
+        "accessions" => accessions(rest.first().map(String::as_str)),
+        "atoms" => atoms(rest),
+        "export" => export(rest),
         "citers" => citers(
-            port,
             rest.first().map(String::as_str),
             rest.get(1).map(String::as_str),
         ),
@@ -170,14 +169,18 @@ fn log_path() -> PathBuf {
     state.join(format!("packsetd-{}.log", port()))
 }
 
-fn client(port: u16) -> PacksetClient {
+fn client() -> anyhow::Result<PacksetClient> {
     // A named PACKSET_URL (INSIDE_MEMORY_URL is its alias) wins; the
-    // loopback port is only the fallback. The CLI once ignored the URL
-    // and wrote to the wrong store, so data commands resolve exactly
-    // like the library client does; `off` keeps the old fallback.
+    // loopback port is only the fallback when no URL is set at all.
+    // `off` is the one way to have no pack, and the seat honors it as
+    // "no pack on purpose" -- so data commands refuse rather than
+    // writing to a loopback writer the seat turned off.
     match packset_client::PacksetClient::from_env() {
-        Ok(named) => named,
-        Err(_) => PacksetClient::new(format!("http://127.0.0.1:{port}")),
+        Ok(named) => Ok(named),
+        Err(packset_client::Error::NoUrl) => {
+            anyhow::bail!("PACKSET_URL=off: no pack on purpose")
+        }
+        Err(other) => Err(other.into()),
     }
 }
 
@@ -236,11 +239,14 @@ fn is_all_workspaces(given: Option<&str>) -> bool {
 /// what the client derives from the working directory's git remote, else
 /// `default`. The same answer every other client gives.
 fn workspace(given: Option<&str>) -> anyhow::Result<String> {
-    Ok(given
+    if let Some(w) = given
         .map(str::to_string)
         .or_else(|| env::var("PACKSET_WORKSPACE").ok())
         .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| client(port()).workspace()))
+    {
+        return Ok(w);
+    }
+    Ok(client()?.workspace())
 }
 
 /// The daemon this seat would run.
@@ -398,7 +404,7 @@ fn print_url(port: u16) {
 }
 
 fn status(port: u16, given: Option<&str>) -> anyhow::Result<()> {
-    let client = client(port);
+    let client = client()?;
     // A named PACKSET_URL points the read at that writer; the loopback
     // port gates only when the URL did not name one.
     if client.base() == format!("http://127.0.0.1:{port}") {
@@ -424,8 +430,8 @@ fn status(port: u16, given: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn pin(port: u16, name: Option<&str>) -> anyhow::Result<()> {
-    let client = client(port);
+fn pin(name: Option<&str>) -> anyhow::Result<()> {
+    let client = client()?;
     let workspace = workspace(None)?;
     let answer = match name {
         Some(name) => client.set_pin(&workspace, name)?,
@@ -445,11 +451,11 @@ fn pin(port: u16, name: Option<&str>) -> anyhow::Result<()> {
 /// The other direction of `accessions`, and the pack's half of the backwards
 /// walk. A tracker answers which issues cite a product; this answers which
 /// remembered claims do.
-fn citers(port: u16, accession: Option<&str>, given: Option<&str>) -> anyhow::Result<()> {
+fn citers(accession: Option<&str>, given: Option<&str>) -> anyhow::Result<()> {
     let accession =
         accession.ok_or_else(|| anyhow::anyhow!("name an accession: packset citers ACCESSION"))?;
     let workspace = workspace(given)?;
-    for atom in client(port).citers(&workspace, accession)? {
+    for atom in client()?.citers(&workspace, accession)? {
         let id = atom
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -476,7 +482,7 @@ fn citers(port: u16, accession: Option<&str>, given: Option<&str>) -> anyhow::Re
 /// the satchel would make this the thing that decides what a satchel needs,
 /// and that is the tracker's call: the pack only knows what its own atoms
 /// mention.
-fn export(port: u16, args: &[String]) -> anyhow::Result<()> {
+fn export(args: &[String]) -> anyhow::Result<()> {
     let mut into: Option<std::path::PathBuf> = None;
     let mut given: Option<String> = None;
     let mut at = 0;
@@ -495,7 +501,7 @@ fn export(port: u16, args: &[String]) -> anyhow::Result<()> {
     }
     let into = into.ok_or_else(|| anyhow::anyhow!("export needs --into DIR"))?;
     let workspace = workspace(given.as_deref())?;
-    let held = client(port);
+    let held = client()?;
     let atoms = held.atoms(&workspace)?;
     // The accessions come from the endpoint that already answers this, rather
     // than from a copy of the rule for what an accession looks like. Two
@@ -535,7 +541,7 @@ fn split_workspace(args: &[String]) -> (Option<String>, Vec<String>) {
 }
 
 /// POST one explicit claim of `kind`; the text is stored as given.
-fn write(port: u16, kind: &str, args: &[String]) -> anyhow::Result<()> {
+fn write(kind: &str, args: &[String]) -> anyhow::Result<()> {
     let (given, words) = split_workspace(args);
     let text = words.join(" ").trim().to_string();
     if text.is_empty() {
@@ -549,7 +555,7 @@ fn write(port: u16, kind: &str, args: &[String]) -> anyhow::Result<()> {
         "text": text,
         "workspace": workspace,
     });
-    let stored = client(port).post_atom(&atom)?;
+    let stored = client()?.post_atom(&atom)?;
     println!(
         "{}\t{}\tdue {}",
         stored["id"].as_str().unwrap_or("-"),
@@ -609,7 +615,7 @@ fn search_flags(args: &[String]) -> anyhow::Result<SearchFlags> {
 /// Ranked claims for a question: score, kind, id, text.
 /// `--as-of TS` ranks the claims whose window contained TS.
 /// `--rerank` runs the measured cross-encoder second stage.
-fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
+fn search(args: &[String]) -> anyhow::Result<()> {
     let flags = search_flags(args)?;
     let query = flags.words.join(" ").trim().to_string();
     if query.is_empty() {
@@ -618,7 +624,7 @@ fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
     let workspace = workspace(flags.workspace.as_deref())?;
     eprintln!("packset: workspace {workspace}");
     for hit in
-        client(port).search_opts(&workspace, &query, 10, flags.as_of.as_deref(), flags.rerank)?
+        client()?.search_opts(&workspace, &query, 10, flags.as_of.as_deref(), flags.rerank)?
     {
         println!(
             "{:.4}\t{}\t{}\t{}",
@@ -633,9 +639,9 @@ fn search(port: u16, args: &[String]) -> anyhow::Result<()> {
 
 /// Live claims whose `due_at` has passed, soonest first: due, id, text.
 /// Lapse what was left due past twice its interval; the third miss forgets.
-fn sweep(port: u16, given: Option<&str>) -> anyhow::Result<()> {
+fn sweep(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
-    let report = client(port).sweep(&workspace)?;
+    let report = client()?.sweep(&workspace)?;
     println!(
         "{} lapsed by neglect, {} forgotten",
         report["lapsed"].as_u64().unwrap_or(0),
@@ -647,10 +653,10 @@ fn sweep(port: u16, given: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn due(port: u16, given: Option<&str>) -> anyhow::Result<()> {
+fn due(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
     let now = packset_core::clock::utcnow();
-    let mut atoms: Vec<serde_json::Value> = client(port)
+    let mut atoms: Vec<serde_json::Value> = client()?
         .atoms_as_of(&workspace, None)?
         .into_iter()
         .filter(|a| {
@@ -673,9 +679,12 @@ fn due(port: u16, given: Option<&str>) -> anyhow::Result<()> {
 
 /// One line per island: size, then the first claim in it.
 /// One line per hub: score, links, id, text.
-fn hubs(port: u16, given: Option<&str>) -> anyhow::Result<()> {
-    let workspace = given.map_or_else(|| client(port).workspace(), str::to_string);
-    let body = client(port).hubs(&workspace, 10)?;
+fn hubs(given: Option<&str>) -> anyhow::Result<()> {
+    let workspace = match given {
+        Some(w) => w.to_string(),
+        None => client()?.workspace(),
+    };
+    let body = client()?.hubs(&workspace, 10)?;
     for hub in body["hubs"].as_array().into_iter().flatten() {
         println!(
             "{:.4}\t{}\t{}\t{}",
@@ -688,9 +697,9 @@ fn hubs(port: u16, given: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn islands(port: u16, given: Option<&str>) -> anyhow::Result<()> {
+fn islands(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
-    let body = client(port).islands(&workspace)?;
+    let body = client()?.islands(&workspace)?;
     for island in body["islands"].as_array().into_iter().flatten() {
         let first = island["atoms"][0]["text"].as_str().unwrap_or("");
         println!("{}\t{}", island["size"], first);
@@ -699,19 +708,19 @@ fn islands(port: u16, given: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Two or more claims fired together.
-fn fire(port: u16, args: &[String]) -> anyhow::Result<()> {
+fn fire(args: &[String]) -> anyhow::Result<()> {
     let (given, ids) = split_workspace(args);
     if ids.len() < 2 {
         anyhow::bail!("fire: pass two or more claim ids that fired together");
     }
     let workspace = workspace(given.as_deref())?;
-    let body = client(port).fire(&workspace, &ids)?;
+    let body = client()?.fire(&workspace, &ids)?;
     println!("{} fired, {} changed", body["fired"], body["changed"]);
     Ok(())
 }
 
 /// The memories a cue activates: activation, seed mark, id, text.
-fn island(port: u16, args: &[String]) -> anyhow::Result<()> {
+fn island(args: &[String]) -> anyhow::Result<()> {
     let (given, words) = split_workspace(args);
     let firing = words.iter().any(|w| w == "--fire");
     let cue = words
@@ -726,7 +735,7 @@ fn island(port: u16, args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("island: pass the cue, the task or question at hand");
     }
     let workspace = workspace(given.as_deref())?;
-    let body = client(port).activate(&workspace, &cue, 24, firing)?;
+    let body = client()?.activate(&workspace, &cue, 24, firing)?;
     for atom in body["island"].as_array().into_iter().flatten() {
         println!(
             "{:.3}\t{}\t{}\t{}",
@@ -744,7 +753,7 @@ fn island(port: u16, args: &[String]) -> anyhow::Result<()> {
 }
 
 /// Grade one review: recalled unless `--lapsed`.
-fn grade(port: u16, args: &[String]) -> anyhow::Result<()> {
+fn grade(args: &[String]) -> anyhow::Result<()> {
     let lapsed = args.iter().any(|a| a == "--lapsed");
     let mut rest: Vec<&String> = args.iter().filter(|a| *a != "--lapsed").collect();
     let id = rest
@@ -753,7 +762,7 @@ fn grade(port: u16, args: &[String]) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("grade needs an atom id"))?;
     rest.remove(0);
     let workspace = workspace(rest.first().map(|s| s.as_str()))?;
-    let graded = client(port).grade(&workspace, &id, !lapsed)?;
+    let graded = client()?.grade(&workspace, &id, !lapsed)?;
     println!("{}", graded["due_at"].as_str().unwrap_or("graded"));
     Ok(())
 }
@@ -775,7 +784,7 @@ fn export_file_name(workspace: &str) -> String {
 }
 
 /// Live-now atoms, or those live at `--as-of`, one JSON object a line.
-fn atoms(port: u16, args: &[String]) -> anyhow::Result<()> {
+fn atoms(args: &[String]) -> anyhow::Result<()> {
     let mut as_of: Option<String> = None;
     let mut given: Option<String> = None;
     let mut at = 0;
@@ -795,15 +804,15 @@ fn atoms(port: u16, args: &[String]) -> anyhow::Result<()> {
     }
     let workspace = workspace(given.as_deref())?;
     eprintln!("packset: workspace {workspace}");
-    for atom in client(port).atoms_as_of(&workspace, as_of.as_deref())? {
+    for atom in client()?.atoms_as_of(&workspace, as_of.as_deref())? {
         println!("{}", serde_json::to_string(&atom)?);
     }
     Ok(())
 }
 
-fn accessions(port: u16, given: Option<&str>) -> anyhow::Result<()> {
+fn accessions(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
-    for accession in client(port).accessions(&workspace)? {
+    for accession in client()?.accessions(&workspace)? {
         println!("{accession}");
     }
     Ok(())
@@ -905,5 +914,30 @@ mod tests {
             super::export_file_name("git:github.com/leidarljos/ljos"),
             "git_github.com_leidarljos_ljos.jsonl"
         );
+    }
+
+    #[test]
+    fn off_is_no_pack_not_the_loopback_writer() {
+        // The seat honors PACKSET_URL=off as "no pack on purpose"; a data
+        // command that fell back to loopback would write to a writer the
+        // seat turned off. No other test here touches the environment, so
+        // this set-and-restore races nothing.
+        let url = std::env::var_os("PACKSET_URL");
+        let alias = std::env::var_os("INSIDE_MEMORY_URL");
+        std::env::set_var("PACKSET_URL", "off");
+        std::env::remove_var("INSIDE_MEMORY_URL");
+        let err = super::client().unwrap_err();
+        assert!(
+            err.to_string().contains("no pack on purpose"),
+            "{err}"
+        );
+        match url {
+            Some(v) => std::env::set_var("PACKSET_URL", v),
+            None => std::env::remove_var("PACKSET_URL"),
+        }
+        match alias {
+            Some(v) => std::env::set_var("INSIDE_MEMORY_URL", v),
+            None => std::env::remove_var("INSIDE_MEMORY_URL"),
+        }
     }
 }

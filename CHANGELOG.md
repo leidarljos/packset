@@ -4,6 +4,19 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `PACKSET_URL=off` is no pack, not the loopback writer: data commands
+  refuse with "no pack on purpose" instead of silently falling back to
+  the port, which wrote to a writer the seat had turned off. The seat
+  already honored `off` this way (`ljos` refuses with "no pack on
+  purpose"); the CLI now matches it, and the port parameters its data
+  commands no longer needed are gone. Pinned by
+  `off_is_no_pack_not_the_loopback_writer`; verified live that search
+  and status refuse under `off` and work without it.
+- The two `packset-client` workspace tests hold a lock around their
+  environment rewrites: they mutate process-global `HOME` and
+  `PACKSET_WORKSPACE` in parallel test threads, and one run in five
+  read the other's value and failed. Fifteen consecutive runs green
+  since.
 - The `packset` CLI honors a named `PACKSET_URL` (`INSIDE_MEMORY_URL`
   is its alias) on data commands: it used to ignore the URL and talk
   to the loopback port, silently writing to the wrong store, while the

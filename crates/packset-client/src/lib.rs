@@ -727,8 +727,15 @@ impl PacksetClient {
 mod tests {
     use super::*;
 
+    // Both workspace tests below rewrite process-global environment, so
+    // they hold this lock: without it the runner's parallel threads
+    // interleave one test's set-and-restore with the other's read, and
+    // the suite fails one run in five on a polluted read.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolved_workspace_reads_ljos_env_not_default() {
+        let _env = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("packset-ljos-env-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/ljos")).unwrap();
         std::fs::write(
@@ -758,6 +765,7 @@ mod tests {
 
     #[test]
     fn resolved_workspace_without_env_is_seat_not_default() {
+        let _env = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("packset-no-ljos-env-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let old_home = env::var("HOME").ok();
