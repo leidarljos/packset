@@ -1330,9 +1330,11 @@ mod tests {
     #[test]
     fn an_outcome_names_its_issue_and_choice() {
         let check = |v: Value| validate(&mut atom(v));
-        assert!(check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+        assert!(
+            check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
             "workspace": "w", "issue": "p-1", "choice": "ship"}))
-        .is_ok());
+            .is_ok()
+        );
         let no_choice = check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
             "workspace": "w", "issue": "p-1", "choice": " "}));
         assert_eq!(no_choice.unwrap_err().0, "outcome atom needs choice");
@@ -1642,15 +1644,24 @@ mod tests {
             }))
         };
         assert!(
-            !replaces(&row("cursor", "newcomer", "1.000"), &row("cursor", "maintainer", "1.000")),
+            !replaces(
+                &row("cursor", "newcomer", "1.000"),
+                &row("cursor", "maintainer", "1.000")
+            ),
             "rows into two voters are two rows"
         );
         assert!(
-            !replaces(&row("carol", "alice", "1.000"), &row("bob", "alice", "1.000")),
+            !replaces(
+                &row("carol", "alice", "1.000"),
+                &row("bob", "alice", "1.000")
+            ),
             "two voters' rows into one are two rows"
         );
         assert!(
-            replaces(&row("cursor", "newcomer", "0.800"), &row("cursor", "newcomer", "1.000")),
+            replaces(
+                &row("cursor", "newcomer", "0.800"),
+                &row("cursor", "newcomer", "1.000")
+            ),
             "a new weight on the same row closes the old"
         );
         let mut scoped = row("cursor", "newcomer", "0.800");
@@ -1666,11 +1677,17 @@ mod tests {
             }))
         };
         assert!(
-            !replaces(&forecast("reliability", "0.50"), &forecast("maintainer", "0.56")),
+            !replaces(
+                &forecast("reliability", "0.50"),
+                &forecast("maintainer", "0.56")
+            ),
             "two agents' forecasts on one issue"
         );
         assert!(
-            replaces(&forecast("maintainer", "0.40"), &forecast("maintainer", "0.56")),
+            replaces(
+                &forecast("maintainer", "0.40"),
+                &forecast("maintainer", "0.56")
+            ),
             "an agent's later forecast closes its earlier one"
         );
         let closed = |issue: &str, choice: &str| {
@@ -1680,7 +1697,10 @@ mod tests {
             }))
         };
         assert!(
-            !replaces(&closed("seat-tvpg", "tool-adapters"), &closed("seat-zrc6", "tool-adapters")),
+            !replaces(
+                &closed("seat-tvpg", "tool-adapters"),
+                &closed("seat-zrc6", "tool-adapters")
+            ),
             "two issues' outcomes are two records"
         );
     }
