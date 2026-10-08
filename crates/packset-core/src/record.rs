@@ -47,7 +47,12 @@ pub const KINDS: &[&str] = &[
     "persona",
     "prediction",
     "rule",
+    "outcome",
 ];
+
+/// Kinds the seat weighs or reads and never recalls, so they stay off the
+/// review clock: a trust row, a persona, and the outcome an issue closed on.
+pub const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "outcome"];
 
 /// Whether the claim was stated or inferred.
 pub const LEVELS: &[&str] = &["explicit", "derived"];
@@ -357,6 +362,7 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     let persona = kind == "persona";
     let prediction = kind == "prediction";
     let rule = kind == "rule";
+    let outcome = kind == "outcome";
     let level = atom
         .get("level")
         .and_then(Value::as_str)
@@ -422,6 +428,9 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     if rule {
         check_rule(atom)?;
     }
+    if outcome {
+        check_outcome(atom)?;
+    }
 
     let report = prose::refuse(&text, prose::Role::Atom)?;
     atom.insert("prose".into(), prose_value(&report));
@@ -449,6 +458,20 @@ fn check_prediction(atom: &Map<String, Value>) -> Result<(), AtomError> {
             "prediction atom: expect is an option or an object of option to share".into(),
         )),
     }
+}
+
+/// An `outcome` atom is the option an issue closed on: `issue` and
+/// `choice`. Read beside the issue's ballots, it says which voters were
+/// right, so a consensus can tell voters who err together from voters who
+/// err apart.
+fn check_outcome(atom: &Map<String, Value>) -> Result<(), AtomError> {
+    for key in ["issue", "choice"] {
+        match atom.get(key).and_then(Value::as_str).map(str::trim) {
+            Some(v) if !v.is_empty() => {}
+            _ => return Err(AtomError(format!("outcome atom needs {key}"))),
+        }
+    }
+    Ok(())
 }
 
 /// A `rule` atom is argv law in the pack: `pattern`, a glob over the command
@@ -1303,6 +1326,21 @@ mod tests {
             "verdict": "deny"})
         ));
     }
+
+    #[test]
+    fn an_outcome_names_its_issue_and_choice() {
+        let check = |v: Value| validate(&mut atom(v));
+        assert!(check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+            "workspace": "w", "issue": "p-1", "choice": "ship"}))
+        .is_ok());
+        let no_choice = check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+            "workspace": "w", "issue": "p-1", "choice": " "}));
+        assert_eq!(no_choice.unwrap_err().0, "outcome atom needs choice");
+        let no_issue = check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+            "workspace": "w", "choice": "ship"}));
+        assert_eq!(no_issue.unwrap_err().0, "outcome atom needs issue");
+        assert!(UNREVIEWED_KINDS.iter().all(|k| KINDS.contains(k)));
+    }
     use serde_json::json;
 
     fn atom(value: Value) -> Map<String, Value> {
@@ -1634,6 +1672,16 @@ mod tests {
         assert!(
             replaces(&forecast("maintainer", "0.40"), &forecast("maintainer", "0.56")),
             "an agent's later forecast closes its earlier one"
+        );
+        let closed = |issue: &str, choice: &str| {
+            atom(json!({
+                "kind": "outcome", "issue": issue, "choice": choice,
+                "text": format!("{issue} closed on {choice}."),
+            }))
+        };
+        assert!(
+            !replaces(&closed("seat-tvpg", "tool-adapters"), &closed("seat-zrc6", "tool-adapters")),
+            "two issues' outcomes are two records"
         );
     }
 

@@ -68,21 +68,24 @@ Schema =inside.atom/v1=. Fields the writer reads:
 
 | Field | Meaning |
 |---+---|
-| =kind= | one of =voice=, =habit=, =cache-pointer=, =preference=, =lesson=, =goal=, =conclusion=, =card_line=, =summary=, =correction=, =belief=, =trust=, =persona= |
+| =kind= | one of =voice=, =habit=, =cache-pointer=, =preference=, =lesson=, =goal=, =conclusion=, =card_line=, =summary=, =correction=, =belief=, =trust=, =persona=, =prediction=, =rule=, =outcome= |
 | =level= | =explicit= for a claim a person or seat wrote |
 | =text= | the claim: at most two sentences of at most twenty-five words |
 | =workspace= | required |
 | =set= | optional; a checked name |
 | =entities= | names the claim is about; an entity shaped like an accession must be one; =seat:<name>= names the seat that wrote the claim and is not a topic, so it links and matches nothing |
 | =ts=, =valid_from=, =valid_to= | written, and the window it was true; =valid_to= closes on supersession |
-| =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object |
-| =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s=, =neglected= (sweeps that found it overdue) |
-| =forgotten= | on a tombstone the writer made: =neglect= (a forgettable claim never recalled and missed three sweeps) or =the live cap= (the least retrievable claims past the workspace's cap); a forget by hand carries its own reason. Preferences, rules, readings, goals, trust rows and personas are never forgotten by the writer |
+| =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object; a rewrite never crosses a different =from=, =to=, =about=, =agent=, =issue= or =name=, so two voters' rows or two agents' forecasts stay two records |
+| =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s=, =neglected= (sweeps that found it overdue); a trust row, a persona and an outcome are weighed or read, never recalled, and are never due |
+| =forgotten= | on a tombstone the writer made: =neglect= (a forgettable claim never recalled and missed three sweeps) or =the live cap= (the least retrievable claims past the workspace's cap); a forget by hand carries its own reason. Preferences, rules, readings, goals, trust rows, personas, predictions and outcomes are never forgotten by the writer |
 | =links= | peers by entity overlap, at most eight, chosen by relative-neighbourhood pruning; =fire= adds peers up to eight |
 | =link_weights= | weight per link in (0, 1], absent meaning 0.5; moved by =fire= |
 | =link_weights_by= | a persona's own weights by name, written by a fire =as= that persona and read only through its lens; the nodes and links stay shared |
 | =from=, =to=, =weight= | a =trust= row: one edge of an influence graph, weight in (0, 1]; =entities= scope it to domains |
 | =name=, =anchor= | a =persona=: a voter and how far it moves off its own ballot, in [0, 1]; the text is its view, =entities= its domains |
+| =issue=, =agent=, =expect= | a =prediction=: one voter's forecast on an issue, an option or an object of option to share, read by the surprisingly popular rule |
+| =pattern=, =verdict= | a =rule=: a glob over a command line and =deny= or =ask=; the text is the reason |
+| =issue=, =choice= | an =outcome=: the option an issue closed on; read beside the issue's ballots, it says which voters were right, so a settle can discount voters who err together |
 
 Fields the writer does not model round-trip untouched.
 
