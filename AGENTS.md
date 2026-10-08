@@ -11,6 +11,19 @@ Do not embed git-tracked files into memory.
   — retrieval quality against LoCoMo's labelled evidence
 - `packset ensure` / `packset status`
 
+## Building without system OpenSSL
+
+`hf-hub`/`reqwest` need OpenSSL headers. Without root, build OpenSSL
+once to a prefix and point the build at it; clang also needs gcc's
+library dir for `-lstdc++`:
+
+```sh
+./Configure --prefix=$HOME/openssl no-docs no-apps && make -j$(nproc) build_libs && make install_sw
+export OPENSSL_DIR=$HOME/openssl
+export LIBRARY_PATH=$(dirname "$(gcc -print-file-name=libstdc++.so)")
+cargo test --locked
+```
+
 The search binary is built on the remote builder. `just milli`
 refuses anywhere else. Search falls back to the linear scorer
 when the binary is absent. `PACKSET_RERANK=1` (or `/v1/search?rerank=1`)
