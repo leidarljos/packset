@@ -5,16 +5,21 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - A kind: `outcome`, the option an issue closed on (`issue`, `choice`).
-  Read beside the issue's ballots, it says which voters were right, so a
-  settle can discount voters who err together. Like a trust row and a
-  persona, an outcome is weighed or read, never recalled: it is never due
-  and never forgotten.
+  The issue's ballots and its outcome say which voters were right, so a
+  settle can discount voters who err together. `add` starts no review
+  clock for an outcome, as for a trust row or a persona, and the sweep
+  never forgets one.
 
-- A rewrite no longer crosses a different `from`, `to`, `about`, `agent`,
-  `issue` or `name`. Two trust rows into two voters at one weight share
-  most of their words, so the second closed the first; a seat that wrote
-  five rows kept one, and a panel of five forecasts kept one, so the
-  surprisingly popular reading never ran.
+- A rewrite needs the same `from`, `to`, `about`, `agent`, `issue`, and
+  `name`. Two trust rows to two different voters at the same weight share
+  five of their seven tokens, so the second replaced the first. A seat
+  that wrote five rows kept one; a panel of five forecasts kept one, so
+  the surprisingly popular reading never ran.
+
+- A `/`, `_`, `*` or `+` no longer holds a sentence open. snapper reads
+  them as Org emphasis marks, so text that cited two DOIs or named two
+  paths read as one long sentence. The text scored a high reading grade,
+  and an atom could be refused as very hard.
 
 ## 0.11.0 (2026-09-29)
 

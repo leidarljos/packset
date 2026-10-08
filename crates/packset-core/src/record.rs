@@ -50,8 +50,9 @@ pub const KINDS: &[&str] = &[
     "outcome",
 ];
 
-/// Kinds the seat weighs or reads and never recalls, so they stay off the
-/// review clock: a trust row, a persona, and the outcome an issue closed on.
+/// Kinds the seat weighs or reads: a trust row, a persona, and the outcome
+/// an issue closed on. `add` starts no review clock for them, and the
+/// sweep skips them even when a grade has started one.
 pub const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "outcome"];
 
 /// Whether the claim was stated or inferred.
@@ -460,10 +461,9 @@ fn check_prediction(atom: &Map<String, Value>) -> Result<(), AtomError> {
     }
 }
 
-/// An `outcome` atom is the option an issue closed on: `issue` and
-/// `choice`. Read beside the issue's ballots, it says which voters were
-/// right, so a consensus can tell voters who err together from voters who
-/// err apart.
+/// An `outcome` atom is the option an issue closed on: `issue` and `choice`.
+/// The issue's ballots and its outcome say which voters were right, so a
+/// consensus can tell voters who err together from voters who err apart.
 fn check_outcome(atom: &Map<String, Value>) -> Result<(), AtomError> {
     for key in ["issue", "choice"] {
         match atom.get(key).and_then(Value::as_str).map(str::trim) {
@@ -1109,9 +1109,11 @@ pub fn shape_jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
 }
 
 /// Fields that say what a structured claim is about. Two claims that differ
-/// in one are two claims whatever their text: `a weighs b at 1.000.` and
-/// `a weighs c at 1.000.` share five of seven words and are rows into two
-/// voters, and two agents' forecasts on one issue read alike.
+/// in one are two claims, whatever their text, unless the newer names the
+/// older in `supersedes`. `a weighs b at 1.000.` and `a weighs c at 1.000.`
+/// share five of the seven tokens between them but weigh two different
+/// voters. Two agents' forecasts on one issue read alike too, and are two
+/// claims.
 pub const IDENTITY_KEYS: &[&str] = &["from", "to", "about", "agent", "issue", "name"];
 
 /// [`replaces`] with the shapes already in hand.

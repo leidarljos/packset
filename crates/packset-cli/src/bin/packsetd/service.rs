@@ -338,10 +338,10 @@ impl Service {
     /// sweep lapses it as a missed review does, halving its stability, and
     /// counts the neglect; a forgettable claim neglected [`NEGLECT_LIMIT`]
     /// times, never once recalled and never fired is tombstoned, marked
-    /// `forgotten: neglect`. A preference, rule, reading or goal lapses but
-    /// is never forgotten this way; a trust row, persona or outcome is never
-    /// due. Returns how many
-    /// lapsed and how many were forgotten.
+    /// `forgotten: neglect`. A habit, preference, goal, prediction or rule
+    /// lapses but is never forgotten this way, and the sweep skips a trust
+    /// row, persona or outcome. Returns how many lapsed and how many were
+    /// forgotten.
     ///
     /// # Errors
     ///
