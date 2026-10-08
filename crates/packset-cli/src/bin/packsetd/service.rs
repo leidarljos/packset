@@ -2022,38 +2022,16 @@ impl Service {
         workspace: Option<&str>,
         panel: &packset_core::Panel,
     ) -> anyhow::Result<Value> {
-        let now = clock::utcnow();
-        let mut live: BTreeMap<String, usize> = BTreeMap::new();
-        let mut tomb: BTreeMap<String, usize> = BTreeMap::new();
-        let mut expired: BTreeMap<String, usize> = BTreeMap::new();
-        let mut forgotten: BTreeMap<String, usize> = BTreeMap::new();
-        let mut last_write = String::new();
-        self.store.for_each(workspace, |rec| {
-            let kind = rec
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-            if let Some(ts) = rec.get("ts").and_then(Value::as_str) {
-                if ts > last_write.as_str() {
-                    last_write = ts.to_string();
-                }
-            }
-            if rec
-                .get("tombstone")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                *tomb.entry(kind).or_insert(0) += 1;
-                if let Some(why) = rec.get("forgotten").and_then(Value::as_str) {
-                    *forgotten.entry(why.to_string()).or_insert(0) += 1;
-                }
-            } else if record::is_live(rec, &now) {
-                *live.entry(kind).or_insert(0) += 1;
-            } else {
-                *expired.entry(kind).or_insert(0) += 1;
-            }
-        })?;
+        // Counts come from the per-generation cache, not a fresh scan:
+        // status runs constantly (doctor, the CLI, hooks asking what the
+        // pack holds) and a full parse per call is what made it linear in
+        // the pack. The milli, embedder and panel rows below stay live.
+        let counts = self.store.counts(workspace)?;
+        let live = counts.live;
+        let tomb = counts.tombstone;
+        let expired = counts.expired;
+        let forgotten = counts.forgotten;
+        let last_write = counts.last_write;
         let milli_dir = self.home.milli_dir();
         let index_ready = crate::milli::index_ready(&milli_dir);
         let pin = workspace.map(|w| self.pin(w)).unwrap_or_default();

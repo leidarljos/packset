@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `status` no longer re-parses the pack on every call: counts live in a per-generation cache beside the live set, so ten thousand atoms answer in about a millisecond warm instead of eighty. Measured on a 10k-lesson workspace (80ms to 1.1ms p50); a write moves the generation and the next status recounts, pinned by `status_counts_follow_writes`.
+
 - `rust-toolchain.toml` pins 1.89.0: the default 1.83 cannot parse a dependency manifest in the tree (a fuzz helper's edition-2024).
 - The explanation positions the pack against the write-path systems: Letta/sleep-time, A-MEM, MemoryBank and Generative Agents, against the no-model-writes rule.
 

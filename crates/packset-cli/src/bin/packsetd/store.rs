@@ -2,7 +2,7 @@
 //! existing `memory.lmdb` opens here unchanged; the NUL makes a workspace
 //! scan a prefix scan.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,6 +92,26 @@ pub struct Store {
     /// One index build at a time: readers that find the cache stale wait for
     /// the build in flight and take its result, rather than each building.
     terms_build: Mutex<()>,
+    /// Status counts per workspace at one generation, so `status` does not
+    /// re-parse the pack on every call: ten thousand atoms scan eighty
+    /// milliseconds a status, once per generation instead of once per call.
+    counts: RwLock<HashMap<Option<String>, (u64, Counts)>>,
+}
+
+/// What `status` reports over one workspace: live, tombstoned and expired
+/// claims by kind, forgotten claims by reason, and the latest stamp.
+#[derive(Debug, Clone, Default)]
+pub struct Counts {
+    /// Live claims by kind.
+    pub live: BTreeMap<String, usize>,
+    /// Tombstoned claims by kind.
+    pub tombstone: BTreeMap<String, usize>,
+    /// Expired claims by kind.
+    pub expired: BTreeMap<String, usize>,
+    /// Forgotten claims by reason.
+    pub forgotten: BTreeMap<String, usize>,
+    /// The latest stamp seen.
+    pub last_write: String,
 }
 
 impl Store {
@@ -126,6 +146,7 @@ impl Store {
             live: RwLock::new(HashMap::new()),
             terms: RwLock::new(HashMap::new()),
             terms_build: Mutex::new(()),
+            counts: RwLock::new(HashMap::new()),
         })
     }
 
@@ -301,6 +322,58 @@ impl Store {
     /// Fails when the scan does.
     pub fn live(&self, workspace: &str) -> anyhow::Result<Arc<Vec<Record>>> {
         self.live_versioned(workspace).map(|(shown, _)| shown)
+    }
+
+    /// Status counts over one workspace, or over all of them: cached under
+    /// the generation the scan ran at, recomputed when a write moved it.
+    /// Keyed on the workspace as given, because [`Self::for_each`] visits
+    /// nothing for the empty name but everything for no name.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the scan does.
+    pub fn counts(&self, workspace: Option<&str>) -> anyhow::Result<Counts> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let key = workspace.map(str::to_string);
+        if let Ok(cache) = self.counts.read() {
+            if let Some((seen, found)) = cache.get(&key) {
+                if *seen == generation {
+                    return Ok(found.clone());
+                }
+            }
+        }
+        let now = packset_core::clock::utcnow();
+        let mut counts = Counts::default();
+        self.for_each(workspace, |rec| {
+            let kind = rec
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            if let Some(ts) = rec.get("ts").and_then(Value::as_str) {
+                if ts > counts.last_write.as_str() {
+                    counts.last_write = ts.to_string();
+                }
+            }
+            if rec
+                .get("tombstone")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                *counts.tombstone.entry(kind).or_insert(0) += 1;
+                if let Some(why) = rec.get("forgotten").and_then(Value::as_str) {
+                    *counts.forgotten.entry(why.to_string()).or_insert(0) += 1;
+                }
+            } else if record::is_live(rec, &now) {
+                *counts.live.entry(kind).or_insert(0) += 1;
+            } else {
+                *counts.expired.entry(kind).or_insert(0) += 1;
+            }
+        })?;
+        if let Ok(mut cache) = self.counts.write() {
+            cache.insert(key, (generation, counts.clone()));
+        }
+        Ok(counts)
     }
 
     /// [`Self::live`] with the generation the set belongs to, for a cache
@@ -727,6 +800,28 @@ mod tests {
         assert_eq!(store.scan(Some("wide")).unwrap().len(), 1);
         assert_eq!(store.scan(None).unwrap().len(), 3);
         assert!(store.scan(Some("")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_counts_follow_writes() {
+        // `status` reads these, not a fresh scan: zeros before the write,
+        // the write visible after, each workspace and the whole home
+        // counted on its own.
+        let (_dir, store) = store();
+        let sum = |c: &Counts| c.live.values().sum::<usize>();
+        assert_eq!(sum(&store.counts(Some("w")).unwrap()), 0);
+        store
+            .upsert(&record(
+                json!({"id": "a", "workspace": "w", "kind": "lesson", "text": "A."}),
+            ))
+            .unwrap();
+        let one = store.counts(Some("w")).unwrap();
+        assert_eq!(one.live.get("lesson"), Some(&1));
+        assert_eq!(sum(&one), 1);
+        assert_eq!(sum(&store.counts(Some("w")).unwrap()), 1);
+        assert_eq!(sum(&store.counts(Some("x")).unwrap()), 0);
+        let all = store.counts(None).unwrap();
+        assert_eq!(all.live.get("lesson"), Some(&1));
     }
 
     #[test]

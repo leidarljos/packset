@@ -299,8 +299,16 @@ The store is one Lightning Memory-Mapped Database (LMDB) file and one
 process owns it. Two writers on one
 file is how a pack ends up with two answers to one question, so a second
 =packsetd= refuses to start. Readers share one parsed snapshot per write,
-and a search runs over an index built once per generation, which is why a
-query over ten thousand atoms costs about two milliseconds.
+and a search runs over an index built once per generation. End to end,
+a query over ten thousand atoms costs tens of milliseconds on
+loopback, not the index lookup alone: measured 2026-10-08, release
+build, 10k-lesson workspace, persistent HTTP, p50 31 to 64ms across
+queries (query embedding, milli, BM25+ and dense ballots, fusion),
+p50 244ms with the cross-encoder stage; =status= on the same pack
+answers warm in about a millisecond from the per-generation counts
+cache. =status= used to re-parse the pack on every call, eighty
+milliseconds a status at ten thousand atoms; the hammer table on the
+README keeps the write path.
 
 * A later claim closes the earlier one it rewrites
 
