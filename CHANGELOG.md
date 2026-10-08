@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `rust-toolchain.toml` pins 1.89.0: the default 1.83 cannot parse a dependency manifest in the tree (a fuzz helper's edition-2024).
 - The explanation positions the pack against the write-path systems: Letta/sleep-time, A-MEM, MemoryBank and Generative Agents, against the no-model-writes rule.
 
 ## 0.11.0 (2026-09-29)
