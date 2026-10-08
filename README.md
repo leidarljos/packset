@@ -60,6 +60,7 @@ $ packset island fusing two ballots     # the memories a task activates
   | 4 | 2400 | 15.55 s | 154 req/s | 0 | shared, 799 live + 1 closed of 800 |
   | 16 | 9600 | 105.97 s | 91 req/s | 0 | shared, 3192 live + 8 closed of 3200 |
   | 32 | 19200 | 292.56 s | 66 req/s | 0 | shared, 6382 live + 18 closed of 6400 |
+  | 32 | 19200 | 826.18 s | 23 req/s | 0 | shared, 6382 live + 18 closed of 6400 (rerun 2026-10-08; slower container, same counts) |
 - Trust rows and personas live in the pack and reach the seat's consensus.
 
 The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html) and in the [bench package](https://github.com/leidarljos/bench).
