@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Every DOI the explanation cites resolves to the cited work (Crossref
+  titles, doi.org redirects, Semantic Scholar second witness): the two
+  records Crossref's metadata API 500s on -- Anderson and Schooler's
+  environment statistics (doi:10.1111/j.1467-9280.1991.tb00174.x) and
+  the Ebbinghaus replication (doi:10.1371/journal.pone.0120644) --
+  confirmed title, authors, and year against the records. No citation
+  changes needed.
+
 - `status` no longer re-parses the pack on every call: counts live in a per-generation cache beside the live set, so ten thousand atoms answer in about a millisecond warm instead of eighty. Measured on a 10k-lesson workspace (80ms to 1.1ms p50); a write moves the generation and the next status recounts, pinned by `status_counts_follow_writes`.
 
 - `rust-toolchain.toml` pins 1.89.0: the default 1.83 cannot parse a dependency manifest in the tree (a fuzz helper's edition-2024).
