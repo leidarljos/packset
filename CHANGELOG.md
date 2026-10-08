@@ -2,6 +2,20 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A kind: `outcome`, the option an issue closed on (`issue`, `choice`).
+  Read beside the issue's ballots, it says which voters were right, so a
+  settle can discount voters who err together. Like a trust row and a
+  persona, an outcome is weighed or read, never recalled: it is never due
+  and never forgotten.
+
+- A rewrite no longer crosses a different `from`, `to`, `about`, `agent`,
+  `issue` or `name`. Two trust rows into two voters at one weight share
+  most of their words, so the second closed the first; a seat that wrote
+  five rows kept one, and a panel of five forecasts kept one, so the
+  surprisingly popular reading never ran.
+
 ## 0.11.0 (2026-09-29)
 
 - A search that finds the cross-encoder busy waits 400 ms, then keeps its
