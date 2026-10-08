@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The explanation positions the pack against the write-path systems: Letta/sleep-time, A-MEM, MemoryBank and Generative Agents, against the no-model-writes rule.
+
 ## 0.11.0 (2026-09-29)
 
 - A search that finds the cross-encoder busy waits 400 ms, then keeps its
