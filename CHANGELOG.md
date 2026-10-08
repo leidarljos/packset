@@ -4,6 +4,15 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `packset forget WORKSPACE` (`POST /v1/forget`) drops a scratch
+  workspace's atoms whole -- no tombstones, no deed, the keys are gone.
+  Retraction stays `packset atoms/delete`, which names the deed that
+  withdrew the claim; this is what a per-run scratch workspace calls on
+  its way out. Smoke and herd runs each write a per-run workspace into
+  the long-lived writer, so without it every run left its atoms behind;
+  both scripts now forget theirs on exit. Pinned by
+  `forgetting_a_workspace_drops_only_its_keys` and
+  `forgetting_a_scratch_workspace_leaves_the_seat`.
 - `PACKSET_URL=off` is no pack, not the loopback writer: data commands
   refuse with "no pack on purpose" instead of silently falling back to
   the port, which wrote to a writer the seat had turned off. The seat

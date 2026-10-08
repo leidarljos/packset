@@ -1038,6 +1038,57 @@ impl Service {
         Ok(tomb)
     }
 
+    /// Drop a scratch workspace's atoms whole: no tombstones, no deed, the
+    /// keys are gone. Retraction stays `delete_atom`, which names the deed
+    /// that withdrew the claim; this is what a per-run scratch workspace
+    /// calls on its way out, so the long-lived writer does not keep every
+    /// smoke and herd run's atoms. Returns the workspace and how many
+    /// records were removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the workspace is empty, else the store's.
+    pub fn forget_workspace(&self, workspace: &str) -> anyhow::Result<Value> {
+        if workspace.trim().is_empty() {
+            anyhow::bail!("forget needs a workspace");
+        }
+        let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        let ids: Vec<String> = self
+            .store
+            .scan(Some(workspace))?
+            .iter()
+            .filter_map(|atom| atom.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let forgotten = self.store.forget_workspace(workspace)?;
+        self.queue_projection(ids.iter().cloned().map(ProjectionOp::Delete).collect());
+        if let Ok(mut shapes) = self.shapes.write() {
+            for id in &ids {
+                shapes.remove(id);
+            }
+        }
+        if let Ok(mut postings) = self.postings.write() {
+            postings.retain(|_, held| {
+                held.retain(|id| !ids.iter().any(|gone| gone == id));
+                !held.is_empty()
+            });
+        }
+        if let Ok(mut shaped) = self.shaped.lock() {
+            shaped.remove(workspace);
+        }
+        if let Ok(mut swept) = self.swept.lock() {
+            swept.remove(workspace);
+        }
+        if let Ok(mut held) = self.attach.lock() {
+            held.remove(workspace);
+        }
+        if let Ok(mut recent) = self.fired_recently.lock() {
+            let direct = format!("{workspace}\0");
+            let cue = format!("cue\0{workspace}\0");
+            recent.retain(|key, _| !key.starts_with(&direct) && !key.starts_with(&cue));
+        }
+        Ok(json!({"workspace": workspace, "forgotten": forgotten}))
+    }
+
     /// The workspace pack, or the same shape scoped to one set.
     ///
     /// Always `user` / `memory` / `atoms`, so a client splices one shape
@@ -2155,6 +2206,25 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn forgetting_a_scratch_workspace_leaves_the_seat() {
+        let (_dir, svc) = service();
+        let mut scratch = atom("A scratch claim the smoke run leaves.");
+        scratch.insert("workspace".into(), json!("smoke:run"));
+        svc.add(scratch).unwrap();
+        let mut seat = atom("A seat claim that stays.");
+        seat.insert("workspace".into(), json!("seat"));
+        svc.add(seat).unwrap();
+        let report = svc.forget_workspace("smoke:run").unwrap();
+        assert_eq!(report["forgotten"], json!(1), "{report:?}");
+        assert!(svc.store().live("smoke:run").unwrap().is_empty());
+        assert_eq!(svc.store().live("seat").unwrap().len(), 1);
+        let again = svc.forget_workspace("smoke:run").unwrap();
+        assert_eq!(again["forgotten"], json!(0), "{again:?}");
+        assert!(svc.forget_workspace("").is_err(), "empty forgets nothing");
+        assert!(svc.forget_workspace("   ").is_err(), "blank forgets nothing");
     }
 
     #[test]

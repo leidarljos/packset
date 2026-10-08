@@ -588,6 +588,53 @@ impl Store {
         self.upsert(&tomb)?;
         Ok(tomb)
     }
+
+    /// Drop every record in one workspace, scratch cleanup rather than
+    /// retraction: no tombstone, no deed, the keys are gone. Smoke and herd
+    /// runs each write a per-run workspace into the long-lived writer, so
+    /// without this every run leaves its atoms behind. Returns how many
+    /// records were removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the workspace is empty or the write does.
+    pub fn forget_workspace(&self, workspace: &str) -> anyhow::Result<usize> {
+        if workspace.is_empty() {
+            anyhow::bail!("forget needs a workspace");
+        }
+        let prefix = workspace_prefix(workspace);
+        let keys: Vec<Vec<u8>> = {
+            let rtxn = self.env.read_txn()?;
+            let mut keys = Vec::new();
+            for item in self.db.prefix_iter(&rtxn, &prefix)? {
+                let (key, _) = item?;
+                keys.push(key.to_vec());
+            }
+            keys
+        };
+        if !keys.is_empty() {
+            let mut wtxn = self.env.write_txn()?;
+            for key in &keys {
+                self.db.delete(&mut wtxn, key)?;
+            }
+            wtxn.commit()?;
+            // After the commit, never before: as in `upsert_many`, a reader
+            // scanning between a bump and its write would cache older data
+            // as newer.
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        if let Ok(mut cache) = self.live.write() {
+            cache.remove(workspace);
+        }
+        if let Ok(mut cache) = self.terms.write() {
+            cache.remove(workspace);
+        }
+        if let Ok(mut cache) = self.counts.write() {
+            cache.remove(&Some(workspace.to_string()));
+            cache.remove(&None);
+        }
+        Ok(keys.len())
+    }
 }
 
 /// The live set as a reader sees it: links narrowed to the ids present.
@@ -929,6 +976,25 @@ mod tests {
             .unwrap();
         assert_eq!(store.current("w", Some("review")).unwrap().len(), 1);
         assert_eq!(store.current("w", None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn forgetting_a_workspace_drops_only_its_keys() {
+        let (_dir, store) = store();
+        for (ws, id) in [("scratch", "a"), ("scratch", "b"), ("seat", "c")] {
+            store
+                .upsert(&record(json!({"id": id, "workspace": ws, "text": id})))
+                .unwrap();
+        }
+        // Read first, so a cached snapshot is what the forget must clear.
+        assert_eq!(store.live("scratch").unwrap().len(), 2);
+        let dropped = store.forget_workspace("scratch").unwrap();
+        assert_eq!(dropped, 2, "two scratch records were held");
+        assert!(store.live("scratch").unwrap().is_empty());
+        assert_eq!(store.live("seat").unwrap().len(), 1, "the seat kept its claim");
+        assert!(store.scan(Some("scratch")).unwrap().is_empty());
+        assert_eq!(store.forget_workspace("scratch").unwrap(), 0, "twice is empty");
+        assert!(store.forget_workspace("").is_err(), "empty forgets nothing");
     }
 
     #[test]

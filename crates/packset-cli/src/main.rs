@@ -14,6 +14,7 @@
 //! packset island [--workspace WS] [--fire] CUE
 //! packset fire [--workspace WS] ID ID...
 //! packset grade ID [--lapsed] [WORKSPACE]
+//! packset forget WORKSPACE
 //! packset pin [NAME]
 //! packset accessions [WORKSPACE]
 //! packset atoms [--as-of TS] [WORKSPACE]
@@ -96,6 +97,7 @@ fn run() -> anyhow::Result<()> {
         "search" => search(rest),
         "due" => due(rest.first().map(String::as_str)),
         "sweep" => sweep(rest.first().map(String::as_str)),
+        "forget" => forget(rest.first().map(String::as_str)),
         "islands" => islands(rest.first().map(String::as_str)),
         "hubs" => hubs(rest.first().map(String::as_str)),
         "island" => island(rest),
@@ -130,6 +132,7 @@ fn usage() -> String {
      \n\
          ensure                 start if down, then print the URL\n\
          sweep [WS]             lapse the reviews left due past twice their interval; the third miss forgets a never-recalled lesson\n\
+         forget WS              drop a scratch workspace's atoms whole, no tombstones; smoke and herd runs call this on the way out\n\
          start | stop\n\
          status [WORKSPACE]     counts by kind, pin, index\n\
          port | url | which\n\
@@ -650,6 +653,24 @@ fn sweep(given: Option<&str>) -> anyhow::Result<()> {
     for id in report["forgotten_ids"].as_array().into_iter().flatten() {
         println!("forgotten\t{}", id.as_str().unwrap_or("-"));
     }
+    Ok(())
+}
+
+/// Drop a scratch workspace's atoms whole: no tombstones, no deed. This is
+/// not retraction -- a retraction names the deed that withdrew the claim.
+/// A per-run scratch workspace calls this on its way out, so the long-lived
+/// writer does not keep every smoke and herd run's atoms.
+fn forget(given: Option<&str>) -> anyhow::Result<()> {
+    let workspace = given
+        .map(str::to_string)
+        .filter(|w| !w.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("forget needs a workspace: packset forget WORKSPACE"))?;
+    let report = client()?.forget_workspace(&workspace)?;
+    println!(
+        "{} forgotten from {}",
+        report["forgotten"].as_u64().unwrap_or(0),
+        report["workspace"].as_str().unwrap_or(&workspace)
+    );
     Ok(())
 }
 

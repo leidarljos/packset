@@ -341,6 +341,10 @@ fn route(
             Err(a) => a,
             Ok(workspace) => answer(service.sweep(&workspace)),
         },
+        (Method::Post, "/v1/forget") => match required(body, "workspace") {
+            Err(a) => a,
+            Ok(workspace) => answer(service.forget_workspace(&workspace)),
+        },
         (Method::Post, "/v1/consolidate") => match required(body, "workspace") {
             Err(a) => a,
             Ok(workspace) => {

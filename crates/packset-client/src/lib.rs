@@ -646,6 +646,23 @@ impl PacksetClient {
         Ok(body)
     }
 
+    /// Drop a scratch workspace's atoms whole, no tombstones and no deed.
+    /// Retraction stays [`Self::delete_atom`]; this is what a per-run
+    /// scratch workspace calls on its way out.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn forget_workspace(&self, workspace: &str) -> Result<serde_json::Value, Error> {
+        let url = format!("{}/v1/forget", self.base);
+        let body: serde_json::Value = ureq::post(&url)
+            .timeout(timeout())
+            .send_json(serde_json::json!({"workspace": workspace}))
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
+        Ok(body)
+    }
+
     /// The memories a cue activates, strongest first; with `fire`, the top
     /// of them fire together.
     pub fn activate(

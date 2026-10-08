@@ -17,6 +17,7 @@ Verb                                             Does
 ``packset island [--workspace WS] [--fire] CUE`` the memories a cue activates: activation, seed mark, id, text; ``--fire`` wires the top eight together
 ``packset fire [--workspace WS] ID ID...``       these claims fired together; their links gain weight, their other links lose a little
 ``packset grade ID [--lapsed] [WS]``             mark a review recalled, or lapsed
+``packset forget WS``                            drop a scratch workspace's atoms whole, no tombstones and no deed; per-run scratch calls this on the way out
 ``packset pin [NAME]``                           read or set the pinned set; an empty name clears it
 ``packset accessions [WS]``                      deed accessions the live claims cite
 ``packset atoms [--as-of TS] [WS]``              live-now claims, or those live at ``TS``
@@ -49,6 +50,7 @@ Method and path                                                                 
 ``GET /v1/hubs?workspace=&limit=``                                              the claims the link graph turns on, highest first, with their scores
 ``GET /v1/activate?workspace=&q=&limit=&fire=``                                 the cluster a cue activates: top hits as seeds, two hops along the links; ``fire=1`` wires the top eight
 ``POST /v1/fire``                                                               ``ids`` that fired together: weights up, missing links made, other links decayed
+``POST /v1/forget``                                                             ``workspace``; drop a scratch workspace's atoms whole, no tombstones and no deed
 ``POST /v1/consolidate``                                                        the replacement rule over the live set in written order; ``apply`` false reports the pairs, true closes the earlier of each
 ``GET /v1/accessions?workspace=``                                               accessions the live claims cite
 ``GET /v1/citers?workspace=&accession=``                                        claims citing one accession
