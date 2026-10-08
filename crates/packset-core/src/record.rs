@@ -1085,6 +1085,12 @@ pub fn shape_jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
     }
 }
 
+/// Fields that say what a structured claim is about. Two claims that differ
+/// in one are two claims whatever their text: `a weighs b at 1.000.` and
+/// `a weighs c at 1.000.` share five of seven words and are rows into two
+/// voters, and two agents' forecasts on one issue read alike.
+pub const IDENTITY_KEYS: &[&str] = &["from", "to", "about", "agent", "issue", "name"];
+
 /// [`replaces`] with the shapes already in hand.
 pub fn replaces_shaped(
     new: &Map<String, Value>,
@@ -1114,6 +1120,9 @@ pub fn replaces_shaped(
         }
     }
     if new.get("pattern") != old.get("pattern") || new.get("verdict") != old.get("verdict") {
+        return false;
+    }
+    if IDENTITY_KEYS.iter().any(|k| new.get(*k) != old.get(*k)) {
         return false;
     }
     let shared = new_shape
@@ -1583,6 +1592,48 @@ mod tests {
         assert!(
             !replaces(&other, &named),
             "a different named subject still gates"
+        );
+    }
+
+    #[test]
+    fn a_structured_identity_keeps_alike_rows_apart() {
+        let row = |from: &str, to: &str, w: &str| {
+            atom(json!({
+                "kind": "trust", "from": from, "to": to, "entities": [],
+                "text": format!("{from} weighs {to} at {w}."),
+            }))
+        };
+        assert!(
+            !replaces(&row("cursor", "newcomer", "1.000"), &row("cursor", "maintainer", "1.000")),
+            "rows into two voters are two rows"
+        );
+        assert!(
+            !replaces(&row("carol", "alice", "1.000"), &row("bob", "alice", "1.000")),
+            "two voters' rows into one are two rows"
+        );
+        assert!(
+            replaces(&row("cursor", "newcomer", "0.800"), &row("cursor", "newcomer", "1.000")),
+            "a new weight on the same row closes the old"
+        );
+        let mut scoped = row("cursor", "newcomer", "0.800");
+        scoped.insert("about".into(), json!(["docs"]));
+        assert!(
+            !replaces(&scoped, &row("cursor", "newcomer", "1.000")),
+            "a scoped row beside the unscoped one"
+        );
+        let forecast = |agent: &str, share: &str| {
+            atom(json!({
+                "kind": "prediction", "agent": agent, "issue": "seat-tvpg",
+                "text": format!("{agent} expects tool-adapters at {share} on seat-tvpg."),
+            }))
+        };
+        assert!(
+            !replaces(&forecast("reliability", "0.50"), &forecast("maintainer", "0.56")),
+            "two agents' forecasts on one issue"
+        );
+        assert!(
+            replaces(&forecast("maintainer", "0.40"), &forecast("maintainer", "0.56")),
+            "an agent's later forecast closes its earlier one"
         );
     }
 
