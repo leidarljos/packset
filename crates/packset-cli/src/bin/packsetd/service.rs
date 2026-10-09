@@ -1481,8 +1481,10 @@ impl Service {
         };
         // The same stage the locomo arm measures. Off unless asked. An absent
         // or broken reranker leaves the first-stage order, the same way an
-        // absent encoder leaves the dense ballot out.
-        let stage = if rerank && !ranked.is_empty() {
+        // absent encoder leaves the dense ballot out. One hit cannot be
+        // reordered, so asking the model about it would only spend a
+        // forward pass to return the same order: that stage settles.
+        let stage = if rerank && ranked.len() > 1 {
             match crate::embed::rerank_hits(query, &ranked) {
                 Some(reordered) => {
                     ranked = reordered;
@@ -1490,6 +1492,8 @@ impl Service {
                 }
                 None => "absent",
             }
+        } else if rerank && ranked.len() == 1 {
+            "settled"
         } else {
             "off"
         };
@@ -2977,6 +2981,68 @@ mod tests {
         let empty = svc.search("w", "", 8, None, &panel, None, true).unwrap();
         assert_eq!(empty["rerank"], json!("off"), "{empty}");
         assert!(empty["hits"].as_array().unwrap().is_empty());
+    }
+
+    /// A requested rerank over a lone hit never reaches the model: one
+    /// candidate cannot be reordered, so the stage settles it without a
+    /// forward pass. The stub records any invocation in a sentinel file;
+    /// its absence is the assertion the model was not asked.
+    #[test]
+    fn a_lone_hit_settles_the_rerank_without_a_model_call() {
+        let (_dir, svc) = service();
+        svc.add(atom("Reviews open with a check.")).unwrap();
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::embed::reset_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("called");
+        let stub = dir.path().join("packset-embed");
+        // The dense ballot still asks its encoder; only a `--rerank`
+        // invocation may touch the sentinel.
+        std::fs::write(
+            &stub,
+            format!(
+                r#"#!/usr/bin/env python3
+import json, pathlib, sys
+if "--rerank" in sys.argv:
+    pathlib.Path(r"{sentinel}").touch()
+    sys.exit(1)
+for line in sys.stdin:
+    print(json.dumps({{"v": [0.1]}}), flush=True)
+"#,
+                sentinel = sentinel.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        let old = std::env::var_os("PACKSET_EMBED");
+        // Safety: EMBED is held, so no other test mutates this variable.
+        unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
+        let off = svc
+            .search("w", "reviews", 8, None, &panel, None, false)
+            .unwrap();
+        let on = svc
+            .search("w", "reviews", 8, None, &panel, None, true)
+            .unwrap();
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        drop(_guard);
+        assert_eq!(on["rerank"], json!("settled"), "{on}");
+        assert!(!sentinel.exists(), "the model was asked about one hit");
+        // The reranked head is deeper than the plain limit, so the fused
+        // scores disagree past the last digits; the order is the ranking.
+        assert_eq!(on["hits"][0]["id"], off["hits"][0]["id"], "{on} vs {off}");
+        assert_eq!(on["hits"].as_array().map(Vec::len), Some(1));
     }
 
     /// A requested stage with no working reranker leaves the first-stage

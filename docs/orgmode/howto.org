@@ -131,7 +131,9 @@ The cross-encoder rerank is measured and off by default. Ask for it per
 query with =packset search --rerank=, =GET /v1/search?rerank=1=, or set
 =PACKSET_RERANK=1= on the writer. The stage is a forward pass over the
 top 20. An absent or broken =packset-embed= leaves the first-stage
-order and reports =rerank: absent=.
+order and reports =rerank: absent=. A lone hit reports =rerank:
+settled=: one candidate cannot be reordered, so the stage answers
+without a model call.
 
 #+begin_src console
 $ packset search --rerank --workspace seat fusion

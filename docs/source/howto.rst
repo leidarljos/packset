@@ -133,7 +133,9 @@ Run the second stage on one question
 ====================================
 
 The cross-encoder rerank is measured and off by default. Ask for it per
-query, or set ``PACKSET_RERANK=1`` on the writer:
+query, or set ``PACKSET_RERANK=1`` on the writer. A lone hit reports
+``settled``: one candidate cannot be reordered, so no model call is
+made:
 
 .. code:: console
 

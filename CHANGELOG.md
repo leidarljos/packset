@@ -4,6 +4,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A requested rerank over a lone hit reports `settled` and never
+  reaches the model: one candidate cannot be reordered, so the forward
+  pass would only return the same order. The default hook path asks for
+  the rerank on every prompt, so a small seat paid a cross-encoder
+  call per single-hit search for nothing; those calls are gone, and
+  contended bursts no longer queue them behind the single slot's
+  400 ms patience. Pinned by
+  `a_lone_hit_settles_the_rerank_without_a_model_call` (the stub's
+  sentinel file proves no invocation). A broken reranker still shows
+  as `absent` on the next multi-hit query.
 - `packset forget WORKSPACE` (`POST /v1/forget`) drops a scratch
   workspace's atoms whole -- no tombstones, no deed, the keys are gone.
   Retraction stays `packset atoms/delete`, which names the deed that
