@@ -939,6 +939,12 @@ mod tests {
         let health_wait = health_at.elapsed();
         let (first_wait, first_out) = search.join().expect("first search");
         let (late_wait, late_out) = late.join().expect("late search");
+        eprintln!(
+            "health_ms {:.1} holding_search_ms {:.1} parked_search_ms {:.1}",
+            health_wait.as_secs_f64() * 1000.0,
+            first_wait.as_secs_f64() * 1000.0,
+            late_wait.as_secs_f64() * 1000.0
+        );
 
         assert!(health.starts_with("HTTP/1.1 200"), "{health}");
         assert!(
