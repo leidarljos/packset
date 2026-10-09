@@ -991,9 +991,17 @@ mod tests {
         let dropped = store.forget_workspace("scratch").unwrap();
         assert_eq!(dropped, 2, "two scratch records were held");
         assert!(store.live("scratch").unwrap().is_empty());
-        assert_eq!(store.live("seat").unwrap().len(), 1, "the seat kept its claim");
+        assert_eq!(
+            store.live("seat").unwrap().len(),
+            1,
+            "the seat kept its claim"
+        );
         assert!(store.scan(Some("scratch")).unwrap().is_empty());
-        assert_eq!(store.forget_workspace("scratch").unwrap(), 0, "twice is empty");
+        assert_eq!(
+            store.forget_workspace("scratch").unwrap(),
+            0,
+            "twice is empty"
+        );
         assert!(store.forget_workspace("").is_err(), "empty forgets nothing");
     }
 

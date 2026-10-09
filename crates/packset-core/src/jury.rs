@@ -77,11 +77,19 @@ pub fn positively_responsive(k: usize, n: usize) -> bool {
 }
 
 fn word(commit: bool) -> &'static str {
-    if commit { "commit" } else { "hung" }
+    if commit {
+        "commit"
+    } else {
+        "hung"
+    }
 }
 
 fn py_bool(value: bool) -> &'static str {
-    if value { "True" } else { "False" }
+    if value {
+        "True"
+    } else {
+        "False"
+    }
 }
 
 fn two_thirds_positive(yes: i64, no: i64) -> bool {

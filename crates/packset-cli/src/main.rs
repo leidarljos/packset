@@ -948,10 +948,7 @@ mod tests {
         std::env::set_var("PACKSET_URL", "off");
         std::env::remove_var("INSIDE_MEMORY_URL");
         let err = super::client().unwrap_err();
-        assert!(
-            err.to_string().contains("no pack on purpose"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("no pack on purpose"), "{err}");
         match url {
             Some(v) => std::env::set_var("PACKSET_URL", v),
             None => std::env::remove_var("PACKSET_URL"),

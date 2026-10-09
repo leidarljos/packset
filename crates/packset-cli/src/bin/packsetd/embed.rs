@@ -476,7 +476,10 @@ fn dispatch(batch: Vec<Pending>) {
 /// Whether a query is waiting on the pump behind the batch now encoding:
 /// document batches leave it a slot when one is.
 fn queries_pending() -> bool {
-    pending().0.lock().is_ok_and(|queue| queue.iter().any(|job| job.query))
+    pending()
+        .0
+        .lock()
+        .is_ok_and(|queue| queue.iter().any(|job| job.query))
 }
 
 /// How many slots a batch of this side may spread over: one on a
@@ -861,10 +864,7 @@ mod tests {
         let held = slots[0].lock().unwrap();
         {
             let _guard = poll_slots(&slots).expect("the free slot answers");
-            assert!(
-                slots[1].try_lock().is_err(),
-                "the poll took the held slot"
-            );
+            assert!(slots[1].try_lock().is_err(), "the poll took the held slot");
         }
         drop(held);
         {

@@ -52,9 +52,7 @@ pub use jury::may_report;
 pub use kemeny::kemeny_merge;
 pub use mab::{ProtocolReport, COMPETENCIES as MAB_COMPETENCIES};
 pub use mmr::mmr_rerank;
-pub use panel::{
-    shipped_panel_report, Decay, Diversify, Fuse, Panel, UnknownVoter,
-};
+pub use panel::{shipped_panel_report, Decay, Diversify, Fuse, Panel, UnknownVoter};
 pub use paper_a::{PaperATable, BENCHES as PAPER_A_BENCHES};
 pub use prose::{refuse as prose_refuse, ProseError, Role as ProseRole};
 pub use record::{validate, AtomError};

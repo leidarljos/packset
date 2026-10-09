@@ -2213,7 +2213,10 @@ mod tests {
         let again = svc.forget_workspace("smoke:run").unwrap();
         assert_eq!(again["forgotten"], json!(0), "{again:?}");
         assert!(svc.forget_workspace("").is_err(), "empty forgets nothing");
-        assert!(svc.forget_workspace("   ").is_err(), "blank forgets nothing");
+        assert!(
+            svc.forget_workspace("   ").is_err(),
+            "blank forgets nothing"
+        );
     }
 
     #[test]
@@ -2526,10 +2529,16 @@ mod tests {
         let (_dir, svc) = service();
         let mut a = atom("Cloudflare Pages settings change through the dashboard.");
         a.insert("kind".into(), json!("rule"));
-        a.insert("pattern".into(), json!("*api.cloudflare.com*/pages/projects/*-X PATCH*"));
+        a.insert(
+            "pattern".into(),
+            json!("*api.cloudflare.com*/pages/projects/*-X PATCH*"),
+        );
         a.insert("verdict".into(), json!("ask"));
         let mut b = a.clone();
-        b.insert("pattern".into(), json!("*-X PATCH*api.cloudflare.com*/pages/projects/*"));
+        b.insert(
+            "pattern".into(),
+            json!("*-X PATCH*api.cloudflare.com*/pages/projects/*"),
+        );
         let mut c = a.clone();
         c.insert("verdict".into(), json!("deny"));
         let a1 = svc.add(a.clone()).unwrap();
