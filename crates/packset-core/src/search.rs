@@ -380,8 +380,17 @@ pub struct Ask<'a> {
     pub limit: usize,
     /// The named set to stay inside, if any.
     pub set: Option<&'a str>,
+    /// One kind, when the caller asked for it. Mail is omitted otherwise.
+    pub kind: Option<&'a str>,
     /// The instant liveness and recency are measured against.
     pub now: &'a str,
+}
+
+/// Whether this atom is in the answer: live scope, and mail only when named.
+fn serves(atom: &Record, set: Option<&str>, kind: Option<&str>, now: &str) -> bool {
+    record::is_live_at(atom, now)
+        && atom_in_set(atom, set)
+        && record::in_memory(atom.get("kind").and_then(Value::as_str).unwrap_or(""), kind)
 }
 
 /// The prefix-and-one-edit scan over a whole pack.
@@ -405,6 +414,7 @@ pub fn search_linear_with(ask: &Ask<'_>, documents: &[Vec<String>]) -> Vec<Value
         query,
         limit,
         set,
+        kind,
         now,
     } = *ask;
     let qtoks = tokens(query);
@@ -419,7 +429,7 @@ pub fn search_linear_with(ask: &Ask<'_>, documents: &[Vec<String>]) -> Vec<Value
     let mut best = TopK::new(limit);
     let mut owned: Vec<String>;
     for (ordinal, atom) in atoms.iter().enumerate() {
-        if !record::is_live_at(atom, now) || !atom_in_set(atom, set) {
+        if !serves(atom, set, kind, now) {
             continue;
         }
         let hay: &[String] = match documents.get(ordinal) {
@@ -550,6 +560,7 @@ fn bm25_hits(
         query: _,
         limit,
         set,
+        kind,
         now,
     } = *ask;
     if query.is_empty() || index.is_empty() {
@@ -580,7 +591,7 @@ fn bm25_hits(
         let Some(atom) = atoms.get(ordinal) else {
             continue;
         };
-        if !record::is_live_at(atom, now) || !atom_in_set(atom, set) {
+        if !serves(atom, set, kind, now) {
             continue;
         }
         let ts = atom.get("ts").and_then(Value::as_str);
@@ -677,6 +688,7 @@ pub fn search_dense(ask: &Ask<'_>, query: &[f32]) -> Vec<Value> {
         atoms,
         limit,
         set,
+        kind,
         now,
         ..
     } = *ask;
@@ -685,7 +697,7 @@ pub fn search_dense(ask: &Ask<'_>, query: &[f32]) -> Vec<Value> {
     }
     let mut best = TopK::new(limit);
     for (ordinal, atom) in atoms.iter().enumerate() {
-        if !record::is_live_at(atom, now) || !atom_in_set(atom, set) {
+        if !serves(atom, set, kind, now) {
             continue;
         }
         let Some(vector) = embedding_of(atom) else {
@@ -718,7 +730,10 @@ pub fn due_hits(atoms: &[Record], set: Option<&str>, now: &str) -> Vec<Value> {
     let mut hits: Vec<Value> = atoms
         .iter()
         .filter(|atom| {
-            record::is_live(atom, now) && atom_in_set(atom, set) && record::is_due(atom, now)
+            record::is_live(atom, now)
+                && atom_in_set(atom, set)
+                && record::in_memory(atom.get("kind").and_then(Value::as_str).unwrap_or(""), None)
+                && record::is_due(atom, now)
         })
         .map(|atom| {
             let ts = atom.get("ts").and_then(Value::as_str);
@@ -850,6 +865,7 @@ mod tests {
             query: "ripgrp search tool",
             limit: 15,
             set: None,
+            kind: None,
             now: "2026-09-10T00:00:00Z",
         };
         let fresh = search_linear(&asked);
@@ -1061,6 +1077,7 @@ mod tests {
             query,
             limit,
             set,
+            kind: None,
             now: NOW,
         }
     }
@@ -1201,6 +1218,24 @@ mod tests {
         let hits = search_linear(&ask("", "", &atoms, "ripgrep", 10, Some("review")));
         let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
         assert_eq!(ids, vec!["in"], "{hits:?}");
+    }
+
+    #[test]
+    fn mail_is_searched_only_when_its_kind_is_named() {
+        let letter =
+            "msg 0123456789abcdef0123456789abcdef\nfrom inky\nto scratch\n\nripgrep the log";
+        let atoms = vec![
+            atom(json!({"id": "lesson", "text": "ripgrep the tree", "kind": "lesson"})),
+            atom(json!({"id": "letter", "text": letter, "kind": "message"})),
+        ];
+        let plain = search_linear(&ask("", "", &atoms, "ripgrep", 10, None));
+        let ids: Vec<&str> = plain.iter().filter_map(|h| h["id"].as_str()).collect();
+        assert_eq!(ids, vec!["lesson"], "{plain:?}");
+        let mut asked = ask("", "", &atoms, "ripgrep", 10, None);
+        asked.kind = Some("message");
+        let hits = search_linear(&asked);
+        let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
+        assert_eq!(ids, vec!["letter"], "{hits:?}");
     }
 
     #[test]

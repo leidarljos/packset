@@ -93,6 +93,7 @@ fn ask<'a>(atoms: &'a [Record]) -> Ask<'a> {
         query: "which lease token does the holder reclaim",
         limit: 20,
         set: None,
+        kind: None,
         now: "2026-09-10T00:00:00Z",
     }
 }

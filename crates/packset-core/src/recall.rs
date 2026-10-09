@@ -257,6 +257,7 @@ pub fn recall(
     hints: &Hints,
     limit: Option<i64>,
     now: &str,
+    kind: Option<&str>,
 ) -> Vec<Record> {
     let cap = cap_limit(limit);
     if cap == 0 {
@@ -264,7 +265,10 @@ pub fn recall(
     }
     let mut live: Vec<Record> = atoms
         .iter()
-        .filter(|a| record::is_live(a, now) || record::is_due(a, now))
+        .filter(|a| {
+            record::in_memory(a.get("kind").and_then(Value::as_str).unwrap_or(""), kind)
+                && (record::is_live(a, now) || record::is_due(a, now))
+        })
         .cloned()
         .collect();
     record::filter_live_links(&mut live);
@@ -357,8 +361,29 @@ mod tests {
         let live: Vec<Record> = (0..5)
             .map(|i| atom(json!({"id": format!("a{i}"), "text": "x"})))
             .collect();
-        let got = recall(&live, &[], &Hints::default(), None, NOW);
+        let got = recall(&live, &[], &Hints::default(), None, NOW, None);
         assert_eq!(got.len(), 5, "nothing is ranked away from a full reader");
+    }
+
+    #[test]
+    fn mail_stays_out_of_recall_unless_its_kind_is_named() {
+        let live = vec![
+            atom(json!({"id": "lesson", "kind": "lesson", "text": "The fuse is CombMNZ."})),
+            atom(
+                json!({"id": "letter", "kind": "message", "text": "msg abc\nfrom a\nto b\n\nHello."}),
+            ),
+        ];
+        let plain = ids(&recall(&live, &[], &Hints::default(), None, NOW, None));
+        assert_eq!(plain, vec!["lesson".to_string()]);
+        let asked = ids(&recall(
+            &live,
+            &[],
+            &Hints::default(),
+            None,
+            NOW,
+            Some("message"),
+        ));
+        assert_eq!(asked, vec!["letter".to_string()]);
     }
 
     #[test]
@@ -421,13 +446,13 @@ mod tests {
             text: "fuse settled answer".into(),
             entities: Vec::new(),
         };
-        let got = ids(&recall(&live, &[], &hints, Some(10), NOW));
+        let got = ids(&recall(&live, &[], &hints, Some(10), NOW, None));
         assert!(got.contains(&"kept".to_string()), "{got:?}");
         let due_taken = got.iter().filter(|i| i.starts_with("due")).count();
         assert!(due_taken <= due_share(10), "{got:?}");
         // Without a cue the whole due queue is the answer, as the review
         // path wants.
-        let bare = ids(&recall(&live, &[], &Hints::default(), Some(10), NOW));
+        let bare = ids(&recall(&live, &[], &Hints::default(), Some(10), NOW, None));
         assert_eq!(bare.len(), 10);
         assert!(bare.iter().all(|i| i.starts_with("due")), "{bare:?}");
     }
@@ -487,7 +512,14 @@ mod tests {
         })));
         live.push(atom(json!({"id": "far", "text": "nowhere near"})));
 
-        let got = recall(&live, &["seed".into()], &Hints::default(), Some(8), NOW);
+        let got = recall(
+            &live,
+            &["seed".into()],
+            &Hints::default(),
+            Some(8),
+            NOW,
+            None,
+        );
         let got_ids = ids(&got);
         assert!(got_ids.contains(&"seed".to_string()), "{got_ids:?}");
         assert!(got_ids.contains(&"near".to_string()), "{got_ids:?}");
@@ -499,7 +531,7 @@ mod tests {
         let live: Vec<Record> = (0..70)
             .map(|i| atom(json!({"id": format!("a{i}"), "text": "x"})))
             .collect();
-        assert!(recall(&live, &[], &Hints::default(), Some(8), NOW).is_empty());
+        assert!(recall(&live, &[], &Hints::default(), Some(8), NOW, None).is_empty());
     }
 
     #[test]
@@ -512,7 +544,7 @@ mod tests {
             text: "ripgrep".into(),
             entities: Vec::new(),
         };
-        let got = ids(&recall(&live, &[], &hints, Some(8), NOW));
+        let got = ids(&recall(&live, &[], &hints, Some(8), NOW, None));
         assert!(got.contains(&"hit".to_string()), "{got:?}");
     }
 
@@ -543,7 +575,7 @@ mod tests {
             })),
             atom(json!({"id": "live", "text": "x"})),
         ];
-        let got = ids(&recall(&live, &[], &Hints::default(), None, NOW));
+        let got = ids(&recall(&live, &[], &Hints::default(), None, NOW, None));
         assert!(got.contains(&"live".to_string()), "{got:?}");
         assert!(got.contains(&"due".to_string()), "{got:?}");
         assert!(!got.contains(&"gone".to_string()), "{got:?}");
@@ -552,6 +584,6 @@ mod tests {
     #[test]
     fn a_zero_limit_answers_nothing() {
         let live = vec![atom(json!({"id": "a", "text": "x"}))];
-        assert!(recall(&live, &[], &Hints::default(), Some(0), NOW).is_empty());
+        assert!(recall(&live, &[], &Hints::default(), Some(0), NOW, None).is_empty());
     }
 }

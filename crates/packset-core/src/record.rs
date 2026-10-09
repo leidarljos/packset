@@ -48,12 +48,38 @@ pub const KINDS: &[&str] = &[
     "prediction",
     "rule",
     "outcome",
+    "message",
+    "receipt",
+    "group",
 ];
 
-/// Kinds the seat weighs or reads: a trust row, a persona, and the outcome
-/// an issue closed on. `add` starts no review clock for them, and the
-/// sweep skips them even when a grade has started one.
-pub const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "outcome"];
+/// Seat mail. Each atom is one letter, one read, or one membership change,
+/// and it is kept as written.
+pub const MAIL_KINDS: &[&str] = &["message", "receipt", "group"];
+
+/// Whether `kind` is seat mail.
+#[must_use]
+pub fn is_mail(kind: &str) -> bool {
+    MAIL_KINDS.contains(&kind)
+}
+
+/// Whether an atom belongs in an ordinary memory answer.
+///
+/// Mail stays out unless the caller named that kind. Naming a kind returns
+/// only atoms of that kind.
+#[must_use]
+pub fn in_memory(kind: &str, asked: Option<&str>) -> bool {
+    match asked {
+        Some(name) => kind == name,
+        None => !is_mail(kind),
+    }
+}
+
+/// Kinds the seat weighs or reads: a trust row, a persona, the outcome
+/// an issue closed on, and mail. `add` starts no review clock for them, and
+/// the sweep skips them even when a grade has started one.
+pub const UNREVIEWED_KINDS: &[&str] =
+    &["trust", "persona", "outcome", "message", "receipt", "group"];
 
 /// Whether the claim was stated or inferred.
 pub const LEVELS: &[&str] = &["explicit", "derived"];
@@ -364,6 +390,7 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     let prediction = kind == "prediction";
     let rule = kind == "rule";
     let outcome = kind == "outcome";
+    let mail = is_mail(kind);
     let level = atom
         .get("level")
         .and_then(Value::as_str)
@@ -433,8 +460,14 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
         check_outcome(atom)?;
     }
 
-    let report = prose::refuse(&text, prose::Role::Atom)?;
-    atom.insert("prose".into(), prose_value(&report));
+    // Mail carries a header of several lines. It is not one claim, so the
+    // sentence cap does not apply. The character cap above is the bound.
+    if mail {
+        atom.insert("prose".into(), prose_value(&prose::assess(&text)));
+    } else {
+        let report = prose::refuse(&text, prose::Role::Atom)?;
+        atom.insert("prose".into(), prose_value(&report));
+    }
     Ok(())
 }
 
@@ -1045,7 +1078,7 @@ pub fn same_head(a: &[String], b: &[String]) -> bool {
 /// ([`same_head`]). When both carry entities they must share one; a claim
 /// without entities is read by its text alone, because most claims a seat
 /// remembers name none. Linked atoms about the same entities with
-/// different sentences stay both live.
+/// different sentences stay both live. Mail never replaces mail.
 #[must_use]
 pub fn replaces(new: &Map<String, Value>, old: &Map<String, Value>) -> bool {
     replaces_shaped(new, &Shape::of(new), old, &Shape::of(old))
@@ -1124,6 +1157,11 @@ pub fn replaces_shaped(
     old_shape: &Shape,
 ) -> bool {
     if new.get("kind") != old.get("kind") {
+        return false;
+    }
+    // Mail is a log. A later letter does not close an earlier one, not even
+    // when it names that id in `supersedes`.
+    if new.get("kind").and_then(Value::as_str).is_some_and(is_mail) {
         return false;
     }
     let new_text = new.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1351,6 +1389,86 @@ mod tests {
             "workspace": "w", "choice": "ship"}));
         assert_eq!(no_issue.unwrap_err().0, "outcome atom needs issue");
         assert!(UNREVIEWED_KINDS.iter().all(|k| KINDS.contains(k)));
+        assert!(MAIL_KINDS.iter().all(|k| KINDS.contains(k)));
+        assert!(MAIL_KINDS.iter().all(|k| UNREVIEWED_KINDS.contains(k)));
+    }
+
+    /// The header ljos writes is several sentences. The soft cap still holds.
+    #[test]
+    fn mail_keeps_a_header_and_stops_at_the_soft_cap() {
+        let header = "\
+msg 0123456789abcdef0123456789abcdef
+from inky
+to scratch
+
+The build failed. Look at the log. It is the writer.";
+        assert!(
+            prose::assess(header).sentences > 2,
+            "the header is the case the sentence cap used to refuse"
+        );
+        let check = |kind: &str, text: &str| {
+            validate(&mut atom(json!({
+                "kind": kind,
+                "level": "explicit",
+                "text": text,
+                "workspace": "seat",
+                "entities": ["seat:inky", "from:inky", "to:scratch", "msg:abc"],
+            })))
+        };
+        for kind in MAIL_KINDS {
+            assert!(check(kind, header).is_ok(), "{kind}");
+        }
+        let lesson = validate(&mut atom(json!({
+            "kind": "lesson",
+            "text": header,
+            "workspace": "seat",
+        })));
+        assert!(
+            lesson.unwrap_err().0.contains("sentences"),
+            "a claim is still at most two sentences"
+        );
+        let long = "x".repeat(TEXT_SOFT_CAP + 1);
+        let over = check("message", &long);
+        assert_eq!(
+            over.unwrap_err().0,
+            format!("atom text exceeds soft cap {TEXT_SOFT_CAP}")
+        );
+    }
+
+    #[test]
+    fn mail_does_not_replace_mail() {
+        let group = |id: &str, member: &str| {
+            atom(json!({
+                "id": id,
+                "kind": "group",
+                "text": format!(
+                    "group {id}\nname smoketeam\nmember {member}\nby inky\nat 2026-10-09T21:00:00Z"
+                ),
+                "workspace": "seat",
+                "entities": ["seat:inky", format!("group:smoketeam"), format!("member:{member}")],
+            }))
+        };
+        let a = group("a".repeat(32).as_str(), "a");
+        let b = group("b".repeat(32).as_str(), "b");
+        let c = group("c".repeat(32).as_str(), "c");
+        assert!(!replaces(&b, &a), "a second member is not a rewrite");
+        assert!(!replaces(&c, &b));
+        let mut named = c.clone();
+        named.insert("supersedes".into(), json!([a["id"]]));
+        assert!(!replaces(&named, &a), "mail ignores an explicit supersedes");
+
+        let receipt = |id: &str, msg: &str| {
+            atom(json!({
+                "id": id,
+                "kind": "receipt",
+                "text": format!("read {msg}\nby scratch\nat 2026-10-09T21:01:00Z\nmsg {id}"),
+                "workspace": "seat",
+                "entities": ["seat:scratch", "from:scratch", format!("receipt:{msg}")],
+            }))
+        };
+        let left = receipt(&"d".repeat(32), &"e".repeat(32));
+        let right = receipt(&"f".repeat(32), &"1".repeat(32));
+        assert!(!replaces(&right, &left), "two receipts stay two");
     }
     use serde_json::json;
 

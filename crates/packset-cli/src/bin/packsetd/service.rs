@@ -175,10 +175,29 @@ fn head_key(shape: &record::Shape) -> Option<String> {
         .then(|| format!("h:{}", shape.head[..record::HEAD_MIN].join(" ")))
 }
 
+/// The live set with mail left out. Islands, hubs and activation are memory.
+fn memory_only(atoms: &[Record]) -> Vec<Record> {
+    atoms
+        .iter()
+        .filter(|atom| {
+            record::in_memory(atom.get("kind").and_then(Value::as_str).unwrap_or(""), None)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether a stored claim says what the new one says: same text, kind and
 /// set, and for a rule the same pattern and verdict. Two rules that share a
 /// reason and differ in glob or verdict are two laws.
 fn same_claim(existing: &Record, atom: &Record) -> bool {
+    // A repeated letter is a second atom. The text is the record.
+    if existing
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(record::is_mail)
+    {
+        return false;
+    }
     existing.get("text") == atom.get("text")
         && existing.get("kind") == atom.get("kind")
         && existing.get("set") == atom.get("set")
@@ -793,7 +812,11 @@ impl Service {
             }
         }
         trace.mark("replace");
-        if record::is_live(&atom, &now) {
+        let mail = atom
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(record::is_mail);
+        if record::is_live(&atom, &now) && !mail {
             // Closed peers stay out of apply_links: a rewrite of links would
             // otherwise write them back without valid_to. Only a peer that
             // shares a name can be linked, and only its links can be
@@ -1334,6 +1357,7 @@ impl Service {
         panel: &packset_core::Panel,
         as_of: Option<&str>,
         rerank: bool,
+        kind: Option<&str>,
     ) -> anyhow::Result<Value> {
         let named = match set {
             Some(raw) => Some(
@@ -1421,6 +1445,7 @@ impl Service {
             query,
             limit: first_limit,
             set: scope,
+            kind,
             now: &now,
         };
         let ranked_terms = packset_core::search::search_bm25(&ask, &index);
@@ -1436,7 +1461,7 @@ impl Service {
         let projected = if as_of.is_some() {
             None
         } else {
-            crate::milli::search(corpus, query, first_limit, &dir, scope)
+            crate::milli::search(corpus, query, first_limit, &dir, scope, kind)
         };
         let (mut ranked, engine) = match projected {
             Some(atom_hits) => {
@@ -1566,7 +1591,7 @@ impl Service {
     ///
     /// The store's.
     pub fn islands(&self, workspace: &str) -> anyhow::Result<Value> {
-        let atoms = self.store.live(workspace)?;
+        let atoms = memory_only(&self.store.live(workspace)?);
         let graph = packset_core::island::Graph::from_atoms(&atoms);
         // Communities by modularity; label propagation stands beside it so
         // the two can be compared on the same pack.
@@ -1608,7 +1633,7 @@ impl Service {
     ///
     /// The store's.
     pub fn hubs(&self, workspace: &str, limit: usize) -> anyhow::Result<Value> {
-        let atoms = self.store.live(workspace)?;
+        let atoms = memory_only(&self.store.live(workspace)?);
         let graph = packset_core::island::Graph::from_atoms(&atoms);
         let hubs: Vec<Value> = packset_core::island::hubs(&graph)
             .into_iter()
@@ -1868,8 +1893,17 @@ impl Service {
         fire: bool,
         lens: Option<&str>,
     ) -> anyhow::Result<Value> {
-        let seeds = self.search(workspace, query, ACTIVATION_SEEDS, None, panel, None, false)?;
-        let atoms = self.store.live(workspace)?;
+        let seeds = self.search(
+            workspace,
+            query,
+            ACTIVATION_SEEDS,
+            None,
+            panel,
+            None,
+            false,
+            None,
+        )?;
+        let atoms = memory_only(&self.store.live(workspace)?);
         let graph = packset_core::island::Graph::from_atoms_as(&atoms, lens);
         let weighted: Vec<(usize, f64)> = seeds["hits"]
             .as_array()
@@ -2525,6 +2559,108 @@ mod tests {
     }
 
     #[test]
+    fn mail_members_and_receipts_are_each_kept() {
+        let (_dir, svc) = service();
+        let group = |member: &str| {
+            let mut row = atom(&format!(
+                "group {member}{member}{member}{member}{member}{member}{member}{member}\nname smoketeam\nmember {member}\nby inky\nat 2026-10-09T21:00:00Z"
+            ));
+            row.insert("kind".into(), json!("group"));
+            row.insert(
+                "entities".into(),
+                json!(["seat:inky", "group:smoketeam", format!("member:{member}")]),
+            );
+            row
+        };
+        for member in ["a", "b", "c"] {
+            svc.add(group(member)).unwrap();
+        }
+        let groups: Vec<String> = svc
+            .store()
+            .live("w")
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "group")
+            .map(|a| a["text"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(groups.len(), 3, "{groups:?}");
+        assert!(groups.iter().any(|t| t.contains("member a")));
+        assert!(groups.iter().any(|t| t.contains("member c")));
+
+        let receipt = |msg: &str| {
+            let mut row = atom(&format!(
+                "read {msg}\nby scratch\nat 2026-10-09T21:01:00Z\nmsg {msg}{msg}"
+            ));
+            row.insert("kind".into(), json!("receipt"));
+            row.insert(
+                "entities".into(),
+                json!(["seat:scratch", "from:scratch", format!("receipt:{msg}")]),
+            );
+            row
+        };
+        svc.add(receipt("one")).unwrap();
+        svc.add(receipt("two")).unwrap();
+        let receipts = svc
+            .store()
+            .live("w")
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "receipt")
+            .count();
+        assert_eq!(receipts, 2, "two receipts stay two");
+
+        let letter = "msg 0123456789abcdef0123456789abcdef\nfrom inky\nto scratch\n\nThe fuse is CombMNZ. Look again. Ask once more.";
+        let mut first_letter = atom(letter);
+        first_letter.insert("kind".into(), json!("message"));
+        let mut second_letter = atom(letter);
+        second_letter.insert("kind".into(), json!("message"));
+        let stored = svc.add(first_letter).unwrap();
+        let again = svc.add(second_letter).unwrap();
+        assert_ne!(
+            stored["id"], again["id"],
+            "the same letter twice is two atoms"
+        );
+
+        let panel = packset_core::Panel::default();
+        let hits = svc
+            .search("w", "CombMNZ", 8, None, &panel, None, false, None)
+            .unwrap();
+        let ids: Vec<&str> = hits["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["id"].as_str())
+            .collect();
+        assert!(
+            !ids.contains(&stored["id"].as_str().unwrap()),
+            "mail is not an ordinary hit: {hits}"
+        );
+        let named = svc
+            .search(
+                "w",
+                "CombMNZ",
+                8,
+                None,
+                &panel,
+                None,
+                false,
+                Some("message"),
+            )
+            .unwrap();
+        let named_ids: Vec<&str> = named["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["id"].as_str())
+            .collect();
+        assert!(
+            named_ids.contains(&stored["id"].as_str().unwrap())
+                || named_ids.contains(&again["id"].as_str().unwrap()),
+            "kind message returns the letter: {named}"
+        );
+    }
+
+    #[test]
     fn rules_with_one_reason_and_two_patterns_are_two_atoms() {
         let (_dir, svc) = service();
         let mut a = atom("Cloudflare Pages settings change through the dashboard.");
@@ -2640,6 +2776,7 @@ mod tests {
                 &packset_core::Panel::default(),
                 None,
                 false,
+                None,
             )
             .unwrap();
         let hits = found["hits"].as_array().expect("hits");
@@ -2657,6 +2794,7 @@ mod tests {
                 &packset_core::Panel::default(),
                 None,
                 false,
+                None,
             )
             .unwrap();
         let new_hits = found_new["hits"].as_array().expect("hits");
@@ -2781,6 +2919,7 @@ mod tests {
                 &panel,
                 Some("2024-06-01T00:00:00.000Z"),
                 false,
+                None,
             )
             .unwrap();
         let hit_ids: Vec<&str> = hits["hits"]
@@ -2800,6 +2939,7 @@ mod tests {
                 &panel,
                 Some("2024-06-01T00:00:00+00:00"),
                 false,
+                None,
             )
             .unwrap();
         let offset_hit_ids: Vec<&str> = offset_hits["hits"]
@@ -2811,7 +2951,7 @@ mod tests {
         assert_eq!(offset_hit_ids, hit_ids, "{offset_hits}");
         assert_eq!(offset_hits["as_of"], json!("2024-06-01T00:00:00.000Z"));
         let now_hits = svc
-            .search("w", "Borda", 8, None, &panel, None, false)
+            .search("w", "Borda", 8, None, &panel, None, false, None)
             .unwrap();
         let now_ids: Vec<&str> = now_hits["hits"]
             .as_array()
@@ -2824,7 +2964,16 @@ mod tests {
             "live-now search still drops it: {now_hits}"
         );
         let refused = svc
-            .search("w", "Borda", 8, None, &panel, Some("not-a-date"), false)
+            .search(
+                "w",
+                "Borda",
+                8,
+                None,
+                &panel,
+                Some("not-a-date"),
+                false,
+                None,
+            )
             .unwrap_err();
         assert!(
             refused.to_string().contains("as_of must be a timestamp"),
@@ -2974,11 +3123,13 @@ mod tests {
         svc.add(atom("Reviews open with a check.")).unwrap();
         let panel = packset_core::Panel::default();
         let found = svc
-            .search("w", "reviews", 8, None, &panel, None, false)
+            .search("w", "reviews", 8, None, &panel, None, false, None)
             .unwrap();
         assert_eq!(found["rerank"], json!("off"), "{found}");
         assert_eq!(found["hits"].as_array().map(Vec::len), Some(1));
-        let empty = svc.search("w", "", 8, None, &panel, None, true).unwrap();
+        let empty = svc
+            .search("w", "", 8, None, &panel, None, true, None)
+            .unwrap();
         assert_eq!(empty["rerank"], json!("off"), "{empty}");
         assert!(empty["hits"].as_array().unwrap().is_empty());
     }
@@ -3024,10 +3175,10 @@ for line in sys.stdin:
         // Safety: EMBED is held, so no other test mutates this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
         let off = svc
-            .search("w", "reviews", 8, None, &panel, None, false)
+            .search("w", "reviews", 8, None, &panel, None, false, None)
             .unwrap();
         let on = svc
-            .search("w", "reviews", 8, None, &panel, None, true)
+            .search("w", "reviews", 8, None, &panel, None, true, None)
             .unwrap();
         unsafe {
             match old {
@@ -3065,10 +3216,10 @@ for line in sys.stdin:
         // Safety: EMBED is held, so no other test mutates this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub.path) };
         let off = svc
-            .search("w", "reviews search", 8, None, &panel, None, false)
+            .search("w", "reviews search", 8, None, &panel, None, false, None)
             .unwrap();
         let on = svc
-            .search("w", "reviews search", 8, None, &panel, None, true)
+            .search("w", "reviews search", 8, None, &panel, None, true, None)
             .unwrap();
         unsafe {
             match old {
@@ -3111,10 +3262,10 @@ for line in sys.stdin:
         // Safety: EMBED is held, so no other test mutates this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub.path) };
         let off = svc
-            .search("w", "reviews search", 8, None, &panel, None, false)
+            .search("w", "reviews search", 8, None, &panel, None, false, None)
             .unwrap();
         let on = svc
-            .search("w", "reviews search", 8, None, &panel, None, true)
+            .search("w", "reviews search", 8, None, &panel, None, true, None)
             .unwrap();
         unsafe {
             match old {
@@ -3163,10 +3314,10 @@ for line in sys.stdin:
         // Safety: EMBED is held, so no other test mutates this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub.path) };
         let off = svc
-            .search("w", "Prefer reviews", 1, None, &panel, None, false)
+            .search("w", "Prefer reviews", 1, None, &panel, None, false, None)
             .unwrap();
         let on = svc
-            .search("w", "Prefer reviews", 1, None, &panel, None, true)
+            .search("w", "Prefer reviews", 1, None, &panel, None, true, None)
             .unwrap();
         unsafe {
             match old {

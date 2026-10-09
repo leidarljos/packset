@@ -456,7 +456,12 @@ pub fn index_ready(dir: &Path) -> bool {
 /// an atom that has since been tombstoned never reaches a reader. Prose hits
 /// from the index are dropped because prose always comes from the pack.
 #[must_use]
-pub fn filter_atom_hits(hits: &[Value], live: &[Record], set: Option<&str>) -> Vec<Value> {
+pub fn filter_atom_hits(
+    hits: &[Value],
+    live: &[Record],
+    set: Option<&str>,
+    kind: Option<&str>,
+) -> Vec<Value> {
     let by_id: BTreeMap<&str, &Record> = live
         .iter()
         .filter_map(|a| a.get("id").and_then(Value::as_str).map(|id| (id, a)))
@@ -470,6 +475,9 @@ pub fn filter_atom_hits(hits: &[Value], live: &[Record], set: Option<&str>) -> V
                 if atom.get("set").and_then(Value::as_str) != Some(name) {
                     return None;
                 }
+            }
+            if !record::in_memory(atom.get("kind").and_then(Value::as_str).unwrap_or(""), kind) {
+                return None;
             }
             // The index stores what it scores; the stamp, the kind, the
             // review date and the claim's source come from the pack's own
@@ -540,6 +548,7 @@ pub fn search(
     limit: usize,
     dir: &Path,
     set: Option<&str>,
+    kind: Option<&str>,
 ) -> Option<Vec<Value>> {
     let (workspace, atoms) = (corpus.workspace, corpus.atoms);
     binary()?;
@@ -567,7 +576,7 @@ pub fn search(
         let payload = run(&argv, None)?;
         let raw = payload.get("hits")?.as_array()?;
         let hits: Vec<Value> = raw.iter().filter(|h| h.is_object()).cloned().collect();
-        Some(filter_atom_hits(&hits, atoms, set))
+        Some(filter_atom_hits(&hits, atoms, set, kind))
     };
 
     let mut atom_hits = once(query)?;
@@ -661,7 +670,7 @@ mod tests {
         }))];
         let hits = vec![json!({"field": "atom", "id": "a1", "text": "one",
             "entities": "seat:acme issue:brio-1", "score": 1.0})];
-        let kept = filter_atom_hits(&hits, &live, None);
+        let kept = filter_atom_hits(&hits, &live, None, None);
         assert_eq!(kept[0]["source"]["harness"], json!("acme"));
         assert_eq!(kept[0]["entities"], json!(["seat:acme", "issue:brio-1"]));
     }
@@ -677,7 +686,7 @@ mod tests {
             json!({"field": "atom", "id": "gone", "text": "two", "score": 0.5}),
             json!({"field": "user", "id": null, "text": "card", "score": 0.4}),
         ];
-        let kept = filter_atom_hits(&hits, &live, None);
+        let kept = filter_atom_hits(&hits, &live, None, None);
         assert_eq!(kept.len(), 1, "{kept:?}");
         assert_eq!(kept[0]["ts"], json!("2026-09-01T00:00:00.000Z"));
         assert_eq!(kept[0]["kind"], json!("lesson"));
@@ -769,12 +778,12 @@ mod tests {
             json!({"field": "atom", "id": "vanished", "text": "b"}),
             json!({"field": "user", "id": "user", "text": "prose"}),
         ];
-        let filtered = filter_atom_hits(&hits, &live, Some("review"));
+        let filtered = filter_atom_hits(&hits, &live, Some("review"), None);
         let ids: Vec<&str> = filtered.iter().filter_map(|h| h["id"].as_str()).collect();
         assert_eq!(ids, vec!["kept"], "{filtered:?}");
 
         // And out of scope means out, whatever the index said.
-        assert!(filter_atom_hits(&hits, &live, Some("other")).is_empty());
+        assert!(filter_atom_hits(&hits, &live, Some("other"), None).is_empty());
     }
 
     #[test]
@@ -785,7 +794,7 @@ mod tests {
             json!({"field": "memory", "id": "memory_x", "text": "q"}),
         ];
         assert!(
-            filter_atom_hits(&hits, &live, None).is_empty(),
+            filter_atom_hits(&hits, &live, None, None).is_empty(),
             "prose comes from the pack, so the index copy can be stale"
         );
     }

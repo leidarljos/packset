@@ -1229,6 +1229,7 @@ fn main() -> anyhow::Result<()> {
                 // rather than the whole list.
                 limit: CUTOFFS[CUTOFFS.len() - 1],
                 set: None,
+                kind: None,
                 now: &now,
             };
             // The depth every arm that collapses a ranking into sessions is

@@ -409,15 +409,21 @@ fn route(
                 let rerank = crate::embed::requested(query.get("rerank").map(String::as_str));
                 match as_of_stamp(query) {
                     Err(a) => a,
-                    Ok(at) => answer(service.search(
-                        &workspace,
-                        &q,
-                        limit,
-                        set.map(String::as_str),
-                        panel,
-                        at.as_deref(),
-                        rerank,
-                    )),
+                    Ok(at) => answer(
+                        service.search(
+                            &workspace,
+                            &q,
+                            limit,
+                            set.map(String::as_str),
+                            panel,
+                            at.as_deref(),
+                            rerank,
+                            query
+                                .get("kind")
+                                .map(String::as_str)
+                                .filter(|k| !k.is_empty()),
+                        ),
+                    ),
                 }
             }
         },
@@ -453,6 +459,7 @@ fn route(
                             &hints,
                             limit,
                             &packset_core::clock::utcnow(),
+                            query.get("kind").map(String::as_str).filter(|k| !k.is_empty()),
                         )
                     })),
                 }

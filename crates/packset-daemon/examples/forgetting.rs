@@ -213,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                 text: cue_of(topic),
                 entities: Vec::new(),
             };
-            let picked = recall(&atoms, &seeds, &hints, Some(10), &now);
+            let picked = recall(&atoms, &seeds, &hints, Some(10), &now, None);
             let ranked: Vec<Value> = picked.into_iter().map(Value::Object).collect();
             rank_of(&ranked, topic)
         })

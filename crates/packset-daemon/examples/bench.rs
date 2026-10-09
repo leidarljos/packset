@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
             || {
                 let start = Instant::now();
                 service
-                    .search(WORKSPACE, "parser", 16, None, &panel, None, false)
+                    .search(WORKSPACE, "parser", 16, None, &panel, None, false, None)
                     .expect("search");
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                 if ms > worst {
@@ -113,6 +113,7 @@ fn main() -> anyhow::Result<()> {
                     &packset_core::recall::Hints::default(),
                     Some(64),
                     &now,
+                    None,
                 );
                 std::hint::black_box(picked);
             },
@@ -135,7 +136,7 @@ fn main() -> anyhow::Result<()> {
                 counter += 1;
                 let start = Instant::now();
                 service
-                    .search(WORKSPACE, "parser", 16, None, &panel, None, false)
+                    .search(WORKSPACE, "parser", 16, None, &panel, None, false, None)
                     .expect("search");
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                 if ms > worst {
