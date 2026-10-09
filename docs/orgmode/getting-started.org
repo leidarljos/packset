@@ -6,9 +6,9 @@ By the end you will have a pack that remembers two claims and ranks them.
 It will tell you when to review them, and export them for another seat.
 
 Install the writer. The encoder is a separate binary. Without it search
-stays lexical, and a sitting still opens on those ballots. Building the
-encoder from source, against ONNX Runtime you compile, is in
-[[file:howto.org][How-to]].
+stays lexical, and a sitting still opens on those ballots.
+[[file:howto.org][How-to]] covers building the encoder from source against
+an Open Neural Network Exchange (ONNX) Runtime you compile.
 
 #+begin_src console
 $ cargo binstall packset

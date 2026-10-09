@@ -27,7 +27,8 @@ $ packset ensure
 
 That installs `packset`, the writer `packsetd` and the read-only MCP
 surface `packset-mcp`. `packset-embed`, the optional dense encoder, is its
-own crate and links a source-built or system ONNX Runtime. The prebuilt
+own crate and links a source-built or system Open Neural Network Exchange
+(ONNX) Runtime. The prebuilt
 runtime from cdn.pyke.io is the `download-binaries` feature. The pack
 answers without the encoder, and search stays lexical.
 

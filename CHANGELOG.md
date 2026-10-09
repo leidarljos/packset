@@ -4,7 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
-- `packset-embed` links a system or source-built ONNX Runtime. The prebuilt runtime from cdn.pyke.io is the `download-binaries` feature. A hub checkout at `PACKSET_EMBED_MODEL_PATH`, or under the cache at `user/<model>/`, is the model, so a seeded directory is not fetched. An absent encoder leaves a sitting on the lexical ballots; doctor still reads `embedder.available`.
+- `packset-embed` links a system or source-built Open Neural Network Exchange (ONNX) Runtime. The prebuilt runtime from cdn.pyke.io is the `download-binaries` feature. A hub checkout at `PACKSET_EMBED_MODEL_PATH`, or under the cache at `user/<model>/`, is the model, so a seeded directory is not fetched. An absent encoder leaves a sitting on the lexical ballots; doctor still reads `embedder.available`.
 - The explanation names Zep's graph, which records when a fact became true and when the store learned it, and names A-MEM beside agentic memory. The measured rows are unchanged.
 
 ## 0.12.1 (2026-10-09)

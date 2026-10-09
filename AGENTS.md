@@ -31,8 +31,8 @@ runs the measured cross-encoder over the top 20; off by default.
 
 ## The encoder
 
-`just embed` links ONNX Runtime from the system. The default build does
-not download a runtime. Compile 1.28.0 (CPU, shared library) with
+`just embed` links Open Neural Network Exchange (ONNX) Runtime from the
+system. The default build does not download a runtime. Compile 1.28.0 (CPU, shared library) with
 `crates/packset-embed/build-onnxruntime.sh`, then:
 
 ```sh
