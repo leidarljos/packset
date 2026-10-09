@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.12.0 (2026-10-09)
 
 - The writer keeps accepting after the process runs out of descriptors.
   Under `tiny_http` every connection held a thread and two descriptors,
