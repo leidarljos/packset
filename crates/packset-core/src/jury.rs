@@ -48,8 +48,8 @@ pub fn may_two_thirds_min_yes(n: i64) -> i64 {
 
 fn boolean_profile(yes: usize, no: usize) -> Vec<Option<bool>> {
     let mut profile = Vec::with_capacity(yes + no);
-    profile.extend(std::iter::repeat(Some(true)).take(yes));
-    profile.extend(std::iter::repeat(Some(false)).take(no));
+    profile.extend(std::iter::repeat_n(Some(true), yes));
+    profile.extend(std::iter::repeat_n(Some(false), no));
     profile
 }
 

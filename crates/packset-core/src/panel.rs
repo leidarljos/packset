@@ -342,6 +342,7 @@ pub fn shipped_panel_report() -> String {
     )
 }
 
+#[cfg(test)]
 mod tests {
     /// Every voter, over ballots that disagree about order and about which
     /// candidates exist at all.

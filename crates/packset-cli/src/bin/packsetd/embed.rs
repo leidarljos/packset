@@ -889,7 +889,7 @@ mod tests {
         assert_eq!(plan_chunks(7, 3), vec![0..3, 3..5, 5..7]);
         let ranges = plan_chunks(10, 4);
         assert_eq!(ranges.len(), 4);
-        let mut seen = vec![false; 10];
+        let mut seen = [false; 10];
         for (i, range) in ranges.iter().enumerate() {
             if i > 0 {
                 assert_eq!(range.start, ranges[i - 1].end, "a gap between chunks");

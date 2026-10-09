@@ -72,8 +72,8 @@ where
             for &j in prefix.iter().skip(rank + 1) {
                 d[i][j] += 1;
             }
-            for j in 0..n {
-                if !on_ballot[j] {
+            for (j, on) in on_ballot.iter().enumerate() {
+                if !on {
                     d[i][j] += 1;
                 }
             }
