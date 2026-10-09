@@ -102,6 +102,84 @@ pub fn is_accession(value: &str) -> bool {
         && !text.contains(|c: char| c.is_whitespace() || c == ',')
 }
 
+/// Where an atom came from. Admission reads this, not the wording.
+pub const ORIGINS: &[&str] = &[
+    "user-declared",
+    "agent-derived",
+    "tool-echo",
+    "external",
+    "peer",
+];
+
+/// The origin a record written before this field reads as.
+pub const USER_DECLARED: &str = "user-declared";
+
+/// Content the writer typed as fact. It cannot outrank a lower origin.
+pub const CONTENT_AUTHORITATIVE: &str = "authoritative";
+
+/// Whether `origin` is one of [`ORIGINS`].
+#[must_use]
+pub fn known_origin(origin: &str) -> bool {
+    ORIGINS.contains(&origin)
+}
+
+/// Trust ceiling for content typed [`CONTENT_AUTHORITATIVE`].
+///
+/// `None` means the declared trust stands. A tool echo and an external
+/// atom stop at their own level.
+#[must_use]
+pub fn authority_ceiling(origin: &str) -> Option<f64> {
+    match origin {
+        "tool-echo" => Some(0.2),
+        "external" => Some(0.4),
+        _ => None,
+    }
+}
+
+/// `min(origin, content)` for a numeric trust.
+///
+/// The cap applies only when the content is typed authoritative and the
+/// origin is a tool echo or external. Every other atom keeps `declared`.
+#[must_use]
+pub fn capped_trust(origin: &str, content: Option<&str>, declared: f64) -> f64 {
+    if content == Some(CONTENT_AUTHORITATIVE) {
+        if let Some(cap) = authority_ceiling(origin) {
+            return declared.min(cap);
+        }
+    }
+    declared
+}
+
+/// The horizon a recalled review may write.
+///
+/// Authoritative content on a tool echo or an external atom promotes to
+/// that origin. Anything else still becomes `standing`.
+#[must_use]
+pub fn promotion_horizon(origin: &str, content: Option<&str>) -> &'static str {
+    if content == Some(CONTENT_AUTHORITATIVE) {
+        match origin {
+            "tool-echo" => return "tool-echo",
+            "external" => return "external",
+            _ => {}
+        }
+    }
+    "standing"
+}
+
+/// Whether this write is a proposal. An agent-derived lesson and a write
+/// the correction hook detected do not become live atoms.
+#[must_use]
+pub fn needs_accept(origin: &str, hook: bool) -> bool {
+    hook || origin == "agent-derived"
+}
+
+/// Whether `to` would relabel an agent-derived lesson as the user's
+/// without an accept.
+#[must_use]
+pub fn launders(from: &str, to: &str) -> bool {
+    from == "agent-derived" && to == USER_DECLARED
+}
+
 /// Jaccard on entity sets. Empty intersection is 0.
 pub fn entity_jaccard<'a, I, J>(left: I, right: J) -> f64
 where
@@ -228,5 +306,52 @@ mod tests {
     fn jaccard_overlap() {
         let v = entity_jaccard(["grok", "pack"], ["pack", "seat"]);
         assert!((v - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_authoritative_tool_echo_stops_at_its_origin() {
+        assert_eq!(
+            capped_trust("tool-echo", Some(CONTENT_AUTHORITATIVE), 1.0),
+            0.2
+        );
+        assert_eq!(
+            capped_trust("external", Some(CONTENT_AUTHORITATIVE), 9.0),
+            0.4
+        );
+        assert_eq!(
+            capped_trust("user-declared", Some(CONTENT_AUTHORITATIVE), 1.0),
+            1.0
+        );
+        assert_eq!(capped_trust("tool-echo", None, 1.0), 1.0);
+        assert_eq!(capped_trust("peer", Some(CONTENT_AUTHORITATIVE), 1.0), 1.0);
+        assert_eq!(
+            promotion_horizon("tool-echo", Some(CONTENT_AUTHORITATIVE)),
+            "tool-echo"
+        );
+        assert_eq!(
+            promotion_horizon("external", Some(CONTENT_AUTHORITATIVE)),
+            "external"
+        );
+        assert_eq!(
+            promotion_horizon("user-declared", Some(CONTENT_AUTHORITATIVE)),
+            "standing"
+        );
+        assert_eq!(promotion_horizon("tool-echo", None), "standing");
+    }
+
+    #[test]
+    fn an_agent_derived_write_needs_an_accept_to_become_user_declared() {
+        assert!(needs_accept("agent-derived", false));
+        assert!(needs_accept("user-declared", true));
+        assert!(!needs_accept("user-declared", false));
+        assert!(!needs_accept("peer", false));
+        assert!(!needs_accept("tool-echo", false));
+        assert!(!needs_accept("external", false));
+        assert!(launders("agent-derived", USER_DECLARED));
+        assert!(!launders("tool-echo", USER_DECLARED));
+        assert!(!launders("peer", USER_DECLARED));
+        assert!(!launders(USER_DECLARED, USER_DECLARED));
+        assert!(ORIGINS.iter().all(|name| known_origin(name)));
+        assert!(!known_origin("forged"));
     }
 }

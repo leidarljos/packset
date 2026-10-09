@@ -302,6 +302,47 @@ pub fn compact_day(
     Ok(out)
 }
 
+/// File a write that must not become a live atom.
+///
+/// An `agent-derived` lesson and a hook write land here. Accept is the
+/// only way either becomes a stored claim.
+///
+/// # Errors
+///
+/// The append's.
+pub fn hold(
+    home: &Home,
+    workspace: &str,
+    atom: &Record,
+    why: &str,
+    new_id: impl FnOnce() -> String,
+) -> Result<Value, CheapError> {
+    let text = atom
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let origin = packset_core::record::origin_of(atom);
+    let rec = json!({
+        "schema": SCHEMA,
+        "id": new_id(),
+        "workspace": workspace,
+        "text": text,
+        "origin": origin,
+        "hook": packset_core::record::hook_of(atom),
+        "job": "admission",
+        "when": "onDemand",
+        "status": "open",
+        "ts": clock::utcnow(),
+        "span": text,
+        "verdict": "SUPPORTED",
+        "transcript": "",
+        "why": why,
+    });
+    append(home, workspace, &rec).map_err(|e| CheapError(e.to_string()))?;
+    Ok(rec)
+}
+
 /// The atom an accepted proposal becomes, unstored.
 ///
 /// # Errors
@@ -332,6 +373,9 @@ pub fn accept(
     // Derived, not explicit: nobody typed this, the miner found it, and a
     // reader deciding how much to trust it should be able to see that.
     atom.insert("level".into(), json!("derived"));
+    // Accept is the rise to the user's origin. The proposal keeps whatever
+    // origin it was filed with until this line.
+    atom.insert("origin".into(), json!(packset_core::atom::USER_DECLARED));
     atom.insert("text".into(), json!(text.trim()));
     atom.insert("source".into(), Value::Null);
     atom.insert("ts".into(), json!(now));
@@ -549,6 +593,50 @@ mod tests {
             json!("derived"),
             "nobody typed this and a reader should see that"
         );
+        assert_eq!(atom["origin"], json!("user-declared"));
+    }
+
+    #[test]
+    fn an_agent_derived_lesson_reaches_user_declared_only_through_accept() {
+        let (_dir, home) = home();
+        let mut next = ids();
+        let lesson = json!({
+            "text": "The fuse is CombMNZ.",
+            "origin": "agent-derived",
+            "kind": "lesson",
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let rec = hold(&home, "w", &lesson, "agent-derived", &mut next).unwrap();
+        assert_eq!(rec["origin"], json!("agent-derived"));
+        assert_eq!(rec["status"], json!("open"));
+        assert!(packset_core::atom::launders(
+            "agent-derived",
+            "user-declared"
+        ));
+        let open = list_open(&home, "w");
+        assert_eq!(open.len(), 1);
+        let (atom, _) = accept(&home, "w", rec["id"].as_str().unwrap()).unwrap();
+        assert_eq!(atom["origin"], json!("user-declared"));
+    }
+
+    #[test]
+    fn a_hook_write_is_filed_as_a_proposal() {
+        let (_dir, home) = home();
+        let mut next = ids();
+        let lesson = json!({
+            "text": "A correction the hook caught.",
+            "hook": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let rec = hold(&home, "w", &lesson, "hook", &mut next).unwrap();
+        assert_eq!(rec["hook"], json!(true));
+        assert_eq!(rec["origin"], json!("user-declared"));
+        assert_eq!(rec["why"], json!("hook"));
+        assert_eq!(list_open(&home, "w").len(), 1);
     }
 
     #[test]

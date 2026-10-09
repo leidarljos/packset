@@ -42,13 +42,15 @@ const FIRE_TOP: usize = 8;
 /// Entities with `horizon:standing` and without `horizon:transient`.
 /// A recalled review and a consolidation survivor both call this.
 fn promoted_entities(atom: &Record) -> Value {
+    let horizon =
+        packset_core::atom::promotion_horizon(record::origin_of(atom), record::content_of(atom));
     let mut list: Vec<Value> = atom
         .get("entities")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     list.retain(|v| v.as_str().is_none_or(|s| !s.starts_with("horizon:")));
-    list.push(json!("horizon:standing"));
+    list.push(Value::String(format!("horizon:{horizon}")));
     Value::Array(list)
 }
 /// How long the same claims stay fired: a second fire inside it is held.
@@ -734,6 +736,23 @@ impl Service {
         mut atom: Record,
         mut trace: WriteTrace,
     ) -> anyhow::Result<Record> {
+        if packset_core::atom::needs_accept(record::origin_of(&atom), record::hook_of(&atom)) {
+            let why = if record::hook_of(&atom) {
+                "hook"
+            } else {
+                "agent-derived"
+            };
+            let workspace = atom
+                .get("workspace")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let rec = crate::proposals::hold(&self.home, &workspace, &atom, why, new_id)?;
+            let id = rec.get("id").and_then(Value::as_str).unwrap_or("");
+            return Err(anyhow::Error::new(AtomError(format!(
+                "held as proposal {id}: {why}"
+            ))));
+        }
         let workspace = atom
             .get("workspace")
             .and_then(Value::as_str)
@@ -957,6 +976,13 @@ impl Service {
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
             .cloned()
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
+        if let Some(to) = fields.get("origin").and_then(Value::as_str) {
+            if packset_core::atom::launders(record::origin_of(&updated), to) {
+                return Err(anyhow::Error::new(AtomError(
+                    "an agent-derived lesson reaches user-declared only through accept".into(),
+                )));
+            }
+        }
         for (key, value) in fields {
             updated.insert(key.clone(), value.clone());
         }
@@ -2556,6 +2582,84 @@ mod tests {
         let again = svc.add(atom("Reviews open with a check.")).unwrap();
         assert_eq!(first["id"], again["id"], "a retry is not a second claim");
         assert_eq!(svc.store().current("w", None).unwrap().len(), 1);
+        assert_eq!(first["origin"], json!("user-declared"));
+    }
+
+    #[test]
+    fn an_atom_stored_before_origin_reads_back_unchanged() {
+        let (_dir, svc) = service();
+        let id = "a".repeat(32);
+        let mut row = atom("Reviews open with a check.");
+        row.insert("id".into(), json!(id));
+        row.insert("tombstone".into(), json!(false));
+        svc.store.upsert(&row).unwrap();
+        let got = svc.store.get("w", &id).unwrap().unwrap();
+        assert!(got.get("origin").is_none(), "{got:?}");
+        assert_eq!(record::origin_of(&got), "user-declared");
+    }
+
+    #[test]
+    fn an_agent_derived_lesson_cannot_reach_user_declared_without_accept() {
+        let (_dir, svc) = service();
+        let mut lesson = atom("The fuse is CombMNZ.");
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        let err = svc.add(lesson).unwrap_err();
+        assert!(err.to_string().contains("proposal"), "{err}");
+        assert!(svc.store.live("w").unwrap().is_empty());
+        let open = crate::proposals::list_open(&svc.home, "w");
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0]["origin"], json!("agent-derived"));
+
+        let id = "b".repeat(32);
+        let mut raw = atom("The fuse is CombMNZ again.");
+        raw.insert("kind".into(), json!("lesson"));
+        raw.insert("id".into(), json!(id));
+        raw.insert("origin".into(), json!("agent-derived"));
+        raw.insert("tombstone".into(), json!(false));
+        svc.store.upsert(&raw).unwrap();
+        let mut fields = serde_json::Map::new();
+        fields.insert("origin".into(), json!("user-declared"));
+        let refused = svc.update("w", &id, &fields).unwrap_err();
+        assert!(refused.to_string().contains("accept"), "{refused}");
+        let still = svc.store.get("w", &id).unwrap().unwrap();
+        assert_eq!(still["origin"], json!("agent-derived"));
+
+        let stored = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(stored["origin"], json!("user-declared"));
+        assert!(svc
+            .store
+            .live("w")
+            .unwrap()
+            .iter()
+            .any(|a| a.get("id") == stored.get("id")));
+    }
+
+    #[test]
+    fn a_hook_write_is_held_and_an_echo_promotes_at_its_origin() {
+        let (_dir, svc) = service();
+        let mut caught = atom("A correction the hook caught in the cue.");
+        caught.insert("hook".into(), json!(true));
+        let err = svc.add(caught).unwrap_err();
+        assert!(err.to_string().contains("hook"), "{err}");
+        assert!(svc.store.live("w").unwrap().is_empty());
+
+        let mut echo = atom("A lesson stored before anyone reviewed it.");
+        echo.insert("origin".into(), json!("tool-echo"));
+        echo.insert("content".into(), json!("authoritative"));
+        echo.insert("entities".into(), json!(["seat:grok", "horizon:transient"]));
+        let stored = svc.add(echo).unwrap();
+        let graded = svc
+            .grade("w", stored["id"].as_str().unwrap(), true)
+            .unwrap();
+        let tags: Vec<&str> = graded["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(tags.contains(&"horizon:tool-echo"), "{tags:?}");
+        assert!(!tags.contains(&"horizon:standing"), "{tags:?}");
     }
 
     #[test]

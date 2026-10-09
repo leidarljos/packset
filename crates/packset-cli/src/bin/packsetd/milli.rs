@@ -319,10 +319,7 @@ pub fn atom_document(atom: &Record) -> Value {
         "entities": entities.join(" "),
         "workspace": atom.get("workspace").and_then(Value::as_str).unwrap_or(""),
         "set": atom.get("set").and_then(Value::as_str).unwrap_or(""),
-        "trust": match atom.get("trust") {
-            None | Some(Value::Null) => 1.0,
-            Some(other) => other.as_f64().unwrap_or(1.0),
-        },
+        "trust": packset_core::record::rank_trust(atom, 1.0),
     })
 }
 

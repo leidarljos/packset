@@ -372,6 +372,14 @@ fn refusal_message(value: &str, why: EntityRefusal) -> String {
     }
 }
 
+/// What `validate` does with `origin`. The decision is taken before the
+/// map is borrowed again to insert the default.
+enum OriginWrite {
+    Default,
+    Keep,
+    Refuse(String),
+}
+
 /// Check a record and normalise the fields that have one legal form.
 ///
 /// # Errors
@@ -398,6 +406,24 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     if !LEVELS.contains(&level) {
         let shown = atom.get("level").map_or("None".into(), value_repr);
         return Err(AtomError(format!("unknown atom level: {shown}")));
+    }
+    let origin_write = match atom.get("origin") {
+        None | Some(Value::Null) => OriginWrite::Default,
+        Some(Value::String(s)) if s.is_empty() => OriginWrite::Default,
+        Some(Value::String(s)) if crate::atom::known_origin(s) => OriginWrite::Keep,
+        Some(other) => OriginWrite::Refuse(value_repr(other)),
+    };
+    match origin_write {
+        OriginWrite::Default => {
+            atom.insert(
+                "origin".into(),
+                Value::String(crate::atom::USER_DECLARED.to_string()),
+            );
+        }
+        OriginWrite::Keep => {}
+        OriginWrite::Refuse(shown) => {
+            return Err(AtomError(format!("unknown atom origin: {shown}")));
+        }
     }
     let text = match atom.get("text").and_then(Value::as_str) {
         Some(t) if !t.trim().is_empty() => t.to_string(),
@@ -635,6 +661,59 @@ pub fn is_live_at(atom: &Map<String, Value>, at: &str) -> bool {
         field_stamp(atom, "valid_to"),
         at,
     )
+}
+
+/// The origin on a record. A missing or empty field reads as
+/// [`crate::atom::USER_DECLARED`] and the map is not written.
+#[must_use]
+pub fn origin_of(atom: &Map<String, Value>) -> &str {
+    match atom.get("origin").and_then(Value::as_str) {
+        Some(name) if !name.is_empty() => name,
+        _ => crate::atom::USER_DECLARED,
+    }
+}
+
+/// Write the default origin onto a copy the caller is about to return.
+///
+/// A stored record is left alone. Call this on the answer, not on the row
+/// the store handed back.
+pub fn fill_origin(atom: &mut Map<String, Value>) {
+    let missing = atom
+        .get("origin")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty();
+    if missing {
+        atom.insert(
+            "origin".into(),
+            Value::String(crate::atom::USER_DECLARED.to_string()),
+        );
+    }
+}
+
+/// The content label, when the writer set one.
+#[must_use]
+pub fn content_of(atom: &Map<String, Value>) -> Option<&str> {
+    atom.get("content")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether the correction hook marked this write.
+#[must_use]
+pub fn hook_of(atom: &Map<String, Value>) -> bool {
+    atom.get("hook").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Trust used when ranking or promoting: the declared number, capped when
+/// authoritative content sits on a tool echo or an external atom.
+#[must_use]
+pub fn rank_trust(atom: &Map<String, Value>, missing: f64) -> f64 {
+    let declared = match atom.get("trust") {
+        None | Some(Value::Null) => missing,
+        Some(other) => other.as_f64().unwrap_or(missing),
+    };
+    crate::atom::capped_trust(origin_of(atom), content_of(atom), declared)
 }
 
 /// Review clock. A missing `due_at` is not due, and `valid_to` is not consulted.
@@ -1890,6 +1969,61 @@ The build failed. Look at the log. It is the writer.";
         }));
         validate(&mut a).unwrap();
         assert_eq!(a["something_else"], json!({"nested": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn an_old_atom_reads_as_user_declared_and_stays_unwritten() {
+        let stored = atom(json!({
+            "id": "old",
+            "kind": "lesson",
+            "text": "Reviews open with a check.",
+            "workspace": "w"
+        }));
+        let before = stored.clone();
+        assert_eq!(origin_of(&stored), crate::atom::USER_DECLARED);
+        assert_eq!(stored, before, "a read does not write the field back");
+        let mut answered = stored.clone();
+        fill_origin(&mut answered);
+        assert_eq!(answered["origin"], json!(crate::atom::USER_DECLARED));
+        assert!(!stored.contains_key("origin"));
+    }
+
+    #[test]
+    fn an_origin_is_kept_and_an_unknown_one_is_refused() {
+        let mut kept = atom(json!({
+            "kind": "voice", "text": "A claim.", "workspace": "w", "origin": "peer"
+        }));
+        validate(&mut kept).unwrap();
+        assert_eq!(kept["origin"], json!("peer"));
+
+        let mut bare = atom(json!({"kind": "voice", "text": "A claim.", "workspace": "w"}));
+        validate(&mut bare).unwrap();
+        assert_eq!(bare["origin"], json!("user-declared"));
+
+        let mut forged = atom(json!({
+            "kind": "voice", "text": "A claim.", "workspace": "w", "origin": "forged"
+        }));
+        assert_eq!(
+            validate(&mut forged).unwrap_err().0,
+            "unknown atom origin: forged"
+        );
+    }
+
+    #[test]
+    fn an_authoritative_echo_ranks_at_the_origin_ceiling() {
+        let echo = atom(json!({
+            "origin": "tool-echo",
+            "content": "authoritative",
+            "trust": 5.0
+        }));
+        let user = atom(json!({
+            "origin": "user-declared",
+            "content": "authoritative",
+            "trust": 5.0
+        }));
+        assert_eq!(rank_trust(&echo, 1.0), 0.2);
+        assert_eq!(rank_trust(&user, 1.0), 5.0);
+        assert_eq!(rank_trust(&atom(json!({"trust": 5.0})), 1.0), 5.0);
     }
 
     #[test]

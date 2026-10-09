@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- Every atom carries an `origin`: `user-declared`, `agent-derived`, `tool-echo`, `external` or `peer`. A stored atom with none reads as `user-declared` and is left as stored. An `agent-derived` write and a hook write are proposals until an accept. Content typed `authoritative` on a tool echo or an external atom ranks and promotes at that origin.
+
 ## 0.13.0 (2026-10-09)
 
 - Seat mail is stored as atoms. A `message` is one letter and a `receipt` is one read. A `group` atom is one membership change. The two-sentence cap does not apply; the text stops at 500 characters. A later mail atom does not close an earlier one, and a repeat is kept. Search and recall leave mail out unless `kind` names it.

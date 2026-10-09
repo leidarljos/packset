@@ -45,7 +45,7 @@ impl Hints {
 }
 
 fn trust_of(atom: &Record) -> f64 {
-    atom.get("trust").and_then(Value::as_f64).unwrap_or(0.0)
+    record::rank_trust(atom, 0.0)
 }
 
 fn text_of(atom: &Record) -> &str {
@@ -277,7 +277,10 @@ pub fn recall(
     // ranked away from a reader who was going to see all of it.
     if live.len() <= cap {
         let sorted = sort_atoms(&live, now);
-        return apply_budget(sorted.into_iter().take(cap).collect(), TEXT_BUDGET);
+        return expose(apply_budget(
+            sorted.into_iter().take(cap).collect(),
+            TEXT_BUDGET,
+        ));
     }
 
     // With a cue in hand the due queue is narrowed to what touches it and
@@ -322,7 +325,18 @@ pub fn recall(
             break;
         }
     }
-    apply_budget(picked, TEXT_BUDGET)
+    expose(apply_budget(picked, TEXT_BUDGET))
+}
+
+/// Put `origin` on the answer. The caller's records are not the answer.
+fn expose(atoms: Vec<Record>) -> Vec<Record> {
+    atoms
+        .into_iter()
+        .map(|mut atom| {
+            record::fill_origin(&mut atom);
+            atom
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -363,6 +377,32 @@ mod tests {
             .collect();
         let got = recall(&live, &[], &Hints::default(), None, NOW, None);
         assert_eq!(got.len(), 5, "nothing is ranked away from a full reader");
+        assert!(got.iter().all(|a| a["origin"] == "user-declared"));
+        assert!(live.iter().all(|a| !a.contains_key("origin")));
+    }
+
+    #[test]
+    fn an_authoritative_tool_echo_sorts_at_its_origin() {
+        let live = vec![
+            atom(json!({
+                "id": "echo", "text": "x", "trust": 5.0, "ts": NOW,
+                "origin": "tool-echo", "content": "authoritative"
+            })),
+            atom(json!({
+                "id": "user", "text": "x", "trust": 5.0, "ts": NOW,
+                "origin": "user-declared", "content": "authoritative"
+            })),
+        ];
+        let got = sort_atoms(&live, NOW);
+        assert_eq!(ids(&got), vec!["user".to_string(), "echo".to_string()]);
+        let answered = recall(&live, &[], &Hints::default(), None, NOW, None);
+        assert_eq!(
+            answered
+                .iter()
+                .map(|a| a["origin"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            vec!["user-declared".to_string(), "tool-echo".to_string()]
+        );
     }
 
     #[test]

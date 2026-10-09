@@ -102,6 +102,7 @@ Field                                Meaning
 ==================================== ====================================================================================================================================================================================================================================================================================================================================================
 ``kind``                             one of ``voice``, ``habit``, ``cache-pointer``, ``preference``, ``lesson``, ``goal``, ``conclusion``, ``card_line``, ``summary``, ``correction``, ``belief``, ``trust``, ``persona``, ``prediction``, ``rule``, ``outcome``, ``message``, ``receipt``, ``group``
 ``level``                            ``explicit`` for a claim a person or seat wrote
+``origin``                           ``user-declared``, ``agent-derived``, ``tool-echo``, ``external`` or ``peer``; a record with none reads as ``user-declared`` and stays unwritten. An ``agent-derived`` write and a hook write are proposals until an accept. Content typed ``authoritative`` on a tool echo or an external atom ranks and promotes at that origin
 ``text``                             the claim: at most two sentences of at most twenty-five words; mail may be longer, up to 500 characters
 ``workspace``                        required
 ``set``                              optional; a checked name

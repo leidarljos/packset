@@ -217,10 +217,7 @@ pub fn tokens_score(query_tokens: &[String], hay: &[String]) -> f64 {
 }
 
 fn trust_of(atom: &Record) -> f64 {
-    match atom.get("trust") {
-        None | Some(Value::Null) => 1.0,
-        Some(other) => other.as_f64().unwrap_or(1.0),
-    }
+    record::rank_trust(atom, 1.0)
 }
 
 fn atom_in_set(atom: &Record, set: Option<&str>) -> bool {
@@ -329,6 +326,7 @@ fn atom_hit(atom: &Record, score: f64) -> Value {
         "ts": atom.get("ts").cloned().unwrap_or(Value::Null),
         "due_at": atom.get("due_at").cloned().unwrap_or(Value::Null),
         "entities": atom.get("entities").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "origin": record::origin_of(atom),
         "score": score,
     });
     // Where the claim was written, for an audit that reads a hit's lineage.
@@ -838,6 +836,48 @@ mod tests {
             .unwrap()
             .clone();
         assert!(atom_hit(&without, 1.0).get("source").is_none());
+        assert_eq!(atom_hit(&without, 1.0)["origin"], json!("user-declared"));
+    }
+
+    #[test]
+    fn an_authoritative_tool_echo_ranks_below_a_user_declaration() {
+        let text = "prefer ripgrep";
+        let echo = json!({
+            "id": "echo",
+            "kind": "lesson",
+            "text": text,
+            "origin": "tool-echo",
+            "content": "authoritative",
+            "trust": 1.0,
+            "ts": NOW,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let user = json!({
+            "id": "user",
+            "kind": "lesson",
+            "text": text,
+            "origin": "user-declared",
+            "content": "authoritative",
+            "trust": 1.0,
+            "ts": NOW,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let atoms = [echo, user];
+        let hits = search_linear(&ask("", "", &atoms, "ripgrep", 10, None));
+        let ids: Vec<&str> = hits
+            .iter()
+            .filter(|h| h["field"] == "atom")
+            .filter_map(|h| h["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["user", "echo"], "{hits:?}");
+        assert_eq!(
+            hits.iter().find(|h| h["id"] == "echo").unwrap()["origin"],
+            "tool-echo"
+        );
     }
 
     /// The scan over cached tokens is the scan, entities and a partial list
