@@ -40,10 +40,9 @@ packset-client = { path = "../packset-client", version = "0.11.0" }
 serde.workspace = true
 serde_json.workspace = true
 packset-core = { path = "../packset-core", version = "0.11.0" }
-# The writer's: the LMDB store, the proposal log's ordered map, HTTP.
+# The writer's: the LMDB store and the proposal log's ordered map.
 heed = "0.20"
 indexmap = "2"
-tiny_http = "0.12"
 # The MCP surface's.
 rmcp = { version = "3.2", features = ["server", "transport-io", "transport-async-rw", "macros"] }
 schemars = "1"
