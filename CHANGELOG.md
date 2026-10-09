@@ -2,6 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.12.1 (2026-10-09)
+
+- `snapper-fmt` is the published 0.11.9. A git branch cannot be published.
+- The pinned toolchain installs rustfmt and clippy.
+
 ## 0.12.0 (2026-10-09)
 
 - The writer keeps accepting after the process runs out of descriptors.

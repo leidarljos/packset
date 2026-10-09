@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "packset"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "heed 0.20.5",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "packset-client"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "packset-core",
  "serde",
@@ -2923,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "criterion",
  "rust-stemmers",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "packset-daemon"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "heed 0.20.5",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "packset-embed"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "fastembed",
@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "packset-milli"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "milli",
@@ -3930,8 +3930,9 @@ checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
 name = "snapper-fmt"
-version = "0.11.7"
-source = "git+https://github.com/TurtleTech-ehf/snapper?branch=fix%2Fsentence-starts#ee1f49e9101a6cef5055273f883f0929002078ba"
+version = "0.11.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "936cc44b8950cc8d24c6ff1471b01657b280762e5243b2e6f55e0bc31b52da30"
 dependencies = [
  "anyhow",
  "imara-diff",
