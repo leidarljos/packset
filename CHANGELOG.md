@@ -4,6 +4,19 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A pooled dense batch spreads over the free encoders instead of
+  queueing whole behind slot zero: the pump still coalesces arrivals
+  into one batch, but `run_group` now cuts it into one chunk per live
+  slot and encodes the chunks at once (`encode_spread`), reassembled in
+  order. Before, the single pump thread held one slot for the whole
+  batch, so a second model neither answered nor warmed -- the first
+  burst paid every model load in series on the first slot. A one-chunk
+  batch encodes exactly as before, so single-slot hosts and lone texts
+  never pay for a thread, and a failed chunk fails the batch the way
+  one `encode_now` would: a partial answer would silently thin the
+  panel. Pinned by `a_batch_spreads_over_at_most_one_chunk_per_slot`
+  (the planner) and `a_batch_encodes_on_one_child_per_free_slot`
+  (four texts, two workers, two stub children).
 - A pooled dense wait takes whichever encoder frees first instead of
   queueing behind slot zero: `query_slot` used to hand every waiter the
   first slot when all were busy, so a freed second encoder idled while

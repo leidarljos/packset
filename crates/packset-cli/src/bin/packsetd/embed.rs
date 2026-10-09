@@ -457,12 +457,73 @@ fn dispatch(batch: Vec<Pending>) {
     run_group(docs, false);
 }
 
+/// How many dense slots a batch may spread over: one on a single-slot
+/// host, so its path stays exactly as it was, else the live pool's size.
+fn spread_slots() -> usize {
+    if query_workers() <= 1 {
+        return 1;
+    }
+    pool_slots().len().max(1)
+}
+
+/// How a batch spreads over the pool: contiguous index ranges, at most one
+/// chunk per slot, covering every text exactly once with no gaps. Fewer
+/// texts than slots means fewer chunks; no slot waits on an empty range.
+fn plan_chunks(jobs: usize, slots: usize) -> Vec<std::ops::Range<usize>> {
+    if jobs == 0 || slots == 0 {
+        return Vec::new();
+    }
+    let parts = jobs.min(slots).max(1);
+    let base = jobs / parts;
+    let extra = jobs % parts;
+    let mut out = Vec::with_capacity(parts);
+    let mut start = 0;
+    for i in 0..parts {
+        let len = base + usize::from(i < extra);
+        out.push(start..start + len);
+        start += len;
+    }
+    out
+}
+
+/// Encode a batch across the pool: one chunk per free slot at once,
+/// reassembled in order. A one-chunk batch encodes exactly as before, so
+/// single-slot hosts and lone texts never pay for a thread. A chunk that
+/// fails fails the batch, the way one `encode_now` over the whole batch
+/// would: a partial answer would silently thin the panel.
+fn encode_spread(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
+    let ranges = plan_chunks(texts.len(), spread_slots());
+    if ranges.len() <= 1 {
+        return encode_now(texts, query);
+    }
+    let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    out.resize_with(texts.len(), Vec::new);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(ranges.len());
+        for range in &ranges {
+            handles.push(scope.spawn(|| encode_now(&texts[range.clone()], query)));
+        }
+        for (range, handle) in ranges.iter().zip(handles) {
+            match handle.join() {
+                Ok(Some(vecs)) if vecs.len() == range.len() => {
+                    out[range.clone()].clone_from_slice(&vecs);
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    })
+}
+
 fn run_group(jobs: Vec<Pending>, query: bool) {
     if jobs.is_empty() {
         return;
     }
     let texts: Vec<String> = jobs.iter().map(|j| j.text.clone()).collect();
-    let vecs = encode_now(&texts, query);
+    // One chunk per free slot rather than the whole batch behind one: the
+    // pump still coalesces arrivals, but a pooled host now spends its
+    // extra models instead of warming only the first.
+    let vecs = encode_spread(&texts, query);
     let mut answers = vecs.unwrap_or_default().into_iter();
     for job in jobs {
         let _ = job.tx.send(answers.next());
@@ -781,6 +842,116 @@ mod tests {
             );
         }
         assert!(poll_slots(&[]).is_none());
+    }
+
+    /// A batch spreads over at most one chunk per slot: contiguous,
+    /// gapless ranges covering every text exactly once, never more chunks
+    /// than slots and never an empty one. No threads, no model.
+    #[test]
+    fn a_batch_spreads_over_at_most_one_chunk_per_slot() {
+        assert!(plan_chunks(0, 4).is_empty());
+        assert!(plan_chunks(5, 0).is_empty());
+        assert_eq!(plan_chunks(1, 4), vec![0..1]);
+        assert_eq!(plan_chunks(4, 2), vec![0..2, 2..4]);
+        assert_eq!(plan_chunks(7, 3), vec![0..3, 3..5, 5..7]);
+        let ranges = plan_chunks(10, 4);
+        assert_eq!(ranges.len(), 4);
+        let mut seen = vec![false; 10];
+        for (i, range) in ranges.iter().enumerate() {
+            if i > 0 {
+                assert_eq!(range.start, ranges[i - 1].end, "a gap between chunks");
+            }
+            assert!(!range.is_empty(), "a slot waits on nothing");
+            for j in range.clone() {
+                assert!(!seen[j], "two chunks share index {j}");
+                seen[j] = true;
+            }
+        }
+        assert!(seen.iter().all(|seen| *seen), "a text has no chunk");
+    }
+
+    /// A pooled batch encodes on one child per free slot: four texts with
+    /// two workers start two stub children, not one child twice. The
+    /// stubs sleep before answering, so the second chunk cannot inherit
+    /// the first slot before it is free; two distinct child PIDs are the
+    /// assertion. No pump, no timing windows: `encode_spread` joins both
+    /// chunks itself. Serialised on `EMBED` with the other stub tests,
+    /// and the pool slots are cleared behind it.
+    #[test]
+    fn a_batch_encodes_on_one_child_per_free_slot() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let old_workers = std::env::var_os("PACKSET_EMBED_QUERY_WORKERS");
+        let old_embed = std::env::var_os("PACKSET_EMBED");
+        // SAFETY: EMBED is held, so no other test reads these variables.
+        unsafe { std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", "2") };
+        let dir = tempfile::tempdir().unwrap();
+        let pids = dir.path().join("pids");
+        let stub = dir.path().join("packset-embed");
+        std::fs::write(
+            &stub,
+            format!(
+                r#"#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+log = pathlib.Path(r"{log}")
+for line in sys.stdin:
+    try:
+        asked = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    with log.open("a") as handle:
+        handle.write(str(os.getpid()) + "\n")
+    time.sleep(0.2)
+    count = len(asked.get("texts", [])) or 1
+    if "texts" in asked:
+        print(json.dumps({{"vs": [[0.1]] * count}}), flush=True)
+    else:
+        print(json.dumps({{"v": [0.1]}}), flush=True)
+"#,
+                log = pids.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        // SAFETY: EMBED is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
+        for slot in pool_slots() {
+            if let Ok(mut held) = slot.lock() {
+                *held = None;
+            }
+        }
+        let texts = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let vecs = encode_spread(&texts, true);
+        for slot in pool_slots() {
+            if let Ok(mut held) = slot.lock() {
+                *held = None;
+            }
+        }
+        unsafe {
+            match old_workers {
+                Some(v) => std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", v),
+                None => std::env::remove_var("PACKSET_EMBED_QUERY_WORKERS"),
+            }
+            match old_embed {
+                Some(v) => std::env::set_var("PACKSET_EMBED", v),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        drop(_held);
+        let vecs = vecs.expect("the stubs answer");
+        assert_eq!(vecs.len(), 4, "{vecs:?}");
+        let lines = std::fs::read_to_string(&pids).unwrap();
+        let mut ids: Vec<_> = lines.lines().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 2, "one batch, two slots, two children: {lines}");
     }
 
     /// An encoder that is on disk but does not answer is reported as not
