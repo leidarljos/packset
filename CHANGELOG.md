@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The explanation names Zep's graph, which records when a fact became true and when the store learned it, and names A-MEM beside agentic memory. The measured rows are unchanged.
+
 ## 0.12.1 (2026-10-09)
 
 - `snapper-fmt` is the published 0.11.9. A git branch cannot be published.

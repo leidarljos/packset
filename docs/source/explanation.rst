@@ -184,7 +184,11 @@ model thinking about a context before the question arrives. The pack
 runs no model on a write. The review clock and the consolidation rule
 are the passes that move a claim.
 
-Agentic memory (doi:10.48550/arXiv.2502.12110) writes a note with
+Zep's graph (doi:10.48550/arXiv.2501.13956) records when a fact became
+true and when the store learned it. A pack claim carries the time it was
+written and the window a later claim closes.
+
+Agentic memory, A-MEM (doi:10.48550/arXiv.2502.12110), writes a note with
 keywords, tags and links, and a new note can update the context and
 attributes of an older one. The pack's links gain weight with use and
 lose it with disuse. An old claim is closed, not edited, and the closed
