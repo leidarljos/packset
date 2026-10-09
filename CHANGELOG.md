@@ -4,6 +4,18 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A pooled dense wait takes whichever encoder frees first instead of
+  queueing behind slot zero: `query_slot` used to hand every waiter the
+  first slot when all were busy, so a freed second encoder idled while
+  searches still lined up. The encode path now polls the pool a
+  millisecond at a time (`lock_dense`) and holds the first free slot.
+  Single-slot hosts block on their one child exactly as before, and
+  neither path takes a deadline -- a dense ballot that gave up under
+  load would silently thin the panel. Pinned by
+  `waiters_take_whichever_pool_slot_is_free`. The reference also said
+  `PACKSET_EMBED_QUERY_WORKERS` defaulted to 2; the code moved 2 to 1
+  in an earlier memory fix but the docs never followed, so they now
+  say 1.
 - A requested rerank over a lone hit reports `settled` and never
   reaches the model: one candidate cannot be reordered, so the forward
   pass would only return the same order. The default hook path asks for

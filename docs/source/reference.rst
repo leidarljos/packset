@@ -110,7 +110,7 @@ Variable                                                   Read by              
 ``PACKSET_HOME``                                           ``packsetd``              the pack home; default ``~/.grokinside/memory``; two writers on one host want two homes and two ports
 ``PACKSET_WORKSPACE``                                      clients                   the workspace when none is given
 ``PACKSET_FUSE``, ``PACKSET_DIVERSIFY``, ``PACKSET_DECAY`` writer                    the panel
-``PACKSET_EMBED_QUERY_WORKERS``                            writer                    query encoders kept side by side, default 2; each holds one model in memory
+``PACKSET_EMBED_QUERY_WORKERS``                            writer                    query encoders kept side by side, default 1; each holds one model in memory; a waiter takes whichever slot frees first
 ``PACKSET_STEM``                                           writer                    ``off`` turns lexical stemming off
 ``PACKSET_EMBED``                                          writer                    the encoder binary; else beside the writer, else on ``PATH``
 ``PACKSET_EMBED_CACHE``                                    encoder                   where models live; default ``$XDG_CACHE_HOME/packset/embed``

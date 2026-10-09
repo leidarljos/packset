@@ -333,11 +333,20 @@ fn query_workers() -> usize {
         .unwrap_or(1)
 }
 
-/// The query encoders: the first one free answers; when all are busy the
-/// caller waits on the first, which keeps every slot warm and none idle.
-fn query_slot() -> &'static Slot {
+/// The query encoders side by side. Sized once, the first time a pooled
+/// host asks, so a later change to the variable does not resize a live
+/// pool.
+fn pool_slots() -> &'static [Slot] {
     static POOL: OnceLock<Vec<Slot>> = OnceLock::new();
-    let pool = POOL.get_or_init(|| (0..query_workers()).map(|_| Mutex::new(None)).collect());
+    POOL.get_or_init(|| (0..query_workers()).map(|_| Mutex::new(None)).collect())
+}
+
+/// The query encoders: the first one free answers, else the first slot.
+/// The encode path itself does not wait here; see `lock_dense`, which
+/// takes whichever slot frees first so no slot idles while searches
+/// wait.
+fn query_slot() -> &'static Slot {
+    let pool = pool_slots();
     for s in pool {
         if let Ok(guard) = s.try_lock() {
             drop(guard);
@@ -345,6 +354,37 @@ fn query_slot() -> &'static Slot {
         }
     }
     &pool[0]
+}
+
+/// One pass over the pool: the first free slot's guard, if any. A
+/// poisoned slot is recovered, the way `wait_for` recovers the rerank
+/// slot, rather than failing the encode behind it.
+fn poll_slots(slots: &[Slot]) -> Option<std::sync::MutexGuard<'_, Option<Encoder>>> {
+    for s in slots {
+        match s.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+    }
+    None
+}
+
+/// A held query encoder. A single-slot host blocks on its one child, as
+/// before; a pooled host spins the pool a millisecond at a time and
+/// takes whichever slot frees first. No deadline either way: a dense
+/// ballot that gave up under load would silently thin the panel, so a
+/// search waits for its encoder the way it always has.
+fn lock_dense() -> Option<std::sync::MutexGuard<'static, Option<Encoder>>> {
+    if query_workers() <= 1 {
+        return dense_slot().lock().ok();
+    }
+    loop {
+        if let Some(guard) = poll_slots(pool_slots()) {
+            return Some(guard);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Start every query encoder now, side by side, so the first agents to ask
@@ -446,7 +486,7 @@ pub fn last_dense() -> Option<bool> {
 
 fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     let binary = binary()?;
-    let mut held = dense_slot().lock().ok()?;
+    let mut held = lock_dense()?;
     for _ in 0..2 {
         if held.as_mut().is_none_or(|running| !running.alive()) {
             *held = Encoder::start(&binary, query);
@@ -716,6 +756,31 @@ mod tests {
         assert!(started.elapsed() >= std::time::Duration::from_millis(50));
         drop(held);
         assert!(wait_for(&slot, std::time::Duration::from_millis(50)).is_some());
+    }
+
+    /// A waiter takes whichever pool slot is free, not the first: with
+    /// the first slot held, the poll answers from the second, and with
+    /// both free it prefers the first. No threads, no timing.
+    #[test]
+    fn waiters_take_whichever_pool_slot_is_free() {
+        let slots: [Slot; 2] = [Mutex::new(None), Mutex::new(None)];
+        let held = slots[0].lock().unwrap();
+        {
+            let _guard = poll_slots(&slots).expect("the free slot answers");
+            assert!(
+                slots[1].try_lock().is_err(),
+                "the poll took the held slot"
+            );
+        }
+        drop(held);
+        {
+            let _guard = poll_slots(&slots).expect("a slot answers");
+            assert!(
+                slots[0].try_lock().is_err(),
+                "the poll skipped the free first slot"
+            );
+        }
+        assert!(poll_slots(&[]).is_none());
     }
 
     /// An encoder that is on disk but does not answer is reported as not
