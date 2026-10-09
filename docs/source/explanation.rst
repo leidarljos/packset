@@ -174,21 +174,35 @@ is between retrievers under one reader, which is how the retrieval half of
 those systems is measured too. The interned table is
 ``docs/orgmode/results/longmemeval-s-qa.org`` in this repository.
 
-The systems above differ in retrieval. Four more differ in who writes.
+What differs in the write path
+==============================
+
 Letta, formerly MemGPT (doi:10.48550/arXiv.2310.08560), keeps a core
-memory the model edits, and its sleep-time compute
-(doi:10.48550/arXiv.2504.13171) reorganises the store between turns.
-The pack's reorganisation is the review clock and the consolidation
-rule, and neither calls a model. A-MEM (doi:10.48550/arXiv.2502.12110)
-has the model write links and rewrite older notes when a new one
-arrives. A link here gains weight with use and loses it with disuse,
-and an old claim is closed rather than rewritten. MemoryBank
-(doi:10.48550/arXiv.2305.10250) forgets on an Ebbinghaus curve
-refreshed by recall. The decay below is the Free Spaced Repetition
-Scheduler's retrievability, and a forgotten claim is a tombstone after
-lapsed reviews. Generative Agents (doi:10.48550/arXiv.2304.03442)
-reflect a ranking into new memories. A proposal here becomes a claim
-when somebody accepts it.
+memory the model edits with tools, and pages blocks in and out of the
+context. Its sleep-time compute (doi:10.48550/arXiv.2504.13171) is a
+model thinking about a context before the question arrives. The pack
+runs no model on a write. The review clock and the consolidation rule
+are the passes that move a claim.
+
+Agentic memory (doi:10.48550/arXiv.2502.12110) writes a note with
+keywords, tags and links, and a new note can update the context and
+attributes of an older one. The pack's links gain weight with use and
+lose it with disuse. An old claim is closed, not edited, and the closed
+claim keeps its window.
+
+MemoryBank (doi:10.48550/arXiv.2305.10250) forgets on an Ebbinghaus
+curve that recall refreshes. The clock in the next section is a power
+law, and a forgotten claim is a tombstone that says why.
+
+Generative Agents (doi:10.48550/arXiv.2304.03442) rank by recency,
+importance and relevance, and reflection writes new memories. The pack
+ranks by a fused panel, with decay as one ballot. A proposal becomes a
+claim when a person accepts it, and not before.
+
+HippoRAG (doi:10.48550/arXiv.2405.14831) runs personalized PageRank
+over a passage graph. The accurate-retrieval table further down reports
+HippoRAG-v2 beside BM25. That table does not measure Letta, agentic
+memory, MemoryBank or Generative Agents.
 
 Forgetting is a feature
 =======================

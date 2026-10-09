@@ -4,9 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
-- The explanation names who writes in Letta, A-MEM, MemoryBank and
-  Generative Agents. The pack's clock, its links and its proposals do
-  not call a model to write.
+- The explanation names who writes in Letta, agentic memory, MemoryBank,
+  Generative Agents and HippoRAG. The measured rows are unchanged.
+  Sleep-time compute is a model thinking before the question. It is not
+  a reorganisation of this store.
+
+- A trust row scoped by its entities does not close the unscoped row of
+  the same voters. An empty entity list and a missing one are the same
+  unscoped row.
 
 - A kind: `outcome`, the option an issue closed on (`issue`, `choice`).
   The issue's ballots and its outcome say which voters were right, so a
