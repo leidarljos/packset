@@ -37,7 +37,8 @@ Install
 
 ``packset ensure`` starts the writer when it is down. With nothing set, every
 client uses that writer on the default port. The dense scorer is a separate
-binary, ``packset-embed``, and the pack answers without it.
+binary, ``packset-embed``, built against ONNX Runtime compiled from source.
+The pack answers without it, and a sitting's recall stays lexical.
 
 First minute
 ============

@@ -114,16 +114,64 @@ $ packset fire 1bd8ee9e... e7574b84...     # or name the claims yourself
 * Turn on the dense scorer
 
 The dense ballot needs the =packset-embed= binary beside =packsetd= or on
-=PATH=, and a model it can load. Models are cached under
-=$XDG_CACHE_HOME/packset/embed= unless =PACKSET_EMBED_CACHE= names another
-directory. Without the binary the pack answers from the lexical ballots and
-says so in =/v1/status=.
+=PATH=, and a model it can load. The default build links ONNX Runtime that
+you compiled, or a distro =libonnxruntime= of 1.24 or newer that
+=pkg-config= can see. The runtime this =ort= publishes as a prebuilt is
+1.28.0, and that is the version to compile. The prebuilt download from
+cdn.pyke.io is =--features download-binaries=, off unless named.
+=ORT_SKIP_DOWNLOAD=1=, =ORT_OFFLINE=1= or =CARGO_NET_OFFLINE=1= refuse that
+download even with the feature on.
 
 #+begin_src console
-$ cargo binstall packset-embed
-$ packset stop && packset ensure
-$ packset status seat | jq .dense
+$ crates/packset-embed/build-onnxruntime.sh "$HOME/onnxruntime"
+$ ORT_LIB_PATH=$HOME/onnxruntime/lib ORT_PREFER_DYNAMIC_LINK=1 cargo build --release -p packset-embed
+$ export LD_LIBRARY_PATH=$HOME/onnxruntime/lib
 #+end_src
+
+=pkg-config= is tried first. A =libonnxruntime= it reports at 1.24 or
+newer is the one that is linked. =ORT_LIB_PATH= is the directory used when
+that probe does not succeed: =libonnxruntime.so= for a shared build, or
+=libonnxruntime.a= for a static one. =ORT_LIB_LOCATION= is the same
+variable. =ORT_PREFER_DYNAMIC_LINK=1= selects the shared library; leave it
+unset to link the static archive. Point =PKG_CONFIG_PATH= at a prefix that
+ships =libonnxruntime.pc= when that is the library you want.
+
+A runtime load does not link at build time:
+
+#+begin_src console
+$ cargo build --release -p packset-embed --features load-dynamic
+$ ORT_DYLIB_PATH=$HOME/onnxruntime/lib/libonnxruntime.so packset-embed
+#+end_src
+
+The default model is BGE small English v1.5. A hub checkout of it, with
+=onnx/model.onnx=, =tokenizer.json=, =config.json=,
+=special_tokens_map.json= and =tokenizer_config.json=, is the model. The
+first run does not fetch when those files are present.
+
+#+begin_src console
+$ PACKSET_EMBED_MODEL_PATH=$HOME/models/bge-small-en-v1.5 packset-embed
+#+end_src
+
+Without that variable the same files under
+=$PACKSET_EMBED_CACHE/user/bge-small/= are used. The cache is
+=$XDG_CACHE_HOME/packset/embed= unless =PACKSET_EMBED_CACHE= names another
+directory. A directory that is missing a file is an error. An absent
+directory is the Hugging Face fetch for a model the runtime knows.
+=HF_HUB_OFFLINE=1= refuses that fetch. =e5-large-v2= has no fetch; it is
+files only, under =user/e5-large-v2/=.
+
+Without the binary, or when it does not answer, the pack stays on the
+lexical ballots and says so in =/v1/status= (=embedder.available= is
+false). A sitting still opens: doctor reads that status, and recall,
+island and search run on the lexical ballots.
+
+#+begin_src console
+$ packset stop && packset ensure
+$ packset status seat | jq .embedder
+#+end_src
+
+The published binary remains =cargo binstall packset-embed= for a seat
+that does not compile the runtime.
 
 * Run the second stage on one question
 

@@ -114,6 +114,9 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 | =PACKSET_STEM= | writer | =off= turns lexical stemming off |
 | =PACKSET_EMBED= | writer | the encoder binary; else beside the writer, else on =PATH= |
 | =PACKSET_EMBED_CACHE= | encoder | where models live; default =$XDG_CACHE_HOME/packset/embed= |
+| =PACKSET_EMBED_MODEL_PATH= | encoder | hub layout of the named model (=onnx/model.onnx= and the tokenizer files); a present directory is used as-is |
+| =ORT_LIB_PATH=, =ORT_LIB_LOCATION= | build | directory of a source or system ONNX Runtime; =ORT_PREFER_DYNAMIC_LINK=1= links the shared library; =ORT_DYLIB_PATH= is that library for =--features load-dynamic= |
+| =HF_HUB_OFFLINE= | encoder | =1= refuses the model fetch; a seeded directory still loads |
 | =PACKSET_RERANK=, =PACKSET_RERANK_MODEL= | writer, encoder | the second stage on every search, and its model |
 
 * Crates

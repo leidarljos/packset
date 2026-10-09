@@ -17,4 +17,7 @@ This crate is one habitat. The seat that sits on it is
 | May this argv run? | ljos-policyd | [[https://leidarljos.github.io/ljos-policyd/][ljos-policyd]] |
 
 =ljos sitting= opens: doctor, cards, due, island, recall, timeline, claim.
+An absent encoder leaves that opening intact. Doctor reads =/v1/status=,
+where =embedder.available= is false, and recall, island and search stay
+on the lexical ballots.
 =ljos finish= closes the session node. Walk: [[https://leidarljos.github.io/docs/sit/][Sit]] · [[https://leidarljos.github.io/docs/start/][First write]].

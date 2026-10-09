@@ -21,15 +21,10 @@ milli:
     fi
     cargo build -p packset-milli --release
 
-# The dense projection. Same rule as milli: it carries a native runtime and a
-# model download, so it is built where the model is allowed to live.
+# The dense projection. Links the ONNX Runtime in ORT_LIB_PATH, or the one
+# pkg-config finds. The pyke download is
+# `cargo build -p packset-embed --features download-binaries`.
 embed:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ "${PACKSET_BUILDER:-}" != 1 ]; then
-        echo "just embed: build on the builder (PACKSET_BUILDER=1), not here" >&2
-        exit 1
-    fi
     cargo build -p packset-embed --release
 
 ensure:

@@ -20,4 +20,7 @@ May this argv run?                            ljos-policyd   `ljos-policyd <http
 ============================================= ============== =============================================================
 
 ``ljos sitting`` opens: doctor, cards, due, island, recall, timeline, claim.
+An absent encoder leaves that opening intact. Doctor reads ``/v1/status``,
+where ``embedder.available`` is false, and recall, island and search stay
+on the lexical ballots.
 ``ljos finish`` closes the session node. Walk: `Sit <https://leidarljos.github.io/docs/sit/>`__ · `First write <https://leidarljos.github.io/docs/start/>`__.

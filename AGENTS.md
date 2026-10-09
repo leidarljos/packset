@@ -29,6 +29,30 @@ refuses anywhere else. Search falls back to the linear scorer
 when the binary is absent. `PACKSET_RERANK=1` (or `/v1/search?rerank=1`)
 runs the measured cross-encoder over the top 20; off by default.
 
+## The encoder
+
+`just embed` links ONNX Runtime from the system. The default build does
+not download a runtime. Compile 1.28.0 (CPU, shared library) with
+`crates/packset-embed/build-onnxruntime.sh`, then:
+
+```sh
+export ORT_LIB_PATH=$HOME/onnxruntime/lib
+export ORT_PREFER_DYNAMIC_LINK=1
+export LD_LIBRARY_PATH=$HOME/onnxruntime/lib
+cargo build --release -p packset-embed
+```
+
+`ORT_LIB_LOCATION` is the same directory. `pkg-config` is tried first
+and links a distro `libonnxruntime` of 1.24 or newer; `ORT_LIB_PATH` is
+used when that probe does not succeed.
+`--features download-binaries` is the cdn.pyke.io runtime.
+`--features load-dynamic` reads `ORT_DYLIB_PATH` at start.
+`PACKSET_EMBED_MODEL_PATH`, or `user/<model>/` under the cache, is a hub
+checkout (`onnx/model.onnx` and the four tokenizer files). When those
+files are present the model is not fetched. `HF_HUB_OFFLINE=1` refuses
+the fetch. An absent encoder leaves search, island and recall on the
+lexical ballots; `ljos doctor` reads `embedder.available: false`.
+
 ## Architecture
 
 - `crates/packset-daemon` — the writer; atoms in LMDB, cards on disk

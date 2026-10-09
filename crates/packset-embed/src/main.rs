@@ -10,6 +10,10 @@
 //!
 //! Documents and questions take different prefixes per model family (BGE
 //! instructs the question, E5 prefixes both), applied here beside the name.
+//!
+//! The binary links a system or source-built ONNX Runtime. The prebuilt
+//! runtime from cdn.pyke.io is the `download-binaries` feature. A model
+//! whose files are already on disk is read from there and not fetched.
 
 use std::io::{BufRead, Write};
 
@@ -93,6 +97,9 @@ struct Choice {
     source: Source,
     query: &'static str,
     passage: &'static str,
+    /// `<cache>/user/<seed>/`, or the directory `PACKSET_EMBED_MODEL_PATH` names.
+    seed: &'static str,
+    pooling: Pooling,
 }
 
 fn prefix_of(choice: &Choice, query: bool) -> &'static str {
@@ -115,13 +122,10 @@ fn prefix_of(choice: &Choice, query: bool) -> &'static str {
 /// files a seat puts under its cache.
 enum Source {
     Builtin(EmbeddingModel),
-    /// `<cache>/user/<dir>/` holding `onnx/model.onnx`, `tokenizer.json`,
-    /// `config.json`, `special_tokens_map.json` and `tokenizer_config.json`,
-    /// as a Hub repository lays them out.
-    Files {
-        dir: &'static str,
-        pooling: Pooling,
-    },
+    /// No Hub fetch. The weights are the hub layout under the seed directory:
+    /// `onnx/model.onnx`, `tokenizer.json`, `config.json`,
+    /// `special_tokens_map.json` and `tokenizer_config.json`.
+    Files,
 }
 
 /// BGE's instruction, on the question only.
@@ -129,37 +133,50 @@ const BGE_QUERY: &str = "Represent this sentence for searching relevant passages
 
 /// The models this binary will load, by the name a seat writes.
 fn choose(name: &str) -> Option<Choice> {
+    use EmbeddingModel as Model;
+    use Pooling::{Cls, Mean};
     use Source::Builtin;
-    let (source, query, passage) = match name {
-        "bge-small" | "" => (Builtin(EmbeddingModel::BGESmallENV15), BGE_QUERY, ""),
-        "bge-base" => (Builtin(EmbeddingModel::BGEBaseENV15), BGE_QUERY, ""),
-        "bge-large" => (Builtin(EmbeddingModel::BGELargeENV15), BGE_QUERY, ""),
+    let (source, query, passage, seed, pooling) = match name {
+        "bge-small" | "" => (
+            Builtin(Model::BGESmallENV15),
+            BGE_QUERY,
+            "",
+            "bge-small",
+            Cls,
+        ),
+        "bge-base" => (Builtin(Model::BGEBaseENV15), BGE_QUERY, "", "bge-base", Cls),
+        "bge-large" => (
+            Builtin(Model::BGELargeENV15),
+            BGE_QUERY,
+            "",
+            "bge-large",
+            Cls,
+        ),
         // Multilingual, and named so. The English model the published system
         // used is `e5-large-v2` below; these two are not interchangeable and
         // a table that says one while running the other is wrong.
         "e5-large" | "multilingual-e5-large" => (
-            Builtin(EmbeddingModel::MultilingualE5Large),
+            Builtin(Model::MultilingualE5Large),
             "query: ",
             "passage: ",
+            "e5-large",
+            Mean,
         ),
         "e5-base" => (
-            Builtin(EmbeddingModel::MultilingualE5Base),
+            Builtin(Model::MultilingualE5Base),
             "query: ",
             "passage: ",
+            "e5-base",
+            Mean,
         ),
-        "e5-large-v2" => (
-            Source::Files {
-                dir: "e5-large-v2",
-                pooling: Pooling::Mean,
-            },
-            "query: ",
-            "passage: ",
-        ),
-        "gte-large" => (Builtin(EmbeddingModel::GTELargeENV15), "", ""),
+        "e5-large-v2" => (Source::Files, "query: ", "passage: ", "e5-large-v2", Mean),
+        "gte-large" => (Builtin(Model::GTELargeENV15), "", "", "gte-large", Cls),
         "mxbai-large" => (
-            Builtin(EmbeddingModel::MxbaiEmbedLargeV1),
+            Builtin(Model::MxbaiEmbedLargeV1),
             "Represent this sentence for searching relevant passages: ",
             "",
+            "mxbai-large",
+            Cls,
         ),
         _ => return None,
     };
@@ -167,6 +184,8 @@ fn choose(name: &str) -> Option<Choice> {
         source,
         query,
         passage,
+        seed,
+        pooling,
     })
 }
 
@@ -199,44 +218,152 @@ fn cache_dir_from(
     Some(base.join("packset").join("embed"))
 }
 
+/// Hub layout a seeded model is read from. The same files a repository checkout holds.
+const MODEL_FILES: &[&str] = &[
+    "onnx/model.onnx",
+    "tokenizer.json",
+    "config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+];
+
+fn missing_weights(dir: &std::path::Path) -> Vec<&'static str> {
+    MODEL_FILES
+        .iter()
+        .copied()
+        .filter(|name| !dir.join(name).is_file())
+        .collect()
+}
+
+/// `HF_HUB_OFFLINE=1` (or `true`) means the fetch must not run.
+fn hub_is_offline(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
+/// Where the weights are, when a seat has already put them on disk.
+///
+/// `PACKSET_EMBED_MODEL_PATH` wins. Otherwise `<cache>/user/<seed>/` is used
+/// when that directory exists. A directory that exists and is short a file is
+/// an error: the fetch runs only when there is no directory. An explicit path
+/// that is short a file is an error for the same reason.
+fn model_dir_from(
+    named: Option<&std::path::Path>,
+    cache: Option<&std::path::Path>,
+    seed: &str,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    if let Some(dir) = named {
+        let missing = missing_weights(dir);
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "PACKSET_EMBED_MODEL_PATH {} is missing {}",
+                dir.display(),
+                missing.join(", ")
+            );
+        }
+        return Ok(Some(dir.to_path_buf()));
+    }
+    let Some(cache) = cache else {
+        return Ok(None);
+    };
+    let dir = cache.join("user").join(seed);
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let missing = missing_weights(&dir);
+    if missing.is_empty() {
+        return Ok(Some(dir));
+    }
+    anyhow::bail!("{} is missing {}", dir.display(), missing.join(", "))
+}
+
+fn named_model_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("PACKSET_EMBED_MODEL_PATH")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Load ONNX Runtime before any session when this build dlopens it.
+///
+/// `load-dynamic` does not link the runtime. `ORT_DYLIB_PATH` is the shared
+/// library, the variable ort reads when nothing has called `init_from` yet.
+/// Calling it here turns a missing file into this process's error instead of
+/// a panic inside the first session.
+fn prepare_runtime() -> anyhow::Result<()> {
+    #[cfg(feature = "load-dynamic")]
+    {
+        let raw = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
+        let path = raw.trim();
+        if path.is_empty() {
+            anyhow::bail!(
+                "this build loads ONNX Runtime at run time; set ORT_DYLIB_PATH to libonnxruntime.so"
+            );
+        }
+        let _ = ort::init_from(path)
+            .map_err(|err| anyhow::anyhow!("ONNX Runtime at {path}: {err}"))?
+            .commit();
+    }
+    Ok(())
+}
+
+fn load_files(dir: &std::path::Path, pooling: Pooling) -> anyhow::Result<TextEmbedding> {
+    let read = |name: &str| {
+        std::fs::read(dir.join(name))
+            .map_err(|err| anyhow::anyhow!("{name} under {}: {err}", dir.display()))
+    };
+    let files = TokenizerFiles {
+        tokenizer_file: read("tokenizer.json")?,
+        config_file: read("config.json")?,
+        special_tokens_map_file: read("special_tokens_map.json")?,
+        tokenizer_config_file: read("tokenizer_config.json")?,
+    };
+    let model =
+        UserDefinedEmbeddingModel::new(read("onnx/model.onnx")?, files).with_pooling(pooling);
+    Ok(TextEmbedding::try_new_from_user_defined(
+        model,
+        InitOptionsUserDefined::default(),
+    )?)
+}
+
+fn load_builtin(model: &EmbeddingModel, seed: &str) -> anyhow::Result<TextEmbedding> {
+    if hub_is_offline(std::env::var("HF_HUB_OFFLINE").ok().as_deref()) {
+        anyhow::bail!(
+            "HF_HUB_OFFLINE is set and {seed} is not on disk. Place onnx/model.onnx, \
+             tokenizer.json, config.json, special_tokens_map.json and tokenizer_config.json \
+             at PACKSET_EMBED_MODEL_PATH, or under the cache at user/{seed}/"
+        );
+    }
+    let mut options = TextInitOptions::new(model.clone()).with_show_download_progress(false);
+    if let Some(dir) = cache_dir() {
+        options = options.with_cache_dir(dir);
+    }
+    Ok(TextEmbedding::try_new(options)?)
+}
+
 /// Load the model a choice names.
+///
+/// A complete seed is the model. The Hub fetch is the path taken when the
+/// seed directory is absent and the model is one the runtime knows how to
+/// retrieve.
 fn load(choice: &Choice) -> anyhow::Result<TextEmbedding> {
+    let seeded = model_dir_from(
+        named_model_path().as_deref(),
+        cache_dir().as_deref(),
+        choice.seed,
+    )?;
+    if let Some(dir) = seeded {
+        return load_files(&dir, choice.pooling.clone());
+    }
     match &choice.source {
-        Source::Builtin(model) => {
-            let mut options =
-                TextInitOptions::new(model.clone()).with_show_download_progress(false);
-            if let Some(dir) = cache_dir() {
-                options = options.with_cache_dir(dir);
-            }
-            Ok(TextEmbedding::try_new(options)?)
-        }
-        Source::Files { dir, pooling } => {
-            let root = cache_dir()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "a model from files needs PACKSET_EMBED_CACHE, so the files have a place \
-                         to be"
-                    )
-                })?
-                .join("user")
-                .join(dir);
-            let read = |name: &str| {
-                std::fs::read(root.join(name))
-                    .map_err(|e| anyhow::anyhow!("{name} under {}: {e}", root.display()))
-            };
-            let files = TokenizerFiles {
-                tokenizer_file: read("tokenizer.json")?,
-                config_file: read("config.json")?,
-                special_tokens_map_file: read("special_tokens_map.json")?,
-                tokenizer_config_file: read("tokenizer_config.json")?,
-            };
-            let model = UserDefinedEmbeddingModel::new(read("onnx/model.onnx")?, files)
-                .with_pooling(pooling.clone());
-            Ok(TextEmbedding::try_new_from_user_defined(
-                model,
-                InitOptionsUserDefined::default(),
-            )?)
-        }
+        Source::Builtin(model) => load_builtin(model, choice.seed),
+        Source::Files => anyhow::bail!(
+            "{} is loaded from files. Set PACKSET_EMBED_MODEL_PATH, or place the hub layout \
+             under the cache at user/{}/",
+            choice.seed,
+            choice.seed
+        ),
     }
 }
 
@@ -262,6 +389,8 @@ fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown argument: {other}\n\n{USAGE}"),
         }
     }
+
+    prepare_runtime()?;
 
     // Named so a seat can put the weights where its policy allows, and so a
     // build machine and a run machine can share one copy.
@@ -543,14 +672,24 @@ const USAGE: &str = "packset-embed: text in, vectors out\n\
                   order given\n\
         --sparse  learned sparse weights (SPLADE++): writes {\"id\",\"s\":{\"i\",\"w\"}}\n\
     \n\
-        PACKSET_EMBED_CACHE   where the weights live\n\
-        PACKSET_EMBED_MODEL   bge-small (default), bge-base, bge-large,\n\
-                              e5-base, e5-large (multilingual), gte-large,\n\
-                              mxbai-large, or e5-large-v2 from files under\n\
-                              PACKSET_EMBED_CACHE/user/e5-large-v2/\n\
+        PACKSET_EMBED_CACHE        where models live; default $XDG_CACHE_HOME/packset/embed\n\
+        PACKSET_EMBED_MODEL        bge-small (default), bge-base, bge-large,\n\
+                                   e5-base, e5-large (multilingual), gte-large,\n\
+                                   mxbai-large, or e5-large-v2 from files\n\
+        PACKSET_EMBED_MODEL_PATH   hub layout of the named model; used as-is\n\
+        HF_HUB_OFFLINE             1 refuses the fetch; a seeded directory still loads\n\
+        ORT_LIB_PATH               build: directory of a source or system ONNX Runtime\n\
+        ORT_LIB_LOCATION           same directory, the older name\n\
+        ORT_PREFER_DYNAMIC_LINK    1 links the shared library in that directory\n\
+        ORT_DYLIB_PATH             shared library, for --features load-dynamic\n\
         PACKSET_RERANK_MAX_LENGTH  tokens a question and a claim take together (192)\n\
-        PACKSET_RERANK_MODEL  bge-reranker-base (default), bge-reranker-v2-m3,\n\
-                              jina-turbo, jina-v2";
+        PACKSET_RERANK_MODEL       bge-reranker-base (default), bge-reranker-v2-m3,\n\
+                                   jina-turbo, jina-v2\n\
+    \n\
+    The default build links ONNX Runtime you provide. --features download-binaries\n\
+    fetches the prebuilt runtime from cdn.pyke.io. A model is read from\n\
+    PACKSET_EMBED_MODEL_PATH, else from PACKSET_EMBED_CACHE/user/<model>/,\n\
+    when those files are present.";
 
 #[cfg(test)]
 mod tests {
@@ -576,6 +715,83 @@ mod tests {
             Some(PathBuf::from("/home/seat/.cache/packset/embed"))
         );
         assert_eq!(cache_dir_from(None, None, None), None);
+    }
+
+    #[test]
+    fn a_seeded_model_is_the_directory_and_a_partial_one_is_an_error() {
+        let root = std::env::temp_dir().join(format!(
+            "packset-embed-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("user").join("bge-small");
+        std::fs::create_dir_all(seed.join("onnx")).unwrap();
+        for name in [
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ] {
+            std::fs::write(seed.join(name), b"{}").unwrap();
+        }
+        let err = super::model_dir_from(None, Some(&root), "bge-small")
+            .expect_err("a short directory is not fetched")
+            .to_string();
+        assert!(err.contains("onnx/model.onnx"), "{err}");
+        std::fs::write(seed.join("onnx").join("model.onnx"), b"onnx").unwrap();
+        assert_eq!(
+            super::model_dir_from(None, Some(&root), "bge-small").unwrap(),
+            Some(seed)
+        );
+        // No directory: the caller may fetch. A different model is not this one.
+        assert_eq!(
+            super::model_dir_from(None, Some(&root), "bge-base").unwrap(),
+            None
+        );
+        assert_eq!(
+            super::model_dir_from(None, None, "bge-small").unwrap(),
+            None
+        );
+
+        let named = root.join("named");
+        std::fs::create_dir_all(named.join("onnx")).unwrap();
+        let err = super::model_dir_from(Some(&named), Some(&root), "bge-small")
+            .expect_err("an explicit path short a file is an error")
+            .to_string();
+        assert!(err.contains("PACKSET_EMBED_MODEL_PATH"), "{err}");
+        assert!(err.contains("onnx/model.onnx"), "{err}");
+        for name in super::MODEL_FILES {
+            let path = named.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"x").unwrap();
+        }
+        assert_eq!(
+            super::model_dir_from(Some(&named), Some(&root), "bge-small").unwrap(),
+            Some(named)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn offline_is_a_set_flag_and_the_default_model_seeds_as_bge_small() {
+        assert!(super::hub_is_offline(Some("1")));
+        assert!(super::hub_is_offline(Some("true")));
+        assert!(super::hub_is_offline(Some(" TRUE ")));
+        assert!(!super::hub_is_offline(None));
+        assert!(!super::hub_is_offline(Some("0")));
+        let choice = super::choose("").expect("bge-small");
+        assert_eq!(choice.seed, "bge-small");
+        assert_eq!(choice.pooling, super::Pooling::Cls);
+        let english = super::choose("e5-large-v2").expect("files");
+        assert_eq!(english.seed, "e5-large-v2");
+        assert!(matches!(english.source, super::Source::Files));
+        assert_eq!(english.pooling, super::Pooling::Mean);
     }
 
     #[test]

@@ -19,11 +19,35 @@ pkg-fmt = "tgz"
 name = "packset-embed"
 path = "src/main.rs"
 
+# The default build links a system or source-built ONNX Runtime. It does not
+# download one. `download-binaries` is the prebuilt runtime from cdn.pyke.io.
+# `load-dynamic` dlopens the shared library named by `ORT_DYLIB_PATH`.
+[features]
+default = []
+download-binaries = [
+    "fastembed/ort-download-binaries-native-tls",
+    "ort/download-binaries",
+    "ort/tls-native",
+]
+load-dynamic = ["fastembed/ort-load-dynamic", "ort/load-dynamic"]
+
 [dependencies]
 anyhow.workspace = true
 # The model, its tokenizer and the runtime under it. This is why the crate is
 # separate: the writer must not carry a native inference runtime on a machine
-# that will never hold a model.
-fastembed = "6"
+# that will never hold a model. fastembed's own defaults turn the pyke
+# download on; leaving them off is what makes the source link the default.
+fastembed = { version = "6", default-features = false, features = [
+    "hf-hub-native-tls",
+    "image-models",
+] }
+# `pkg-config` probes `libonnxruntime`. `ORT_LIB_PATH` (and `ORT_LIB_LOCATION`)
+# name a build tree when pkg-config has nothing new enough. fastembed asks for
+# ONNX Runtime 1.24; the prebuilt this ort publishes is 1.28.0.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "ndarray",
+    "pkg-config",
+] }
 serde.workspace = true
 serde_json.workspace = true
