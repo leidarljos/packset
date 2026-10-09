@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A document batch leaves one slot free while a query waits: writes are
+  background work and searches are interactive, so when the pump holds
+  a query behind a document batch the documents spread over one slot
+  fewer (`spread_slots`). With no query waiting they spend the whole
+  pool, queries always spread, and single-slot hosts never consult the
+  queue at all. The peek is advisory -- a query arriving just after
+  costs one chunk, the same as today. Pinned by
+  `document_batches_leave_a_slot_for_a_waiting_query`.
 - A pooled dense batch spreads over the free encoders instead of
   queueing whole behind slot zero: the pump still coalesces arrivals
   into one batch, but `run_group` now cuts it into one chunk per live

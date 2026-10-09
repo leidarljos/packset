@@ -144,7 +144,7 @@ Variable                                                   Read by              
 ``PACKSET_FUSE``, ``PACKSET_DIVERSIFY``, ``PACKSET_DECAY`` writer                    the panel
 ``PACKSET_LIVE_CAP``                                       writer                    live claims a workspace holds before the write that crosses it forgets the least retrievable forgettable ones; default twenty thousand, ``off`` for none; a write that forgot says ``forgot: N``
 ``PACKSET_TRACE_WRITES``                                   writer                    a file that receives one line per write with the time each stage took
-``PACKSET_EMBED_QUERY_WORKERS``                            writer                    query encoders kept side by side, default 1; each holds one model in memory; a waiter takes whichever slot frees first; a batch spreads over the free slots
+``PACKSET_EMBED_QUERY_WORKERS``                            writer                    query encoders side by side, default 1; each holds one model in memory; a waiter takes whichever slot frees first; a batch spreads over the free slots; writes yield a slot to waiting queries
 ``PACKSET_STEM``                                           writer                    ``off`` turns lexical stemming off
 ``PACKSET_EMBED``                                          writer                    the encoder binary; else beside the writer, else on ``PATH``
 ``PACKSET_EMBED_CACHE``                                    encoder                   where models live; default ``$XDG_CACHE_HOME/packset/embed``

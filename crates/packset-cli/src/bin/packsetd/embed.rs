@@ -457,13 +457,30 @@ fn dispatch(batch: Vec<Pending>) {
     run_group(docs, false);
 }
 
-/// How many dense slots a batch may spread over: one on a single-slot
-/// host, so its path stays exactly as it was, else the live pool's size.
-fn spread_slots() -> usize {
-    if query_workers() <= 1 {
-        return 1;
+/// Whether a query is waiting on the pump behind the batch now encoding:
+/// document batches leave it a slot when one is.
+fn queries_pending() -> bool {
+    pending().0.lock().is_ok_and(|queue| queue.iter().any(|job| job.query))
+}
+
+/// How many slots a batch of this side may spread over: one on a
+/// single-slot host, so its path stays exactly as it was, else the live
+/// pool's size. A document batch leaves one slot free while a query
+/// waits, so background writes never head-block an interactive search;
+/// with no query waiting it spends the whole pool, and queries always
+/// spread. The peek is advisory: a query arriving just after costs one
+/// chunk, the same as today.
+fn spread_slots(query: bool) -> usize {
+    let slots = if query_workers() <= 1 {
+        1
+    } else {
+        pool_slots().len().max(1)
+    };
+    if !query && slots > 1 && queries_pending() {
+        slots - 1
+    } else {
+        slots
     }
-    pool_slots().len().max(1)
 }
 
 /// How a batch spreads over the pool: contiguous index ranges, at most one
@@ -492,7 +509,7 @@ fn plan_chunks(jobs: usize, slots: usize) -> Vec<std::ops::Range<usize>> {
 /// fails fails the batch, the way one `encode_now` over the whole batch
 /// would: a partial answer would silently thin the panel.
 fn encode_spread(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
-    let ranges = plan_chunks(texts.len(), spread_slots());
+    let ranges = plan_chunks(texts.len(), spread_slots(query));
     if ranges.len() <= 1 {
         return encode_now(texts, query);
     }
@@ -868,6 +885,48 @@ mod tests {
             }
         }
         assert!(seen.iter().all(|seen| *seen), "a text has no chunk");
+    }
+
+    /// A document batch leaves a slot for a waiting query: with a query
+    /// on the pump, documents spread over one slot fewer, and with the
+    /// queue drained they spend the whole pool again. The queue is
+    /// borrowed directly without notifying, so the pump stays asleep and
+    /// there is no timing. Serialised on `EMBED` like the other tests
+    /// that touch process-global encoder state.
+    #[test]
+    fn document_batches_leave_a_slot_for_a_waiting_query() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let old_workers = std::env::var_os("PACKSET_EMBED_QUERY_WORKERS");
+        // SAFETY: EMBED is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", "2") };
+        let slots = pool_slots().len().max(1);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        {
+            let (lock, _) = pending();
+            lock.lock().unwrap().push(Pending {
+                text: "a waiting query".to_string(),
+                query: true,
+                tx,
+            });
+        }
+        let throttled = spread_slots(false);
+        {
+            let (lock, _) = pending();
+            lock.lock().unwrap().clear();
+        }
+        let free = spread_slots(false);
+        let queries = spread_slots(true);
+        unsafe {
+            match old_workers {
+                Some(v) => std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", v),
+                None => std::env::remove_var("PACKSET_EMBED_QUERY_WORKERS"),
+            }
+        }
+        drop(_held);
+        assert!(slots >= 2, "the pool this test spreads over has one slot");
+        assert_eq!(throttled, slots - 1, "documents yield a slot to the query");
+        assert_eq!(free, slots, "idle documents spend the pool");
+        assert_eq!(queries, slots, "queries always spread");
     }
 
     /// A pooled batch encodes on one child per free slot: four texts with
