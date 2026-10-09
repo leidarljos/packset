@@ -47,7 +47,13 @@ pub const KINDS: &[&str] = &[
     "persona",
     "prediction",
     "rule",
+    "outcome",
 ];
+
+/// Kinds the seat weighs or reads: a trust row, a persona, and the outcome
+/// an issue closed on. `add` starts no review clock for them, and the
+/// sweep skips them even when a grade has started one.
+pub const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "outcome"];
 
 /// Whether the claim was stated or inferred.
 pub const LEVELS: &[&str] = &["explicit", "derived"];
@@ -357,6 +363,7 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     let persona = kind == "persona";
     let prediction = kind == "prediction";
     let rule = kind == "rule";
+    let outcome = kind == "outcome";
     let level = atom
         .get("level")
         .and_then(Value::as_str)
@@ -422,6 +429,9 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     if rule {
         check_rule(atom)?;
     }
+    if outcome {
+        check_outcome(atom)?;
+    }
 
     let report = prose::refuse(&text, prose::Role::Atom)?;
     atom.insert("prose".into(), prose_value(&report));
@@ -449,6 +459,19 @@ fn check_prediction(atom: &Map<String, Value>) -> Result<(), AtomError> {
             "prediction atom: expect is an option or an object of option to share".into(),
         )),
     }
+}
+
+/// An `outcome` atom is the option an issue closed on: `issue` and `choice`.
+/// The issue's ballots and its outcome say which voters were right, so a
+/// consensus can tell voters who err together from voters who err apart.
+fn check_outcome(atom: &Map<String, Value>) -> Result<(), AtomError> {
+    for key in ["issue", "choice"] {
+        match atom.get(key).and_then(Value::as_str).map(str::trim) {
+            Some(v) if !v.is_empty() => {}
+            _ => return Err(AtomError(format!("outcome atom needs {key}"))),
+        }
+    }
+    Ok(())
 }
 
 /// A `rule` atom is argv law in the pack: `pattern`, a glob over the command
@@ -1085,6 +1108,14 @@ pub fn shape_jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
     }
 }
 
+/// Fields that say what a structured claim is about. Two claims that differ
+/// in one are two claims, whatever their text, unless the newer names the
+/// older in `supersedes`. `a weighs b at 1.000.` and `a weighs c at 1.000.`
+/// share five of the seven tokens between them but weigh two different
+/// voters. Two agents' forecasts on one issue read alike too, and are two
+/// claims.
+pub const IDENTITY_KEYS: &[&str] = &["from", "to", "about", "agent", "issue", "name"];
+
 /// [`replaces`] with the shapes already in hand.
 pub fn replaces_shaped(
     new: &Map<String, Value>,
@@ -1114,6 +1145,16 @@ pub fn replaces_shaped(
         }
     }
     if new.get("pattern") != old.get("pattern") || new.get("verdict") != old.get("verdict") {
+        return false;
+    }
+    if IDENTITY_KEYS.iter().any(|k| new.get(*k) != old.get(*k)) {
+        return false;
+    }
+    // A trust row's domain is its declared entities. An empty list and a
+    // missing list are the same unscoped row. A non-empty set stays apart
+    // from the unscoped row and from a different set. Order does not count.
+    if new.get("kind").and_then(Value::as_str) == Some("trust") && new_shape.gate != old_shape.gate
+    {
         return false;
     }
     let shared = new_shape
@@ -1293,6 +1334,23 @@ mod tests {
             json!({"kind": "rule", "text": "Ask first.", "workspace": "w",
             "verdict": "deny"})
         ));
+    }
+
+    #[test]
+    fn an_outcome_names_its_issue_and_choice() {
+        let check = |v: Value| validate(&mut atom(v));
+        assert!(
+            check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+            "workspace": "w", "issue": "p-1", "choice": "ship"}))
+            .is_ok()
+        );
+        let no_choice = check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+            "workspace": "w", "issue": "p-1", "choice": " "}));
+        assert_eq!(no_choice.unwrap_err().0, "outcome atom needs choice");
+        let no_issue = check(json!({"kind": "outcome", "text": "p-1 closed on ship.",
+            "workspace": "w", "choice": "ship"}));
+        assert_eq!(no_issue.unwrap_err().0, "outcome atom needs issue");
+        assert!(UNREVIEWED_KINDS.iter().all(|k| KINDS.contains(k)));
     }
     use serde_json::json;
 
@@ -1583,6 +1641,88 @@ mod tests {
         assert!(
             !replaces(&other, &named),
             "a different named subject still gates"
+        );
+    }
+
+    #[test]
+    fn a_structured_identity_keeps_alike_rows_apart() {
+        let row = |from: &str, to: &str, w: &str| {
+            atom(json!({
+                "kind": "trust", "from": from, "to": to, "entities": [],
+                "text": format!("{from} weighs {to} at {w}."),
+            }))
+        };
+        assert!(
+            !replaces(
+                &row("cursor", "newcomer", "1.000"),
+                &row("cursor", "maintainer", "1.000")
+            ),
+            "rows into two voters are two rows"
+        );
+        assert!(
+            !replaces(
+                &row("carol", "alice", "1.000"),
+                &row("bob", "alice", "1.000")
+            ),
+            "two voters' rows into one are two rows"
+        );
+        assert!(
+            replaces(
+                &row("cursor", "newcomer", "0.800"),
+                &row("cursor", "newcomer", "1.000")
+            ),
+            "a new weight on the same row closes the old"
+        );
+        let mut scoped = row("cursor", "newcomer", "0.800");
+        scoped.insert("about".into(), json!(["docs"]));
+        assert!(
+            !replaces(&scoped, &row("cursor", "newcomer", "1.000")),
+            "a row with a different about beside the unscoped one"
+        );
+        let mut domain = row("cursor", "newcomer", "0.800");
+        domain.insert("entities".into(), json!(["docs"]));
+        assert!(
+            !replaces(&domain, &row("cursor", "newcomer", "1.000")),
+            "a domain-scoped trust row beside the unscoped one"
+        );
+        let mut same_domain = row("cursor", "newcomer", "1.000");
+        same_domain.insert("entities".into(), json!(["docs"]));
+        assert!(
+            replaces(&same_domain, &domain),
+            "a new weight on the same domain closes the old row"
+        );
+        let forecast = |agent: &str, share: &str| {
+            atom(json!({
+                "kind": "prediction", "agent": agent, "issue": "seat-tvpg",
+                "text": format!("{agent} expects tool-adapters at {share} on seat-tvpg."),
+            }))
+        };
+        assert!(
+            !replaces(
+                &forecast("reliability", "0.50"),
+                &forecast("maintainer", "0.56")
+            ),
+            "two agents' forecasts on one issue"
+        );
+        assert!(
+            replaces(
+                &forecast("maintainer", "0.40"),
+                &forecast("maintainer", "0.56")
+            ),
+            "an agent's later forecast closes its earlier one"
+        );
+        let closed = |issue: &str, choice: &str| {
+            atom(json!({
+                "kind": "outcome", "issue": issue, "choice": choice,
+                "text": format!("{issue} closed on {choice}."),
+            }))
+        };
+        assert!(
+            !replaces(
+                &closed("seat-tvpg", "tool-adapters"),
+                &closed("seat-zrc6", "tool-adapters")
+            ),
+            "two issues' outcomes are two records"
         );
     }
 

@@ -174,29 +174,35 @@ is between retrievers under one reader, which is how the retrieval half of
 those systems is measured too. The interned table is
 ``docs/orgmode/results/longmemeval-s-qa.org`` in this repository.
 
-The systems above differ in retrieval; four more differ in the write path,
-and the pack differs from all four in the same place: no model writes here.
-Letta, formerly MemGPT (doi:10.48550/arXiv.2310.08560), keeps a core memory
-the model edits with tools, and its sleep-time compute
-(doi:10.48550/arXiv.2504.13171) reorganises the store between turns; the
-pack's reorganisation is the review clock and the consolidation rule, which
-run with no model at all, so the writer stands alone. A-MEM
-(doi:10.48550/arXiv.2502.12110) has the model write keywords and links for
-each note and rewrite older notes when a new one arrives; the pack's links
-gain weight with use and lose it with disuse, and an old claim is never
-rewritten, only closed by a superseding claim whose window keeps the old
-reading available as of any earlier time. MemoryBank
-(doi:10.48550/arXiv.2305.10250) forgets on an Ebbinghaus curve refreshed by
-recall; the pack's decay is the same family (see the forgetting section
-below) fitted as FSRS retrievability, and forgetting is a tombstone after
-lapsed reviews rather than silent decay, so a forgotten claim says it was
-forgotten. Generative Agents (doi:10.48550/arXiv.2304.03442) rank by recency,
-importance and relevance and reflect into new memories; the pack ranks by a
-fused panel with decay as one ballot, and the reflection equivalent,
-proposals, becomes a claim only on an explicit accept. The
-accurate-retrieval rows further down show where the difference lands: the
-products that put a model in the write path sit behind the retrievers on the
-benchmark built to measure them.
+What differs in the write path
+==============================
+
+Letta, formerly MemGPT (doi:10.48550/arXiv.2310.08560), keeps a core
+memory the model edits with tools, and pages blocks in and out of the
+context. Its sleep-time compute (doi:10.48550/arXiv.2504.13171) is a
+model thinking about a context before the question arrives. The pack
+runs no model on a write. The review clock and the consolidation rule
+are the passes that move a claim.
+
+Agentic memory (doi:10.48550/arXiv.2502.12110) writes a note with
+keywords, tags and links, and a new note can update the context and
+attributes of an older one. The pack's links gain weight with use and
+lose it with disuse. An old claim is closed, not edited, and the closed
+claim keeps its window.
+
+MemoryBank (doi:10.48550/arXiv.2305.10250) forgets on an Ebbinghaus
+curve that recall refreshes. The clock in the next section is a power
+law, and a forgotten claim is a tombstone that says why.
+
+Generative Agents (doi:10.48550/arXiv.2304.03442) rank by recency,
+importance and relevance, and reflection writes new memories. The pack
+ranks by a fused panel, with decay as one ballot. A proposal becomes a
+claim when a person accepts it, and not before.
+
+HippoRAG (doi:10.48550/arXiv.2405.14831) runs personalized PageRank
+over a passage graph. The accurate-retrieval table further down reports
+HippoRAG-v2 beside BM25. That table does not measure Letta, agentic
+memory, MemoryBank or Generative Agents.
 
 Forgetting is a feature
 =======================

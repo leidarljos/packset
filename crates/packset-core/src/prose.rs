@@ -117,13 +117,39 @@ pub fn sentences(text: &str) -> Vec<String> {
     use snapper_fmt::sentence::SentenceSplitter as _;
     static SPLITTER: std::sync::OnceLock<snapper_fmt::sentence::unicode::UnicodeSentenceSplitter> =
         std::sync::OnceLock::new();
+    // snapper reads `/`, `_`, `*` and `+` as Org emphasis marks. It keeps a
+    // sentence open between two of them, so `see a/b. Then c/d.` would come
+    // back as one sentence. Look-alike characters stand in for them while
+    // splitting.
+    let masked: String = text
+        .chars()
+        .map(|c| match c {
+            '/' => '\u{2215}',
+            '_' => '\u{2017}',
+            '*' => '\u{2217}',
+            '+' => '\u{FF0B}',
+            other => other,
+        })
+        .collect();
     SPLITTER
         .get_or_init(|| {
             snapper_fmt::sentence::unicode::UnicodeSentenceSplitter::new()
                 .with_lowercase_starts(true)
         })
-        .split(text)
+        .split(&masked)
         .into_iter()
+        .map(|piece| {
+            piece
+                .chars()
+                .map(|c| match c {
+                    '\u{2215}' => '/',
+                    '\u{2017}' => '_',
+                    '\u{2217}' => '*',
+                    '\u{FF0B}' => '+',
+                    other => other,
+                })
+                .collect::<String>()
+        })
         .filter(|piece| !words_of(piece).is_empty())
         .collect()
 }
@@ -341,6 +367,34 @@ mod tests {
         );
         assert_eq!(sentences("J. O. Richardson derived it. It holds.").len(), 2);
         assert_eq!(sentences("It stopped. 3 tests failed.").len(), 2);
+    }
+
+    /// Two citations, paths, subscripts, products or sums (x*y, a+b) in a row
+    /// stay two sentences.
+    #[test]
+    fn an_emphasis_mark_does_not_hold_a_sentence_open() {
+        assert_eq!(
+            sentences("Alpha beta a/b. Gamma delta c/d. Epsilon.").len(),
+            3
+        );
+        assert_eq!(
+            sentences("Ladha (doi:10.2307/2111584) says so. Kim (doi:10.48550/x) agrees. Done.")
+                .len(),
+            3
+        );
+        assert_eq!(
+            sentences("Edit crates/a/b.rs first. Then run scripts/x.sh.")[0],
+            "Edit crates/a/b.rs first."
+        );
+        assert_eq!(
+            sentences("Voter j weighs w_j. So does pi_j. Done.").len(),
+            3
+        );
+        assert_eq!(sentences("Use x*y. Then z*w. Done.").len(), 3);
+        assert_eq!(
+            sentences("Alpha beta a+b. Gamma delta c+d. Epsilon.").len(),
+            3
+        );
     }
 
     #[test]

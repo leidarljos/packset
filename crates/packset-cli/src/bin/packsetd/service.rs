@@ -338,9 +338,10 @@ impl Service {
     /// sweep lapses it as a missed review does, halving its stability, and
     /// counts the neglect; a forgettable claim neglected [`NEGLECT_LIMIT`]
     /// times, never once recalled and never fired is tombstoned, marked
-    /// `forgotten: neglect`. A preference, rule, reading, goal, trust row or
-    /// persona lapses but is never forgotten this way. Returns how many
-    /// lapsed and how many were forgotten.
+    /// `forgotten: neglect`. A habit, preference, goal, prediction or rule
+    /// lapses but is never forgotten this way, and the sweep skips a trust
+    /// row, persona or outcome. Returns how many lapsed and how many were
+    /// forgotten.
     ///
     /// # Errors
     ///
@@ -356,7 +357,7 @@ impl Service {
                 continue;
             }
             let kind = atom.get("kind").and_then(Value::as_str).unwrap_or("");
-            if kind == "trust" || kind == "persona" {
+            if record::UNREVIEWED_KINDS.contains(&kind) {
                 continue;
             }
             let due_at = atom.get("due_at").and_then(Value::as_str).unwrap_or(&now);
@@ -825,8 +826,8 @@ impl Service {
         // A new claim enters the review clock at once; a trust row is not
         // recalled, it is weighed.
         if record::is_live(&atom, &now)
-            && atom.get("kind").and_then(Value::as_str) != Some("trust")
-            && atom.get("kind").and_then(Value::as_str) != Some("persona")
+            && !record::UNREVIEWED_KINDS
+                .contains(&atom.get("kind").and_then(Value::as_str).unwrap_or(""))
             && atom
                 .get("due_at")
                 .and_then(Value::as_str)
@@ -2690,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn add_seeds_the_review_clock_except_for_trust_and_persona() {
+    fn add_seeds_the_review_clock_except_for_weighed_records() {
         let (_dir, svc) = service();
         let stored = svc.add(atom("Reviews open with a check.")).unwrap();
         let due = stored.get("due_at").and_then(Value::as_str).unwrap_or("");
@@ -2709,6 +2710,12 @@ mod tests {
         persona.insert("view".into(), "Reject habitat leaks.".into());
         persona.insert("anchor".into(), 0.2.into());
         let stored = svc.add(persona).unwrap();
+        assert!(stored.get("due_at").is_none(), "{stored:?}");
+        let mut outcome = atom("p-1 closed on ship.");
+        outcome.insert("kind".into(), "outcome".into());
+        outcome.insert("issue".into(), "p-1".into());
+        outcome.insert("choice".into(), "ship".into());
+        let stored = svc.add(outcome).unwrap();
         assert!(stored.get("due_at").is_none(), "{stored:?}");
     }
 

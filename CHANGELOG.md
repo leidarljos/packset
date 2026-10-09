@@ -71,6 +71,31 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - `rust-toolchain.toml` pins 1.89.0: the default 1.83 cannot parse a dependency manifest in the tree (a fuzz helper's edition-2024).
 - The explanation positions the pack against the write-path systems: Letta/sleep-time, A-MEM, MemoryBank and Generative Agents, against the no-model-writes rule.
+- The explanation names who writes in Letta, agentic memory, MemoryBank,
+  Generative Agents and HippoRAG. The measured rows are unchanged.
+  Sleep-time compute is a model thinking before the question. It is not
+  a reorganisation of this store.
+
+- A trust row scoped by its entities does not close the unscoped row of
+  the same voters. An empty entity list and a missing one are the same
+  unscoped row.
+
+- A kind: `outcome`, the option an issue closed on (`issue`, `choice`).
+  The issue's ballots and its outcome say which voters were right, so a
+  settle can discount voters who err together. `add` starts no review
+  clock for an outcome, as for a trust row or a persona, and the sweep
+  never forgets one.
+
+- A rewrite needs the same `from`, `to`, `about`, `agent`, `issue`, and
+  `name`. Two trust rows to two different voters at the same weight share
+  five of their seven tokens, so the second replaced the first. A seat
+  that wrote five rows kept one; a panel of five forecasts kept one, so
+  the surprisingly popular reading never ran.
+
+- A `/`, `_`, `*` or `+` no longer holds a sentence open. snapper reads
+  them as Org emphasis marks, so text that cited two DOIs or named two
+  paths read as one long sentence. The text scored a high reading grade,
+  and an atom could be refused as very hard.
 
 ## 0.11.0 (2026-09-29)
 
