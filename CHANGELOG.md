@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.13.0 (2026-10-09)
 
 - Seat mail is stored as atoms. A `message` is one letter and a `receipt` is one read. A `group` atom is one membership change. The two-sentence cap does not apply; the text stops at 500 characters. A later mail atom does not close an earlier one, and a repeat is kept. Search and recall leave mail out unless `kind` names it.
 - `packset-embed` links a system or source-built Open Neural Network Exchange (ONNX) Runtime. The prebuilt runtime from cdn.pyke.io is the `download-binaries` feature. A hub checkout at `PACKSET_EMBED_MODEL_PATH`, or under the cache at `user/<model>/`, is the model, so a seeded directory is not fetched. An absent encoder leaves a sitting on the lexical ballots; doctor still reads `embedder.available`.
