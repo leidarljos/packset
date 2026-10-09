@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 pub const BIN_VARS: &[&str] = &["PACKSET_EMBED"];
 
 /// The encoder binary this seat would run: `PACKSET_EMBED`, else beside the
-/// writer, else on `PATH`.
+/// writer, else on `PATH`. An explicit variable always wins over the kept
+/// discovery below, so a seat or test that names an encoder never sees
+/// the cache.
 #[must_use]
 pub fn binary() -> Option<PathBuf> {
     for var in BIN_VARS {
@@ -28,6 +30,20 @@ pub fn binary() -> Option<PathBuf> {
             }
         }
     }
+    found_binary()
+}
+
+/// The discovery every call used to repeat: the binary beside this one
+/// and the name on `PATH`, neither of which moves under a running writer.
+/// Found once and kept, so a burst of searches does not walk the
+/// filesystem per request.
+fn found_binary() -> Option<PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND.get_or_init(discover).clone()
+}
+
+/// The three places a seat puts the encoder when no variable names it.
+fn discover() -> Option<PathBuf> {
     let here = std::env::current_exe().ok()?;
     // Beside this binary, which is where a seat that installs the pair puts it.
     if let Some(beside) = here
@@ -927,6 +943,61 @@ mod tests {
         assert_eq!(throttled, slots - 1, "documents yield a slot to the query");
         assert_eq!(free, slots, "idle documents spend the pool");
         assert_eq!(queries, slots, "queries always spread");
+    }
+
+    /// An explicit encoder beats any kept discovery: even if a burst has
+    /// already cached the tree lookup, naming `PACKSET_EMBED` answers
+    /// from the variable without touching the cache. `/bin/false` never
+    /// runs here; `binary` only checks it is executable.
+    #[test]
+    fn an_explicit_encoder_beats_any_cached_discovery() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("PACKSET_EMBED");
+        // SAFETY: EMBED is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_EMBED", "/bin/false") };
+        let found = binary();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("PACKSET_EMBED", v),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        drop(_held);
+        assert_eq!(found, Some(std::path::PathBuf::from("/bin/false")));
+    }
+
+    /// Discovery finds an encoder on the search path: a planted
+    /// `packset-embed` in a directory prepended to `PATH` answers from
+    /// `discover` directly, so the kept cache is never primed and no
+    /// other test can observe the plant. The plant exits at once, so
+    /// even a concurrent spawn would be harmless.
+    #[test]
+    fn discovery_finds_an_encoder_on_the_path() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let plant = dir.path().join("packset-embed");
+        std::fs::write(&plant, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&plant).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&plant, perm).unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![dir.path().to_path_buf()];
+        if let Some(old) = &old_path {
+            paths.extend(std::env::split_paths(old));
+        }
+        // SAFETY: EMBED is held, and every test that spawns a stub holds
+        // it too; the plant itself needs no lookup to run.
+        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
+        let found = discover();
+        unsafe {
+            match old_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        drop(_held);
+        assert_eq!(found, Some(plant));
     }
 
     /// A pooled batch encodes on one child per free slot: four texts with

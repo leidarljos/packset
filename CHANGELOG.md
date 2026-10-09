@@ -4,6 +4,19 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Finding the encoder and search binaries no longer walks the
+  filesystem on every call: `packset-embed` and `packset-milli`
+  discovery (the binary beside the writer, the tree candidates, the
+  `PATH` scan) runs once per process and is kept, while an explicit
+  `PACKSET_EMBED` or `PACKSET_MILLI` still answers fresh from the
+  variable every time. A burst of searches used to pay several
+  `current_exe` reads and a full `PATH` scan per request -- per
+  encode, per batch, per rerank, per flush -- for binaries that do not
+  move under a running writer; lexical-only seats paid it too, on every
+  request, for an encoder they never had. Pinned by
+  `an_explicit_encoder_beats_any_cached_discovery`,
+  `discovery_finds_an_encoder_on_the_path`, and the two `milli`
+  mirrors.
 - A document batch leaves one slot free while a query waits: writes are
   background work and searches are interactive, so when the pump holds
   a query behind a document batch the documents spread over one slot

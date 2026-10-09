@@ -43,7 +43,9 @@ fn forget_backfill(dir: &Path) {
 /// The search binary, if this seat has one.
 ///
 /// Absent is the normal case, not an error: the linear scorer answers the same
-/// question without it.
+/// question without it. An explicit variable always wins over the kept
+/// discovery below, so a seat or test that names a binary never sees
+/// the cache.
 #[must_use]
 pub fn binary() -> Option<PathBuf> {
     for var in BIN_VARS {
@@ -54,6 +56,20 @@ pub fn binary() -> Option<PathBuf> {
             }
         }
     }
+    found_binary()
+}
+
+/// The discovery every call used to repeat: the tree candidates and the
+/// names on `PATH`, none of which moves under a running writer. Found
+/// once and kept, so a burst of searches and flushes does not walk the
+/// filesystem per request.
+fn found_binary() -> Option<PathBuf> {
+    static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(discover).clone()
+}
+
+/// Where the binary lives when no variable names it.
+fn discover() -> Option<PathBuf> {
     // The same three places the writer being replaced looks, relative to the
     // tree root. The workspace target directory is deliberately not among
     // them: neither writer searches it, and a seat that builds there names the
@@ -574,6 +590,66 @@ mod tests {
 
     fn record(value: Value) -> Record {
         value.as_object().unwrap().clone()
+    }
+
+    /// An explicit search binary beats any kept discovery: naming
+    /// `PACKSET_MILLI` answers from the variable without touching the
+    /// cache. `/bin/false` never runs here; `binary` only checks it is
+    /// executable. Serialised with the stub-spawning tests on the shared
+    /// encoder lock, the way every test that mutates these variables is.
+    #[test]
+    fn an_explicit_milli_binary_beats_any_cached_discovery() {
+        let _held = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("PACKSET_MILLI");
+        // SAFETY: the lock is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_MILLI", "/bin/false") };
+        let found = binary();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("PACKSET_MILLI", v),
+                None => std::env::remove_var("PACKSET_MILLI"),
+            }
+        }
+        drop(_held);
+        assert_eq!(found, Some(std::path::PathBuf::from("/bin/false")));
+    }
+
+    /// Discovery finds the search binary on the path: a planted
+    /// `packset-milli` in a directory prepended to `PATH` answers from
+    /// `discover` directly, so the kept cache is never primed and no
+    /// other test can observe the plant. The plant exits at once, so
+    /// even a concurrent spawn would be harmless.
+    #[test]
+    fn discovery_finds_the_search_binary_on_the_path() {
+        let _held = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let plant = dir.path().join("packset-milli");
+        std::fs::write(&plant, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&plant).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&plant, perm).unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![dir.path().to_path_buf()];
+        if let Some(old) = &old_path {
+            paths.extend(std::env::split_paths(old));
+        }
+        // SAFETY: the lock is held, and every test that spawns a stub
+        // holds it too; the plant itself needs no lookup to run.
+        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
+        let found = discover();
+        unsafe {
+            match old_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        drop(_held);
+        assert_eq!(found, Some(plant));
     }
 
     #[test]
