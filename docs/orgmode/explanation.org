@@ -336,40 +336,17 @@ answers an as-of read. =POST /v1/consolidate= runs the same rule over what
 is held, for a pack filled before the rule or by import, and reports the
 pairs before it writes them. The MemoryAgentBench conflict-resolution rows
 measure this rule on public data: a list of facts where a later one
-overwrites an earlier one about the same subject. Over its 800 questions,
-ten facts handed to the 7B reader, the fused panel alone answers the
-single-hop rows 0.33 to 0.55 and the multi-hop rows 0.02 to 0.07; the
-same hits ordered latest first, 0.33 to 0.42 and 0.02 to 0.06; the same
-hits with every superseded fact closed by this rule, 0.76 to 0.86
-single-hop and 0.03 to 0.27 multi-hop, 0.480 over all eight rows. The
-rule more than doubles the single-hop answers, because the reader no
-longer sees the old fact beside the new. The multi-hop rows are where
-every system the benchmark's authors measured fails (at most 0.28), and
-where a second hop over the live facts moves them: the objects of the
-strongest live facts are asked about in turn, and the second hop's live
-facts follow the first's, so a question about the spouse of an author
-reaches the author's fact and then, by the name it carries, the spouse's.
-In one job, same reader: live 0.535, two hops 0.576 over the 800
-questions, a paired difference of +0.041 with a bootstrap interval of
-+0.014 to +0.070; on the multi-hop rows +0.09 to +0.15 (0.21 to 0.40
-answered, against 0.06 to 0.31), on the single-hop rows -0.01 to -0.09,
-where the second hop's facts displace the first's in a ten-fact prompt.
-The published retrieval baselines, with a much stronger reader, sit at
-0.155 to 0.295 on this split.
+overwrites an earlier one about the same subject. At 262K, scored per
+source as the paper scores it, the fused live panel answers 0.395 of
+the questions (95% CI 0.350 to 0.440) and the lexical ballot answers
+0.240. The published rows on this split are BM25 0.255 and HippoRAG-v2
+0.295, each with a GPT-4o-mini reader. The lexical ballot is under both.
+The fused live panel uses a seven-billion-parameter reader.
 
-The same benchmark's accurate-retrieval split, 2000 questions over
-records of a quarter to three million characters chunked as it chunks
-them, with the same 7B reader and ten chunks a prompt: the fused panel
-answers 0.675 of the questions (EventQA 0.62 to 0.84 by record length,
-the document QA 0.79 and 0.47, the chat questions 0.39 by the
-benchmark's judge), the lexical ballot alone 0.674, five chunks 0.649;
-averaged by source rather than by question, 0.644 and 0.642. The
-published rows on this split, all with the benchmark's hosted reader, are BM25
-0.605, HippoRAG-v2 0.651, and the memory products 0.28 to 0.34. A reader
-two classes smaller reaches the top of that table, which says where the
-score comes from: the retrieval is the panel's, the ceiling is the
-reader's, and the products that put a model in the write path are behind
-the retrievers on the benchmark built to measure them.
+The same benchmark's accurate retrieval is the four-source mean. Lexical
+job 11759, with a seven-billion-parameter reader, answers 0.568 of the
+questions (95% CI 0.530 to 0.605). That is below the published BM25 row
+of 0.605 and below HippoRAG-v2 at 0.651, both with a GPT-4o-mini reader.
 
 * Trust is memory too
 
