@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `/health`, `/v1/status` and `/v1/workspaces` answer on a worker that a
+  search or a write is not holding. The pool stays four, and eight at
+  most. With one worker, that worker runs every request in turn.
+
 - The explanation names who writes in Letta, agentic memory, MemoryBank,
   Generative Agents and HippoRAG. The measured rows are unchanged.
   Sleep-time compute is a model thinking before the question. It is not

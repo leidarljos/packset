@@ -7,8 +7,8 @@
 //! This layer decodes and encodes and nothing else. What a verb means lives in
 //! [`crate::service`].
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use packset_core::record::AtomError;
 use serde_json::{json, Map, Value};
@@ -21,7 +21,7 @@ use crate::service::Service;
 pub const LOOPBACK: &str = "127.0.0.1";
 /// The port the clients look for.
 pub const DEFAULT_PORT: u16 = 8761;
-/// Workers when the machine will not say how many cores it has.
+/// Workers when `PACKSET_WORKERS` is unset. Not the core count.
 pub const DEFAULT_WORKERS: usize = 4;
 /// The ceiling on workers. 32 threads each kept a 64 MB malloc arena
 /// (2 GB idle) on a 32-thread laptop.
@@ -43,6 +43,134 @@ pub fn worker_count() -> usize {
         }
     }
     DEFAULT_WORKERS
+}
+
+/// How many searches or writes may run at once.
+///
+/// One worker stays out of that work when the pool has more than one, so
+/// `/health`, `/v1/status` and `/v1/workspaces` still answer during a burst.
+/// A single worker cannot split. The pool does not grow, and [`MAX_WORKERS`]
+/// stays the ceiling.
+#[must_use]
+pub fn dear_limit(workers: usize) -> usize {
+    match workers {
+        0 | 1 => 1,
+        n => n - 1,
+    }
+}
+
+/// Health, status and the workspace list. Everything else can encode, scan
+/// or take the write lock, and waits on [`dear_limit`].
+fn is_cheap(method: &Method, url: &str) -> bool {
+    if method != &Method::Get {
+        return false;
+    }
+    let path = url.split('?').next().unwrap_or(url);
+    matches!(
+        path,
+        "/health" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health"
+    )
+}
+
+/// Searches and writes in flight, and the ones waiting for a slot.
+struct Lane<T> {
+    limit: usize,
+    in_flight: usize,
+    parked: VecDeque<T>,
+}
+
+impl<T> Lane<T> {
+    fn new(workers: usize) -> Self {
+        Self {
+            limit: dear_limit(workers),
+            in_flight: 0,
+            parked: VecDeque::new(),
+        }
+    }
+
+    /// Run `job` now, or park it when the dear slots are full.
+    fn begin(&mut self, job: T) -> Option<T> {
+        if self.in_flight < self.limit {
+            self.in_flight += 1;
+            Some(job)
+        } else {
+            self.parked.push_back(job);
+            None
+        }
+    }
+
+    /// The next parked job, which keeps this slot. `None` releases it.
+    fn end(&mut self) -> Option<T> {
+        if let Some(next) = self.parked.pop_front() {
+            Some(next)
+        } else {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            None
+        }
+    }
+
+    fn parked(&self) -> usize {
+        self.parked.len()
+    }
+}
+
+fn lock_lane(lane: &Mutex<Lane<Request>>) -> std::sync::MutexGuard<'_, Lane<Request>> {
+    lane.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Pull requests until the listener is gone. A cheap request runs on the
+/// worker that took it. A search or a write runs only while a dear slot is
+/// free; otherwise it waits, and this worker goes back to the queue.
+fn worker<F>(server: &Server, lane: &Mutex<Lane<Request>>, mut run: F)
+where
+    F: FnMut(Request),
+{
+    while let Ok(request) = server.recv() {
+        if is_cheap(request.method(), request.url()) {
+            run(request);
+            continue;
+        }
+        let admitted = {
+            let mut lane = lock_lane(lane);
+            lane.begin(request)
+        };
+        let Some(mut request) = admitted else {
+            continue;
+        };
+        loop {
+            run(request);
+            let next = {
+                let mut lane = lock_lane(lane);
+                lane.end()
+            };
+            match next {
+                Some(parked) => request = parked,
+                None => break,
+            }
+        }
+    }
+}
+
+fn spawn_workers<F>(
+    server: &Arc<Server>,
+    workers: usize,
+    run: F,
+) -> (Arc<Mutex<Lane<Request>>>, Vec<std::thread::JoinHandle<()>>)
+where
+    F: Fn(Request) + Send + Sync + 'static,
+{
+    let run = Arc::new(run);
+    let lane = Arc::new(Mutex::new(Lane::new(workers)));
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let server = Arc::clone(server);
+        let run = Arc::clone(&run);
+        let lane = Arc::clone(&lane);
+        handles.push(std::thread::spawn(move || {
+            worker(&server, &lane, |request| run(request));
+        }));
+    }
+    (lane, handles)
 }
 
 /// What a route decided to answer.
@@ -86,21 +214,13 @@ pub fn serve(
     eprintln!("packsetd: listening on http://{host}:{port} with {workers} workers");
     let panel = Arc::new(panel);
 
-    // Every worker pulls from the server's own queue, so the pool is the
-    // balance: a burst waits in the queue rather than becoming threads.
-    let mut handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let server = Arc::clone(&server);
-        let service = Arc::clone(&service);
-        let panel = Arc::clone(&panel);
-        // The loop ends when the listener is gone, which is how this process
-        // stops.
-        handles.push(std::thread::spawn(move || {
-            while let Ok(request) = server.recv() {
-                handle(&service, &panel, request);
-            }
-        }));
-    }
+    // The pool is the balance, and it does not grow. A search or a write may
+    // hold every worker but one. That one answers health, status and the
+    // workspace list. The loop ends when the listener is gone, which is how
+    // this process stops.
+    let (_lane, handles) = spawn_workers(&server, workers, move |request| {
+        handle(&service, &panel, request);
+    });
     for handle in handles {
         let _ = handle.join();
     }
@@ -780,6 +900,125 @@ mod tests {
     fn default_workers_is_four_not_core_count() {
         assert_eq!(DEFAULT_WORKERS, 4);
         assert_eq!(MAX_WORKERS, 8);
+        assert_eq!(dear_limit(DEFAULT_WORKERS), 3);
+        assert_eq!(dear_limit(1), 1);
+    }
+
+    #[test]
+    fn health_status_and_workspaces_stay_off_the_search_lane() {
+        assert!(is_cheap(&Method::Get, "/health"));
+        assert!(is_cheap(&Method::Get, "/v1/status?workspace=seat"));
+        assert!(is_cheap(&Method::Get, "/v1/workspaces"));
+        assert!(is_cheap(&Method::Get, "/__inside_memd/health"));
+        assert!(!is_cheap(
+            &Method::Get,
+            "/v1/search?workspace=seat&q=fusion"
+        ));
+        assert!(!is_cheap(&Method::Get, "/v1/atoms?workspace=seat"));
+        assert!(!is_cheap(&Method::Post, "/health"));
+        assert!(!is_cheap(&Method::Post, "/v1/atoms"));
+    }
+
+    #[test]
+    fn a_full_pool_parks_the_next_search_until_one_finishes() {
+        let mut lane = Lane::new(4);
+        assert_eq!(lane.limit, 3);
+        assert!(lane.begin(1).is_some());
+        assert!(lane.begin(2).is_some());
+        assert!(lane.begin(3).is_some());
+        assert!(lane.begin(4).is_none());
+        assert_eq!(lane.parked(), 1);
+        assert_eq!(lane.in_flight, 3);
+        assert_eq!(lane.end(), Some(4));
+        assert_eq!(lane.in_flight, 3);
+        assert_eq!(lane.end(), None);
+        assert_eq!(lane.in_flight, 2);
+    }
+
+    /// Two workers, one dear slot. A health check returns while a search
+    /// still holds that slot, and the second search stays parked.
+    #[test]
+    fn health_answers_while_a_search_holds_the_other_worker() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const HOLD: Duration = Duration::from_millis(400);
+
+        let server = Arc::new(Server::http("127.0.0.1:0").expect("bind"));
+        let addr = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr,
+            #[allow(unreachable_patterns)]
+            _ => panic!("packsetd listens on an ip"),
+        };
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let running_h = Arc::clone(&running);
+        let peak_h = Arc::clone(&peak);
+        let (lane, handles) = spawn_workers(&server, 2, move |request| {
+            let url = request.url().to_string();
+            let path = url.split('?').next().unwrap_or(&url);
+            if path == "/health" {
+                let _ = request.respond(Response::from_string("ok"));
+                return;
+            }
+            let now = running_h.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_h.fetch_max(now, Ordering::SeqCst);
+            let _ = entered_tx.send(());
+            std::thread::sleep(HOLD);
+            running_h.fetch_sub(1, Ordering::SeqCst);
+            let _ = request.respond(Response::from_string("search"));
+        });
+
+        fn get(addr: std::net::SocketAddr, path: &str) -> Duration {
+            let started = Instant::now();
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("timeout");
+            let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+            stream.write_all(req.as_bytes()).expect("write");
+            let mut buf = [0u8; 512];
+            let n = stream.read(&mut buf).expect("read");
+            let text = String::from_utf8_lossy(&buf[..n]);
+            assert!(text.contains("200"), "{text}");
+            started.elapsed()
+        }
+
+        let search = std::thread::spawn(move || get(addr, "/v1/search?workspace=seat&q=one"));
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("search started");
+        let search_late = std::thread::spawn(move || get(addr, "/v1/search?workspace=seat&q=two"));
+        let wait_parked = Instant::now();
+        while lock_lane(&lane).parked() == 0 {
+            assert!(
+                wait_parked.elapsed() < Duration::from_secs(2),
+                "the second search was not parked"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let health = get(addr, "/health");
+        let late = search_late.join().expect("late search");
+        let first = search.join().expect("first search");
+
+        assert!(
+            health < Duration::from_millis(200),
+            "health waited {health:?} behind a search"
+        );
+        assert!(first >= HOLD, "the holding search returned in {first:?}");
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert!(late >= HOLD, "the parked search returned in {late:?}");
+
+        for _ in 0..handles.len() {
+            server.unblock();
+        }
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 
     #[test]

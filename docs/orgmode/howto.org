@@ -149,12 +149,13 @@ with =--import= does that after checking the bag. Trust rows travel the same way
 
 * Serve many agents
 
-One writer serves every client on the seat. The worker pool is the balance:
-=PACKSET_WORKERS= sets it (default: the core count), a burst waits in the
-accept queue rather than becoming threads, and one logical write runs at a
-time so two identical claims arriving together are stored once. Reads share
-one parsed snapshot per write. The encoder runs before the write lock and is
-warmed at start.
+One writer serves every client on the seat. The worker pool is the balance.
+=PACKSET_WORKERS= sets the pool. The default is four. The cap is eight.
+A burst waits in the accept queue rather than becoming threads. Health,
+status and the workspace list keep one worker. A search does not hold that
+worker. One logical write runs at a time. Two identical claims arriving
+together are stored once. Reads share one parsed snapshot per write. The
+encoder runs before the write lock and is warmed at start.
 
 #+begin_src console
 $ PACKSET_WORKERS=8 packsetd --port 8761
