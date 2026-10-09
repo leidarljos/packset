@@ -95,6 +95,10 @@ pub struct Service {
     /// each write on its own ran the indexer once per claim, and a fill of
     /// ten thousand claims spent most of its time there.
     projection: Arc<Mutex<Vec<ProjectionOp>>>,
+    /// Held while queued writes are applied to the index, so a search waits
+    /// for a flush in flight and a write never does. The queue's own lock
+    /// is held only to push, to take or to count.
+    projecting: Arc<Mutex<()>>,
     /// Whether a flush of the queue is already scheduled.
     flush_scheduled: Arc<AtomicBool>,
 }
@@ -233,6 +237,15 @@ fn flush_projection_ops(ops: Vec<ProjectionOp>, dir: &std::path::Path) {
     }
 }
 
+/// Apply what the queue holds. The ops are taken while the index is held,
+/// so two flushes never apply out of order, and a search that waited for a
+/// flush in flight then applies every write after it.
+fn flush_queued(pending: &Mutex<Vec<ProjectionOp>>, projecting: &Mutex<()>, dir: &std::path::Path) {
+    let _applying = projecting.lock().unwrap_or_else(|e| e.into_inner());
+    let ops = std::mem::take(&mut *pending.lock().unwrap_or_else(|e| e.into_inner()));
+    flush_projection_ops(ops, dir);
+}
+
 /// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand, a
 /// size at which the hook still answers a prompt in a tenth of a second.
 pub const DEFAULT_LIVE_CAP: usize = 20_000;
@@ -286,6 +299,7 @@ impl Service {
             swept: Mutex::new(HashMap::new()),
             fired_recently: Mutex::new(HashMap::new()),
             projection: Arc::new(Mutex::new(Vec::new())),
+            projecting: Arc::new(Mutex::new(())),
             flush_scheduled: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -303,6 +317,7 @@ impl Service {
             return;
         }
         let pending = Arc::clone(&self.projection);
+        let projecting = Arc::clone(&self.projecting);
         let scheduled = Arc::clone(&self.flush_scheduled);
         let dir = self.home.milli_dir();
         std::thread::spawn(move || {
@@ -318,19 +333,14 @@ impl Service {
                 }
             }
             scheduled.store(false, Ordering::Release);
-            // The queue stays locked until the index holds what was taken
-            // from it, so a search's own flush waits for this one rather
-            // than finding the queue empty and reading a half-written index.
-            let mut queue = pending.lock().unwrap_or_else(|e| e.into_inner());
-            flush_projection_ops(std::mem::take(&mut *queue), &dir);
+            flush_queued(&pending, &projecting, &dir);
         });
     }
 
     /// Bring the search index level with every write so far, now. A read
     /// of the index calls this first, so a search sees its own writes.
     pub fn flush_projection(&self) {
-        let mut queue = self.projection.lock().unwrap_or_else(|e| e.into_inner());
-        flush_projection_ops(std::mem::take(&mut *queue), &self.home.milli_dir());
+        flush_queued(&self.projection, &self.projecting, &self.home.milli_dir());
     }
 
     /// Forgetting by neglect: a claim left due for longer than twice its
@@ -459,7 +469,7 @@ impl Service {
     /// Shape every live claim of a workspace the first time this process
     /// writes to it, so the postings cover the pack; afterwards each write
     /// shapes what it wrote.
-    fn shape_workspace_once(&self, workspace: &str, live: &[Record]) {
+    fn shape_workspace_once(&self, workspace: &str, live: &[&Record]) {
         let first = self
             .shaped
             .lock()
@@ -712,44 +722,36 @@ impl Service {
             .to_string();
         let named = atom.get("set").and_then(Value::as_str).map(str::to_string);
 
-        // Compared within its own scope; the shared snapshot is narrowed only
-        // when the scope excludes something.
+        // Compared within its own scope, by reference: a copy of the snapshot
+        // would cost the whole pack on every write.
         let snapshot = self.store.live(&workspace)?;
         let snapshot_len = snapshot.len();
         trace.mark("snapshot");
-        let narrowed: Vec<Record>;
-        let live: &[Record] = match named.as_deref() {
-            Some(name) => {
-                narrowed = snapshot
-                    .iter()
-                    .filter(|peer| peer.get("set").and_then(Value::as_str) == Some(name))
-                    .cloned()
-                    .collect();
-                &narrowed
-            }
-            None if snapshot.iter().any(|peer| peer.contains_key("set")) => {
-                narrowed = snapshot
-                    .iter()
-                    .filter(|peer| !peer.contains_key("set"))
-                    .cloned()
-                    .collect();
-                &narrowed
-            }
-            None => &snapshot,
+        let live: Vec<&Record> = match named.as_deref() {
+            Some(name) => snapshot
+                .iter()
+                .filter(|peer| peer.get("set").and_then(Value::as_str) == Some(name))
+                .collect(),
+            None => snapshot
+                .iter()
+                .filter(|peer| !peer.contains_key("set"))
+                .collect(),
         };
         let shape = record::Shape::of(&atom);
         // One id map per write serves the duplicate, replacement and linking
         // rules; the candidates are the claims that could satisfy any of them.
-        self.shape_workspace_once(&workspace, live);
+        self.shape_workspace_once(&workspace, &live);
         let by_id: HashMap<&str, &Record> = live
             .iter()
-            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, p)))
+            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, *p)))
             .collect();
         let candidates = self.replace_candidates(&atom, &shape, &by_id);
         // A duplicate shares every token, so it is among the candidates; a
         // claim with no tokens is compared against the whole set.
         let same_text: Option<&Record> = if shape.tokens.is_empty() {
-            live.iter().find(|existing| same_claim(existing, &atom))
+            live.iter()
+                .copied()
+                .find(|existing| same_claim(existing, &atom))
         } else {
             candidates
                 .iter()
@@ -793,27 +795,10 @@ impl Service {
         trace.mark("replace");
         if record::is_live(&atom, &now) {
             // Closed peers stay out of apply_links: a rewrite of links would
-            // otherwise write them back without valid_to.
-            let remaining: Vec<Record>;
-            let peers: &[Record] = if closed.is_empty() {
-                live
-            } else {
-                remaining = live
-                    .iter()
-                    .filter(|peer| {
-                        peer.get("id")
-                            .and_then(Value::as_str)
-                            .map(|id| !closed.iter().any(|c| c == id))
-                            .unwrap_or(true)
-                    })
-                    .cloned()
-                    .collect();
-                &remaining
-            };
-            // Only a peer that shares a name can be linked, and only its
-            // links can be re-selected when it fills; the rest of the pack
-            // is not read.
-            let narrowed = self.link_peers(peers, &shape, &by_id, &closed);
+            // otherwise write them back without valid_to. Only a peer that
+            // shares a name can be linked, and only its links can be
+            // re-selected when it fills; the rest of the pack is not read.
+            let narrowed = self.link_peers(&shape, &by_id, &closed);
             let rewritten =
                 record::apply_links_among(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
             for mut peer in rewritten {
@@ -865,16 +850,15 @@ impl Service {
     /// over the whole pack.
     fn link_peers<'p>(
         &self,
-        peers: &'p [Record],
         shape: &record::Shape,
         by_id: &HashMap<&str, &'p Record>,
         closed: &[String],
     ) -> Vec<&'p Record> {
-        if shape.entities.is_empty() || peers.is_empty() {
+        if shape.entities.is_empty() || by_id.is_empty() {
             return Vec::new();
         }
         // The peers sharing an entity come from the postings; a closed peer
-        // is out, as it is out of `peers`.
+        // is passed over.
         let mut wanted: BTreeSet<&str> = BTreeSet::new();
         if let Ok(postings) = self.postings.read() {
             for entity in &shape.entities {
