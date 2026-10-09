@@ -14,6 +14,7 @@ pub mod milli;
 pub mod proposals;
 pub mod service;
 pub mod store;
+pub mod wire;
 pub mod workspace;
 
 pub use home::Home;

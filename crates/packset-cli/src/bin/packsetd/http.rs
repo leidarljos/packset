@@ -8,41 +8,49 @@
 //! [`crate::service`].
 
 use std::collections::HashMap;
+use std::net::TcpListener;
 use std::sync::Arc;
 
 use packset_core::record::AtomError;
 use serde_json::{json, Map, Value};
-use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::cards::WriteError;
 use crate::service::Service;
+use crate::wire::{self, Method};
 
 /// The address the writer will bind, and no other.
 pub const LOOPBACK: &str = "127.0.0.1";
 /// The port the clients look for.
 pub const DEFAULT_PORT: u16 = 8761;
-/// Workers when the machine will not say how many cores it has.
+/// Workers when `PACKSET_WORKERS` does not name a number.
 pub const DEFAULT_WORKERS: usize = 4;
 /// The ceiling on workers. 32 threads each kept a 64 MB malloc arena
 /// (2 GB idle) on a 32-thread laptop.
 pub const MAX_WORKERS: usize = 8;
+/// Connections that may wait for a worker before the next is told busy.
+pub const DEFAULT_QUEUE: usize = 128;
+/// The ceiling on the queue: each waiting connection holds a descriptor.
+pub const MAX_QUEUE: usize = 4096;
 
 /// How many requests this writer will answer at once.
 ///
-/// A thread per connection is fine until something loops on the socket, and
-/// then it is an unbounded number of threads on a seat that has other work to
-/// do. A fixed pool pulling from one queue answers the same requests and makes
-/// a burst wait instead of a machine swap.
+/// A fixed pool pulling from one queue makes a burst wait instead of a
+/// machine swap.
 #[must_use]
 pub fn worker_count() -> usize {
-    if let Some(raw) = std::env::var_os("PACKSET_WORKERS") {
-        if let Some(n) = raw.to_str().and_then(|s| s.trim().parse::<usize>().ok()) {
-            if n > 0 {
-                return n.min(MAX_WORKERS);
-            }
-        }
-    }
-    DEFAULT_WORKERS
+    positive_env("PACKSET_WORKERS").map_or(DEFAULT_WORKERS, |n| n.min(MAX_WORKERS))
+}
+
+/// How many accepted connections may wait for a worker, `PACKSET_QUEUE`.
+#[must_use]
+pub fn queue_depth() -> usize {
+    positive_env("PACKSET_QUEUE").map_or(DEFAULT_QUEUE, |n| n.min(MAX_QUEUE))
+}
+
+fn positive_env(name: &str) -> Option<usize> {
+    std::env::var_os(name)
+        .and_then(|raw| raw.to_str().and_then(|s| s.trim().parse::<usize>().ok()))
+        .filter(|n| *n > 0)
 }
 
 /// What a route decided to answer.
@@ -78,60 +86,38 @@ pub fn serve(
     if host != LOOPBACK {
         anyhow::bail!("packsetd listens on {LOOPBACK} only");
     }
-    let server = Arc::new(
-        Server::http((host, port))
-            .map_err(|e| anyhow::anyhow!("cannot bind {host}:{port}: {e}"))?,
-    );
+    let listener = TcpListener::bind((host, port))
+        .map_err(|e| anyhow::anyhow!("cannot bind {host}:{port}: {e}"))?;
     let workers = worker_count();
-    eprintln!("packsetd: listening on http://{host}:{port} with {workers} workers");
-    let panel = Arc::new(panel);
-
-    // Every worker pulls from the server's own queue, so the pool is the
-    // balance: a burst waits in the queue rather than becoming threads.
-    let mut handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let server = Arc::clone(&server);
-        let service = Arc::clone(&service);
-        let panel = Arc::clone(&panel);
-        // The loop ends when the listener is gone, which is how this process
-        // stops.
-        handles.push(std::thread::spawn(move || {
-            while let Ok(request) = server.recv() {
-                handle(&service, &panel, request);
-            }
-        }));
-    }
-    for handle in handles {
-        let _ = handle.join();
-    }
+    let queue = queue_depth();
+    eprintln!(
+        "packsetd: listening on http://{host}:{port} with {workers} workers and room for {queue} waiting"
+    );
+    wire::serve(&listener, workers, queue, move |request| {
+        handle(&service, &panel, request)
+    });
     Ok(())
 }
 
-fn handle(service: &Service, panel: &packset_core::Panel, mut request: Request) {
-    let url = request.url().to_string();
-    let (path, query) = split_query(&url);
-    let method = request.method().clone();
-
-    if method == Method::Get && path == "/health" {
-        let response = Response::from_string("packsetd ok").with_header(text_plain());
-        let _ = request.respond(response);
-        return;
+fn handle(
+    service: &Service,
+    panel: &packset_core::Panel,
+    request: &wire::Request,
+) -> wire::Response {
+    let (path, query) = split_query(&request.target);
+    if request.method == Method::Get && path == "/health" {
+        return wire::Response::text(200, "packsetd ok");
     }
-
-    let body = if matches!(method, Method::Post | Method::Put) {
-        match read_json(&mut request) {
+    let body = if matches!(request.method, Method::Post | Method::Put) {
+        match read_json(&request.body) {
             Ok(map) => map,
-            Err(message) => {
-                respond(request, &Answer::err(400, message));
-                return;
-            }
+            Err(message) => return encode(&Answer::err(400, message)),
         }
     } else {
         Map::new()
     };
-
-    let answer = route(service, panel, &method, path, &query, &body);
-    respond(request, &answer);
+    let answer = route(service, panel, &request.method, path, &query, &body);
+    encode(&answer)
 }
 
 fn route(
@@ -698,16 +684,12 @@ fn truthy(raw: Option<&str>) -> bool {
     matches!(raw, Some("1" | "true" | "yes"))
 }
 
-fn read_json(request: &mut Request) -> Result<Map<String, Value>, String> {
-    let mut raw = String::new();
-    request
-        .as_reader()
-        .read_to_string(&mut raw)
-        .map_err(|e| e.to_string())?;
+fn read_json(bytes: &[u8]) -> Result<Map<String, Value>, String> {
+    let raw = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
     if raw.trim().is_empty() {
         return Ok(Map::new());
     }
-    let value: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let value: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     value
         .as_object()
         .cloned()
@@ -760,20 +742,9 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn text_plain() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).expect("static header")
-}
-
-fn application_json() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("static header")
-}
-
-fn respond(request: Request, answer: &Answer) {
+fn encode(answer: &Answer) -> wire::Response {
     let body = serde_json::to_string(&answer.body).unwrap_or_else(|_| "{}".into());
-    let response = Response::from_string(body)
-        .with_status_code(answer.code)
-        .with_header(application_json());
-    let _ = request.respond(response);
+    wire::Response::json(answer.code, body)
 }
 
 #[cfg(test)]

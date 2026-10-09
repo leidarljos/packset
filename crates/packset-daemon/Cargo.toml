@@ -33,9 +33,9 @@ indexmap = "2"
 packset-core = { path = "../packset-core", version = "0.11.0" }
 serde.workspace = true
 serde_json.workspace = true
-tiny_http = "0.12"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
 packset-client = { path = "../packset-client", version = "0.11.0" }
 ureq = { version = "2", default-features = false, features = ["json"] }

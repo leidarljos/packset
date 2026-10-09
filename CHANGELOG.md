@@ -4,6 +4,26 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The writer keeps accepting after the process runs out of descriptors.
+  Under `tiny_http` every connection held a thread and two descriptors,
+  and the first `Too many open files` ended the accept loop for good. Two
+  hundred clients that gave up after 300 ms did it, and so did 1100 held
+  connections under a 1024-descriptor limit. The same loads now leave the
+  writer answering.
+
+- A request waits in a queue of `PACKSET_QUEUE` connections (default
+  128). Past that it is answered 503 with `Retry-After: 1`; `/health`
+  still answers. A client that has gone is not served. A request that
+  panics gets a 500, and its worker takes the next.
+
+- A write no longer copies the pack or waits for the search index.
+  Narrowing its peers copied every claim in its scope once any claim held
+  a `set`, as persona lessons do, and its index update queued behind the
+  indexer run. On the hammer's sixteen clients writing into one
+  workspace, whose claims hold no set, a write traced 32 ms at p95
+  against 37.
+
+
 - Finding the encoder and search binaries no longer walks the
   filesystem on every call: `packset-embed` and `packset-milli`
   discovery (the binary beside the writer, the tree candidates, the
