@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The explanation names who writes in Letta, A-MEM, MemoryBank and
+  Generative Agents. The pack's clock, its links and its proposals do
+  not call a model to write.
+
 - A kind: `outcome`, the option an issue closed on (`issue`, `choice`).
   The issue's ballots and its outcome say which voters were right, so a
   settle can discount voters who err together. `add` starts no review

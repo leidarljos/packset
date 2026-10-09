@@ -174,6 +174,22 @@ is between retrievers under one reader, which is how the retrieval half of
 those systems is measured too. The interned table is
 ``docs/orgmode/results/longmemeval-s-qa.org`` in this repository.
 
+The systems above differ in retrieval. Four more differ in who writes.
+Letta, formerly MemGPT (doi:10.48550/arXiv.2310.08560), keeps a core
+memory the model edits, and its sleep-time compute
+(doi:10.48550/arXiv.2504.13171) reorganises the store between turns.
+The pack's reorganisation is the review clock and the consolidation
+rule, and neither calls a model. A-MEM (doi:10.48550/arXiv.2502.12110)
+has the model write links and rewrite older notes when a new one
+arrives. A link here gains weight with use and loses it with disuse,
+and an old claim is closed rather than rewritten. MemoryBank
+(doi:10.48550/arXiv.2305.10250) forgets on an Ebbinghaus curve
+refreshed by recall. The decay below is the Free Spaced Repetition
+Scheduler's retrievability, and a forgotten claim is a tombstone after
+lapsed reviews. Generative Agents (doi:10.48550/arXiv.2304.03442)
+reflect a ranking into new memories. A proposal here becomes a claim
+when somebody accepts it.
+
 Forgetting is a feature
 =======================
 
