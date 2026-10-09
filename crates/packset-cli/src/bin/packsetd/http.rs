@@ -22,7 +22,7 @@ use crate::wire::{self, Method};
 pub const LOOPBACK: &str = "127.0.0.1";
 /// The port the clients look for.
 pub const DEFAULT_PORT: u16 = 8761;
-/// Workers when `PACKSET_WORKERS` does not name a number.
+/// Workers when `PACKSET_WORKERS` does not name a number. Not the core count.
 pub const DEFAULT_WORKERS: usize = 4;
 /// The ceiling on workers. 32 threads each kept a 64 MB malloc arena
 /// (2 GB idle) on a 32-thread laptop.
@@ -755,6 +755,23 @@ mod tests {
     fn default_workers_is_four_not_core_count() {
         assert_eq!(DEFAULT_WORKERS, 4);
         assert_eq!(MAX_WORKERS, 8);
+        assert_eq!(wire::dear_limit(DEFAULT_WORKERS), 3);
+        assert_eq!(wire::dear_limit(1), 1);
+    }
+
+    #[test]
+    fn health_status_and_workspaces_stay_off_the_search_lane() {
+        assert!(wire::is_cheap(&Method::Get, "/health"));
+        assert!(wire::is_cheap(&Method::Get, "/v1/status?workspace=seat"));
+        assert!(wire::is_cheap(&Method::Get, "/v1/workspaces"));
+        assert!(wire::is_cheap(&Method::Get, "/__inside_memd/health"));
+        assert!(!wire::is_cheap(
+            &Method::Get,
+            "/v1/search?workspace=seat&q=fusion"
+        ));
+        assert!(!wire::is_cheap(&Method::Get, "/v1/atoms?workspace=seat"));
+        assert!(!wire::is_cheap(&Method::Post, "/health"));
+        assert!(!wire::is_cheap(&Method::Post, "/v1/atoms"));
     }
 
     #[test]

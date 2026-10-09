@@ -6,6 +6,7 @@
 //! accept loop never ends: with no descriptor left, it waits and accepts
 //! again.
 
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
@@ -104,6 +105,76 @@ struct Waiting {
     accepted: Instant,
 }
 
+/// A request already read, waiting for a dear slot or holding one.
+struct Held {
+    stream: TcpStream,
+    accepted: Instant,
+    request: Request,
+}
+
+/// How many searches or writes may run at once.
+///
+/// One worker stays out of that work when the pool has more than one, so
+/// health, status and the workspace list still answer during a burst. A
+/// single worker cannot split.
+pub(crate) fn dear_limit(workers: usize) -> usize {
+    match workers {
+        0 | 1 => 1,
+        n => n - 1,
+    }
+}
+
+/// Health, status and the workspace list. Everything else can encode, scan
+/// or take the write lock, and waits on [`dear_limit`].
+pub(crate) fn is_cheap(method: &Method, target: &str) -> bool {
+    if !matches!(method, Method::Get) {
+        return false;
+    }
+    let path = target.split('?').next().unwrap_or(target);
+    matches!(
+        path,
+        "/health" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health"
+    )
+}
+
+/// Searches and writes in flight, and the ones waiting for a slot.
+struct Lane {
+    limit: usize,
+    in_flight: usize,
+    parked: VecDeque<Held>,
+}
+
+impl Lane {
+    fn new(workers: usize) -> Self {
+        Self {
+            limit: dear_limit(workers),
+            in_flight: 0,
+            parked: VecDeque::new(),
+        }
+    }
+
+    /// Run `job` now, or park it when the dear slots are full.
+    fn begin(&mut self, job: Held) -> Option<Held> {
+        if self.in_flight < self.limit {
+            self.in_flight += 1;
+            Some(job)
+        } else {
+            self.parked.push_back(job);
+            None
+        }
+    }
+
+    /// The next parked job, which keeps this slot. `None` releases it.
+    fn end(&mut self) -> Option<Held> {
+        if let Some(next) = self.parked.pop_front() {
+            Some(next)
+        } else {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            None
+        }
+    }
+}
+
 /// Serve `listener` until the process ends.
 ///
 /// `workers` threads answer; at most `queue` accepted connections wait for
@@ -117,12 +188,15 @@ where
     let handle = Arc::new(handle);
     let (tx, rx) = sync_channel::<Waiting>(queue.max(1));
     let rx = Arc::new(Mutex::new(rx));
-    for n in 0..workers.max(1) {
+    let slots = workers.max(1);
+    let lane = Arc::new(Mutex::new(Lane::new(slots)));
+    for n in 0..slots {
         let rx = Arc::clone(&rx);
         let handle = Arc::clone(&handle);
+        let lane = Arc::clone(&lane);
         let spawned = std::thread::Builder::new()
             .name(format!("packsetd-worker-{n}"))
-            .spawn(move || work(&rx, handle.as_ref()));
+            .spawn(move || work(&rx, &lane, handle.as_ref()));
         if let Err(e) = spawned {
             eprintln!("packsetd: cannot start worker {n}: {e}");
         }
@@ -195,7 +269,11 @@ mod libc_errno {
 }
 
 /// One worker: take the oldest waiting connection, answer it, repeat.
-fn work<H>(rx: &Mutex<Receiver<Waiting>>, handle: &H)
+///
+/// A cheap request runs on the worker that read it. A search or a write
+/// runs only while a dear slot is free; otherwise it waits on the lane and
+/// this worker goes back to the queue, so health is not stuck behind it.
+fn work<H>(rx: &Mutex<Receiver<Waiting>>, lane: &Mutex<Lane>, handle: &H)
 where
     H: Fn(&Request) -> Response,
 {
@@ -209,34 +287,67 @@ where
         let Ok(waiting) = next else {
             return;
         };
-        answer(&waiting.stream, waiting.accepted, handle);
+        let request = match read_request(&waiting.stream) {
+            Err(ReadError::Gone) => continue,
+            Err(ReadError::Refuse(code, why)) => {
+                reply(
+                    &waiting.stream,
+                    &Response::json(code, serde_json::json!({ "error": why }).to_string()),
+                );
+                continue;
+            }
+            Ok(request) => request,
+        };
+        if is_cheap(&request.method, &request.target) {
+            reply_ran(&waiting.stream, waiting.accepted, &request, handle);
+            continue;
+        }
+        let held = Held {
+            stream: waiting.stream,
+            accepted: waiting.accepted,
+            request,
+        };
+        let admitted = {
+            let mut lane = lane.lock().unwrap_or_else(|poison| poison.into_inner());
+            lane.begin(held)
+        };
+        let Some(mut held) = admitted else {
+            continue;
+        };
+        loop {
+            reply_ran(&held.stream, held.accepted, &held.request, handle);
+            let next = {
+                let mut lane = lane.lock().unwrap_or_else(|poison| poison.into_inner());
+                lane.end()
+            };
+            match next {
+                Some(parked) => held = parked,
+                None => break,
+            }
+        }
     }
 }
 
-/// Read one request, run it unless its client has gone, write the answer
-/// and close.
-fn answer<H>(stream: &TcpStream, accepted: Instant, handle: &H)
+/// Run `request` unless its client has gone, write the answer and close.
+fn reply_ran<H>(stream: &TcpStream, accepted: Instant, request: &Request, handle: &H)
 where
     H: Fn(&Request) -> Response,
 {
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_nodelay(true);
-    let response = match read_request(stream) {
-        Err(ReadError::Gone) => return,
-        Err(ReadError::Refuse(code, why)) => {
-            Response::json(code, serde_json::json!({ "error": why }).to_string())
-        }
-        Ok(request) => {
-            // A client that timed out and closed while its request waited
-            // already has its error, so the request is not run: a write it
-            // gave up on is not applied.
-            if abandoned(stream) {
-                return;
-            }
-            run(&request, accepted, handle)
-        }
-    };
-    let _ = write_response(stream, &response, &[]);
+    // A client that timed out and closed while its request waited already
+    // has its error, so the request is not run: a write it gave up on is
+    // not applied.
+    if abandoned(stream) {
+        return;
+    }
+    let response = run(request, accepted, handle);
+    reply(stream, &response);
+}
+
+fn reply(stream: &TcpStream, response: &Response) {
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    let _ = write_response(stream, response, &[]);
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
@@ -768,5 +879,82 @@ mod tests {
         let out = exchange(port, b"GET /after HTTP/1.1\r\n\r\n");
         assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
         assert_eq!(ran.load(Ordering::SeqCst), 2, "the abandoned request ran");
+    }
+
+    #[test]
+    fn dear_slots_leave_one_worker_for_a_pool() {
+        assert_eq!(dear_limit(4), 3);
+        assert_eq!(dear_limit(1), 1);
+        assert!(is_cheap(&Method::Get, "/health"));
+        assert!(is_cheap(&Method::Get, "/v1/status?workspace=seat"));
+        assert!(is_cheap(&Method::Get, "/v1/workspaces"));
+        assert!(is_cheap(&Method::Get, "/__inside_memd/health"));
+        assert!(!is_cheap(
+            &Method::Get,
+            "/v1/search?workspace=seat&q=fusion"
+        ));
+        assert!(!is_cheap(&Method::Post, "/health"));
+    }
+
+    /// Two workers, one dear slot. A health check returns while a search
+    /// still holds that slot, and a second search does not run beside it.
+    #[test]
+    fn health_answers_while_a_search_holds_the_other_worker() {
+        const HOLD: Duration = Duration::from_millis(400);
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let entered = Arc::new(Mutex::new(Some(tx)));
+        let running_h = Arc::clone(&running);
+        let peak_h = Arc::clone(&peak);
+        let port = start(2, 8, move |request: &Request| {
+            if is_cheap(&request.method, &request.target) {
+                return Response::text(200, "ok");
+            }
+            let now = running_h.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_h.fetch_max(now, Ordering::SeqCst);
+            if let Some(tx) = entered.lock().expect("entered").take() {
+                let _ = tx.send(());
+            }
+            std::thread::sleep(HOLD);
+            running_h.fetch_sub(1, Ordering::SeqCst);
+            Response::text(200, "search")
+        });
+
+        let search = std::thread::spawn(move || {
+            let started = Instant::now();
+            let out = exchange(port, b"GET /v1/search?q=one HTTP/1.1\r\nHost: x\r\n\r\n");
+            (started.elapsed(), out)
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("search started");
+        let late = std::thread::spawn(move || {
+            let started = Instant::now();
+            let out = exchange(port, b"GET /v1/search?q=two HTTP/1.1\r\nHost: x\r\n\r\n");
+            (started.elapsed(), out)
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        let health_at = Instant::now();
+        let health = exchange(port, b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
+        let health_wait = health_at.elapsed();
+        let (first_wait, first_out) = search.join().expect("first search");
+        let (late_wait, late_out) = late.join().expect("late search");
+
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(
+            health_wait < Duration::from_millis(200),
+            "health waited {health_wait:?} behind a search"
+        );
+        assert!(first_out.starts_with("HTTP/1.1 200"), "{first_out}");
+        assert!(
+            first_wait >= HOLD,
+            "the holding search returned in {first_wait:?}"
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert!(late_out.starts_with("HTTP/1.1 200"), "{late_out}");
+        assert!(
+            late_wait >= HOLD,
+            "the parked search returned in {late_wait:?}"
+        );
     }
 }

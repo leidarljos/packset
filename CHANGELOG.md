@@ -125,6 +125,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - `rust-toolchain.toml` pins 1.89.0: the default 1.83 cannot parse a dependency manifest in the tree (a fuzz helper's edition-2024).
 - The explanation positions the pack against the write-path systems: Letta/sleep-time, A-MEM, MemoryBank and Generative Agents, against the no-model-writes rule.
+
+- `/health`, `/v1/status` and `/v1/workspaces` answer on a worker that a
+  search or a write is not holding. The pool stays four, and eight at
+  most. With one worker, that worker runs every request in turn.
+
 - The explanation names who writes in Letta, agentic memory, MemoryBank,
   Generative Agents and HippoRAG. The measured rows are unchanged.
   Sleep-time compute is a model thinking before the question. It is not
