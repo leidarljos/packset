@@ -1150,6 +1150,13 @@ pub fn replaces_shaped(
     if IDENTITY_KEYS.iter().any(|k| new.get(*k) != old.get(*k)) {
         return false;
     }
+    // A trust row's domain is its declared entities. An empty list and a
+    // missing list are the same unscoped row. A non-empty set stays apart
+    // from the unscoped row and from a different set. Order does not count.
+    if new.get("kind").and_then(Value::as_str) == Some("trust") && new_shape.gate != old_shape.gate
+    {
+        return false;
+    }
     let shared = new_shape
         .entities
         .intersection(&old_shape.entities)
@@ -1670,7 +1677,19 @@ mod tests {
         scoped.insert("about".into(), json!(["docs"]));
         assert!(
             !replaces(&scoped, &row("cursor", "newcomer", "1.000")),
-            "a scoped row beside the unscoped one"
+            "a row with a different about beside the unscoped one"
+        );
+        let mut domain = row("cursor", "newcomer", "0.800");
+        domain.insert("entities".into(), json!(["docs"]));
+        assert!(
+            !replaces(&domain, &row("cursor", "newcomer", "1.000")),
+            "a domain-scoped trust row beside the unscoped one"
+        );
+        let mut same_domain = row("cursor", "newcomer", "1.000");
+        same_domain.insert("entities".into(), json!(["docs"]));
+        assert!(
+            replaces(&same_domain, &domain),
+            "a new weight on the same domain closes the old row"
         );
         let forecast = |agent: &str, share: &str| {
             atom(json!({
