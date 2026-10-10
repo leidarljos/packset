@@ -69,8 +69,16 @@ pub fn run() -> anyhow::Result<()> {
         panel.decay.as_str()
     );
 
-    let service = Arc::new(Service::open(Home::new(root))?);
-    http::serve(service, panel, &host, port)
+    let service = Arc::new(Service::open(Home::new(&root))?);
+    // Every user on the host reaches loopback; the token is what keeps the
+    // pack its owner's. `PACKSET_AUTH=off` is for a client that cannot send it.
+    let token = if std::env::var("PACKSET_AUTH").is_ok_and(|v| v.trim() == "off") {
+        eprintln!("packsetd: PACKSET_AUTH=off; every local user can read and write this pack");
+        None
+    } else {
+        Some(crate::auth::ensure_token(&root)?)
+    };
+    http::serve(service, panel, &host, port, token)
 }
 
 fn packsetd_usage() -> String {
@@ -83,7 +91,10 @@ fn packsetd_usage() -> String {
              --home <dir>        the pack home, or PACKSET_HOME\n\
              --fuse <name>       host fuse voter, or PACKSET_FUSE\n\
              --diversify <name>  host diversify voter, or PACKSET_DIVERSIFY\n\
-             --decay <name>      host decay voter, or PACKSET_DECAY",
+             --decay <name>      host decay voter, or PACKSET_DECAY\n\
+         \n\
+         Every request but GET /health carries the token in <home>/token as\n\
+         Authorization: Bearer TOKEN. PACKSET_AUTH=off drops the check.",
         http::LOOPBACK,
         http::DEFAULT_PORT
     )

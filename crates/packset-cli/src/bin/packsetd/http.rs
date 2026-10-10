@@ -78,11 +78,14 @@ impl Answer {
 /// # Errors
 ///
 /// Fails when the address cannot be bound.
+/// `token` is what every request but `GET /health` must carry as a bearer
+/// header; `None` admits every local user, and is only for `PACKSET_AUTH=off`.
 pub fn serve(
     service: Arc<Service>,
     panel: packset_core::Panel,
     host: &str,
     port: u16,
+    token: Option<String>,
 ) -> anyhow::Result<()> {
     if host != LOOPBACK {
         anyhow::bail!("packsetd listens on {LOOPBACK} only");
@@ -95,7 +98,7 @@ pub fn serve(
         "packsetd: listening on http://{host}:{port} with {workers} workers and room for {queue} waiting"
     );
     wire::serve(&listener, workers, queue, move |request| {
-        handle(&service, &panel, request)
+        handle(&service, &panel, token.as_deref(), request)
     });
     Ok(())
 }
@@ -103,11 +106,15 @@ pub fn serve(
 fn handle(
     service: &Service,
     panel: &packset_core::Panel,
+    token: Option<&str>,
     request: &wire::Request,
 ) -> wire::Response {
     let (path, query) = split_query(&request.target);
     if request.method == Method::Get && path == "/health" {
         return wire::Response::text(200, "packsetd ok");
+    }
+    if let Some(refusal) = refuse_unauthorized(token, request) {
+        return refusal;
     }
     let body = if matches!(request.method, Method::Post | Method::Put) {
         match read_json(&request.body) {
@@ -119,6 +126,18 @@ fn handle(
     };
     let answer = route(service, panel, &request.method, path, &query, &body);
     encode(&answer)
+}
+
+/// A 401 for a request without the writer's token; `None` lets it through.
+fn refuse_unauthorized(token: Option<&str>, request: &wire::Request) -> Option<wire::Response> {
+    let token = token?;
+    if crate::auth::admits(request.authorization.as_deref(), token) {
+        return None;
+    }
+    Some(encode(&Answer::err(
+        401,
+        "packsetd answers its owner only: send the token in the pack home's `token` file as `Authorization: Bearer TOKEN`",
+    )))
 }
 
 fn route(

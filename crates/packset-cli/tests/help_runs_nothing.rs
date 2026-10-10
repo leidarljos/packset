@@ -70,6 +70,7 @@ fn packset(writer: &Writer, args: &[&str]) -> Output {
         .env("HOME", writer.home.path())
         .env("PACKSET_URL", &writer.url)
         .env("PACKSET_PORT", port)
+        .env("PACKSET_HOME", writer.home.path().join("pack"))
         .env("PACKSET_WORKSPACE", "help-test")
         .env_remove("INSIDE_MEMORY_URL")
         .current_dir(Path::new(writer.home.path()))
@@ -77,8 +78,15 @@ fn packset(writer: &Writer, args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// `Authorization: Bearer TOKEN` for the writer's own token.
+fn bearer(writer: &Writer) -> String {
+    let token = std::fs::read_to_string(writer.home.path().join("pack/token")).unwrap();
+    format!("Bearer {}", token.trim())
+}
+
 fn seed(writer: &Writer, workspace: &str, text: &str) {
     ureq::post(&format!("{}/v1/atoms", writer.url))
+        .set("Authorization", &bearer(writer))
         .send_json(ureq::json!({
             "workspace": workspace,
             "kind": "conclusion",
@@ -89,6 +97,7 @@ fn seed(writer: &Writer, workspace: &str, text: &str) {
 
 fn live(writer: &Writer, workspace: &str) -> usize {
     let body: serde_json::Value = ureq::get(&format!("{}/v1/atoms", writer.url))
+        .set("Authorization", &bearer(writer))
         .query("workspace", workspace)
         .query("embedding", "omit")
         .call()

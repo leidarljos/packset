@@ -124,6 +124,52 @@ pub fn default_port() -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
+/// The token file a writer leaves in its pack home: `PACKSET_TOKEN_FILE`,
+/// else `token` under `PACKSET_HOME` (`GROKINSIDE_HOME`,
+/// `GROK_INSIDE_MEMORY_HOME`), else under `~/.grokinside/memory`. packsetd
+/// resolves its home from the same variables.
+#[must_use]
+pub fn token_path() -> Option<PathBuf> {
+    let named = |key: &str| env::var_os(key).filter(|v| !v.is_empty());
+    if let Some(file) = named("PACKSET_TOKEN_FILE") {
+        return Some(PathBuf::from(file));
+    }
+    let home = named("PACKSET_HOME")
+        .or_else(|| named("GROKINSIDE_HOME"))
+        .or_else(|| named("GROK_INSIDE_MEMORY_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| named("HOME").map(|h| PathBuf::from(h).join(".grokinside").join("memory")))?;
+    Some(home.join(TOKEN_FILE))
+}
+
+/// The name of the token file in a pack home.
+pub const TOKEN_FILE: &str = "token";
+
+/// The token this seat shows the writer: `PACKSET_TOKEN`, else the first
+/// line of [`token_path`]. `None` when there is neither, and the writer then
+/// answers 401 to everything but `/health`.
+#[must_use]
+pub fn token() -> Option<String> {
+    if let Ok(t) = env::var("PACKSET_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let text = std::fs::read_to_string(token_path()?).ok()?;
+    let t = text.lines().next()?.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// `request` with this seat's token as a bearer header. A caller that speaks
+/// to the writer outside [`PacksetClient`] wraps its request in this.
+pub fn authorize(request: ureq::Request) -> ureq::Request {
+    match token() {
+        Some(t) => request.set("Authorization", &format!("Bearer {t}")),
+        None => request,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("packset url missing")]
@@ -180,6 +226,12 @@ fn refused(url: &str, e: Box<ureq::Error>) -> Error {
                 .and_then(|v| v.get("error").and_then(|r| r.as_str()).map(str::to_string))
                 .unwrap_or(text);
             let reason = reason.trim();
+            if code == 401 {
+                return Error::Bad(format!(
+                    "{url}: 401: {reason}; this seat's token does not match the writer's, \
+                     so it is another user's writer or PACKSET_HOME names another pack"
+                ));
+            }
             if reason.is_empty() {
                 Error::Bad(format!("{url}: status code {code}"))
             } else {
@@ -257,7 +309,7 @@ impl PacksetClient {
         let abs = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let url = format!("{}/v1/identity", self.base);
         let body = send(
-            ureq::get(&url).query("cwd", abs.to_string_lossy().as_ref()),
+            authorize(ureq::get(&url)).query("cwd", abs.to_string_lossy().as_ref()),
             None,
             timeout(),
         )
@@ -277,7 +329,7 @@ impl PacksetClient {
 
     pub fn health(&self) -> Result<String, Error> {
         let url = format!("{}/health", self.base);
-        let body = send(ureq::get(&url), None, timeout())
+        let body = send(authorize(ureq::get(&url)), None, timeout())
             .map_err(|e| refused(&url, e))?
             .into_string()?;
         Ok(body)
@@ -287,7 +339,7 @@ impl PacksetClient {
         let encoded = path_seg(id);
         let url = format!("{}/v1/atoms/{encoded}", self.base);
         let resp = match send(
-            ureq::get(&url).query("workspace", workspace),
+            authorize(ureq::get(&url)).query("workspace", workspace),
             None,
             timeout(),
         ) {
@@ -315,7 +367,7 @@ impl PacksetClient {
         as_of: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/atoms", self.base);
-        let mut req = ureq::get(&url).query("workspace", workspace);
+        let mut req = authorize(ureq::get(&url)).query("workspace", workspace);
         if let Some(at) = as_of {
             req = req.query("as_of", at);
         }
@@ -342,7 +394,7 @@ impl PacksetClient {
         as_of: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/atoms", self.base);
-        let mut req = ureq::get(&url)
+        let mut req = authorize(ureq::get(&url))
             .query("workspace", workspace)
             .query("embedding", "omit");
         if let Some(at) = as_of {
@@ -400,7 +452,7 @@ impl PacksetClient {
         } else {
             timeout()
         };
-        let mut req = ureq::get(&url)
+        let mut req = authorize(ureq::get(&url))
             .query("workspace", workspace)
             .query("q", q)
             .query("limit", &limit.to_string());
@@ -427,7 +479,7 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn status(&self, workspace: Option<&str>) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/status", self.base);
-        let mut req = ureq::get(&url);
+        let mut req = authorize(ureq::get(&url));
         if let Some(workspace) = workspace {
             req = req.query("workspace", workspace);
         }
@@ -444,7 +496,7 @@ impl PacksetClient {
     pub fn pin(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/pin", self.base);
         Ok(send(
-            ureq::get(&url).query("workspace", workspace),
+            authorize(ureq::get(&url)).query("workspace", workspace),
             None,
             timeout(),
         )
@@ -460,7 +512,7 @@ impl PacksetClient {
     pub fn set_pin(&self, workspace: &str, name: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/pin", self.base);
         Ok(send(
-            ureq::put(&url),
+            authorize(ureq::put(&url)),
             Some(&serde_json::json!({ "workspace": workspace, "name": name })),
             timeout(),
         )
@@ -479,7 +531,7 @@ impl PacksetClient {
     pub fn accessions(&self, workspace: &str) -> Result<Vec<String>, Error> {
         let url = format!("{}/v1/accessions", self.base);
         let body: serde_json::Value = send(
-            ureq::get(&url).query("workspace", workspace),
+            authorize(ureq::get(&url)).query("workspace", workspace),
             None,
             timeout(),
         )
@@ -516,7 +568,7 @@ impl PacksetClient {
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/atoms", self.base);
         let body: serde_json::Value = send(
-            ureq::get(&url)
+            authorize(ureq::get(&url))
                 .query("workspace", workspace)
                 .query("kind", kind),
             None,
@@ -543,7 +595,7 @@ impl PacksetClient {
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/citers", self.base);
         let body: serde_json::Value = send(
-            ureq::get(&url)
+            authorize(ureq::get(&url))
                 .query("workspace", workspace)
                 .query("accession", accession),
             None,
@@ -584,7 +636,7 @@ impl PacksetClient {
         if let Some(accession) = why {
             body["why"] = serde_json::Value::String(accession.to_string());
         }
-        let resp = match send(ureq::post(&url), Some(&body), timeout()) {
+        let resp = match send(authorize(ureq::post(&url)), Some(&body), timeout()) {
             Ok(resp) => resp,
             Err(e) if matches!(*e, ureq::Error::Status(404, _)) => {
                 return Err(Error::Bad(format!("no atom {id}")));
@@ -603,7 +655,7 @@ impl PacksetClient {
     ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/grade", self.base);
         let body: serde_json::Value = send(
-            ureq::post(&url),
+            authorize(ureq::post(&url)),
             Some(&serde_json::json!({
                 "workspace": workspace,
                 "id": id,
@@ -621,7 +673,7 @@ impl PacksetClient {
     pub fn hubs(&self, workspace: &str, limit: usize) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/hubs", self.base);
         let body: serde_json::Value = send(
-            ureq::get(&url)
+            authorize(ureq::get(&url))
                 .query("workspace", workspace)
                 .query("limit", &limit.to_string()),
             None,
@@ -635,7 +687,7 @@ impl PacksetClient {
     pub fn islands(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/islands", self.base);
         let body: serde_json::Value = send(
-            ureq::get(&url).query("workspace", workspace),
+            authorize(ureq::get(&url)).query("workspace", workspace),
             None,
             timeout(),
         )
@@ -663,7 +715,7 @@ impl PacksetClient {
     ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/fire", self.base);
         let body: serde_json::Value = send(
-            ureq::post(&url),
+            authorize(ureq::post(&url)),
             Some(
                 &serde_json::json!({"workspace": workspace, "ids": ids, "as": lens.unwrap_or("")}),
             ),
@@ -680,7 +732,7 @@ impl PacksetClient {
     pub fn consolidate(&self, workspace: &str, apply: bool) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/consolidate", self.base);
         let body: serde_json::Value = send(
-            ureq::post(&url),
+            authorize(ureq::post(&url)),
             Some(&serde_json::json!({"workspace": workspace, "apply": apply})),
             timeout(),
         )
@@ -698,7 +750,7 @@ impl PacksetClient {
     pub fn sweep(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/sweep", self.base);
         let body: serde_json::Value = send(
-            ureq::post(&url),
+            authorize(ureq::post(&url)),
             Some(&serde_json::json!({"workspace": workspace})),
             timeout(),
         )
@@ -717,7 +769,7 @@ impl PacksetClient {
     pub fn forget_workspace(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/forget", self.base);
         let body: serde_json::Value = send(
-            ureq::post(&url),
+            authorize(ureq::post(&url)),
             Some(&serde_json::json!({"workspace": workspace})),
             timeout(),
         )
@@ -753,7 +805,7 @@ impl PacksetClient {
         lens: Option<&str>,
     ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/activate", self.base);
-        let mut req = ureq::get(&url)
+        let mut req = authorize(ureq::get(&url))
             .query("workspace", workspace)
             .query("q", q)
             .query("limit", &limit.to_string())
@@ -780,7 +832,7 @@ impl PacksetClient {
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/pack", self.base);
         let body: serde_json::Value = send(
-            ureq::get(&url)
+            authorize(ureq::get(&url))
                 .query("workspace", workspace)
                 .query("set", set),
             None,
@@ -797,7 +849,7 @@ impl PacksetClient {
 
     pub fn post_atom(&self, atom: &serde_json::Value) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/atoms", self.base);
-        let body: serde_json::Value = send(ureq::post(&url), Some(atom), timeout())
+        let body: serde_json::Value = send(authorize(ureq::post(&url)), Some(atom), timeout())
             .map_err(|e| refused(&url, e))?
             .into_json()?;
         Ok(body)

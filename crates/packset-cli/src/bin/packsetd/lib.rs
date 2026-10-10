@@ -4,6 +4,7 @@
 //! isolated harness home does not get a private store. Cards stay files
 //! because a person edits them; atoms are a database because a program does.
 
+pub mod auth;
 pub mod cards;
 pub mod context;
 pub mod embed;

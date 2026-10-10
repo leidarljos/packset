@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- packsetd answers its owner only. At start it keeps a random token in `{home}/token`, mode 0600, and answers 401 to any request but `GET /health` that does not send it as `Authorization: Bearer TOKEN`. Before, any local user could read the pack and write a preference the prompt hook would inject. `packset-client` reads the token from the same home (`PACKSET_TOKEN_FILE`, `PACKSET_HOME`, or `~/.grokinside/memory`) or from `PACKSET_TOKEN`, and a 401 names the likely cause. `PACKSET_AUTH=off` drops the check for a client that cannot send the token. ljos up to 0.28 sends none, so it needs a release with this client.
+
 ## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.

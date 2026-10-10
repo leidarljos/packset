@@ -54,6 +54,8 @@ pub struct Request {
     pub method: Method,
     /// The path and query, as sent.
     pub target: String,
+    /// The `Authorization` header, when the client sent one.
+    pub authorization: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -568,6 +570,7 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
     let mut length: Option<usize> = None;
     let mut chunked = false;
     let mut expect_continue = false;
+    let mut authorization = None;
     loop {
         line.clear();
         let n = read_line(&mut reader, &mut line, &mut head_len)?;
@@ -606,6 +609,8 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
         } else if name.eq_ignore_ascii_case("expect") && value.eq_ignore_ascii_case("100-continue")
         {
             expect_continue = true;
+        } else if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_string());
         }
     }
     let wants_body = chunked || length.is_some_and(|n| n > 0);
@@ -631,6 +636,7 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
     Ok(Request {
         method: Method::parse(method),
         target: target.to_string(),
+        authorization,
         body,
     })
 }
