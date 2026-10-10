@@ -2,6 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `cargo binstall packset` builds from source on a target with no release tarball. The `compile` strategy was off, so binstall failed on every target the release does not build, x86_64 macOS, aarch64 Linux and Windows among them. The packset crate links no native runtime, so that build needs only a Rust toolchain. `packset-embed` still takes the release tarball or nothing, since its source build needs ONNX Runtime first. cargo-quickinstall stays off.
+- The install lines say `cargo binstall --locked`, which binstall passes to that source build so it takes the versions in `Cargo.lock`.
+
 ## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.

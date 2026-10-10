@@ -11,7 +11,7 @@ stays lexical, and a sitting still opens on those ballots.
 an Open Neural Network Exchange (ONNX) Runtime you compile.
 
 #+begin_src console
-$ cargo binstall packset
+$ cargo binstall --locked packset
 #+end_src
 
 * 1. Start the writer
