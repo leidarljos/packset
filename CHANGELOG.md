@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.
 - Searches and writes that a worker has read but cannot yet run wait in a queue of at most `PACKSET_QUEUE`. One past that gets 503 without running.
@@ -11,6 +11,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `packset-client` asks a busy writer again. The waits are 50, 150 and 450 ms, inside the request's timeout.
 - A missing encoder or index binary is looked for again after five seconds. A found one is kept.
 - The reference lists `PACKSET_TIMEOUT_MS`, `PACKSET_WORKERS` and `PACKSET_QUEUE`.
+- `packset-core`'s `Ask`, its search functions, `due_hits`, `recall` and `Graph::from_atoms` take any slice that lends a `Record`, so the writer passes its shared live set without a copy. A caller that passes an empty slice now names its element type.
 
 ## 0.13.0 (2026-10-10)
 
