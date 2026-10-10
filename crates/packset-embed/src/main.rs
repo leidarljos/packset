@@ -235,11 +235,48 @@ fn missing_weights(dir: &std::path::Path) -> Vec<&'static str> {
         .collect()
 }
 
-/// `HF_HUB_OFFLINE=1` (or `true`) means the fetch must not run.
+/// `HF_HUB_OFFLINE=1` (or `true`, `yes`, `on`) means the fetch must not run.
 fn hub_is_offline(raw: Option<&str>) -> bool {
     matches!(
         raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1") | Some("true")
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The variable that forbids a model fetch, when one does: `LJOS_OFFLINE`,
+/// the seat-wide switch, or `HF_HUB_OFFLINE`.
+fn offline_by() -> Option<&'static str> {
+    ["LJOS_OFFLINE", "HF_HUB_OFFLINE"]
+        .into_iter()
+        .find(|name| hub_is_offline(std::env::var(name).ok().as_deref()))
+}
+
+/// Whether the hub cache under `cache` already holds `file` of the model
+/// `code` (`org/name`), so that loading it fetches nothing.
+fn hub_cached(cache: &std::path::Path, code: &str, file: &str) -> bool {
+    let snapshots = cache
+        .join(format!("models--{}", code.replace('/', "--")))
+        .join("snapshots");
+    std::fs::read_dir(snapshots)
+        .is_ok_and(|dirs| dirs.flatten().any(|snap| snap.path().join(file).is_file()))
+}
+
+/// Refuse to go on when a fetch is forbidden and the model is not cached.
+/// fastembed reads the hub cache first and fetches only what is missing.
+fn refuse_uncached(code: &str, file: &str) -> anyhow::Result<()> {
+    let Some(var) = offline_by() else {
+        return Ok(());
+    };
+    let cache = cache_dir();
+    if cache
+        .as_deref()
+        .is_some_and(|dir| hub_cached(dir, code, file))
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{var} is set and {code} is not in the model cache ({}); fetch it once online, or unset {var}",
+        cache.map_or_else(|| "none".to_string(), |d| d.display().to_string())
     )
 }
 
@@ -328,12 +365,15 @@ fn load_files(dir: &std::path::Path, pooling: Pooling) -> anyhow::Result<TextEmb
 }
 
 fn load_builtin(model: &EmbeddingModel, seed: &str) -> anyhow::Result<TextEmbedding> {
-    if hub_is_offline(std::env::var("HF_HUB_OFFLINE").ok().as_deref()) {
-        anyhow::bail!(
-            "HF_HUB_OFFLINE is set and {seed} is not on disk. Place onnx/model.onnx, \
-             tokenizer.json, config.json, special_tokens_map.json and tokenizer_config.json \
-             at PACKSET_EMBED_MODEL_PATH, or under the cache at user/{seed}/"
-        );
+    if let Some(var) = offline_by() {
+        let info = TextEmbedding::get_model_info(model)?;
+        refuse_uncached(&info.model_code, &info.model_file).map_err(|_| {
+            anyhow::anyhow!(
+                "{var} is set and {seed} is not on disk. Place onnx/model.onnx, \
+                 tokenizer.json, config.json, special_tokens_map.json and tokenizer_config.json \
+                 at PACKSET_EMBED_MODEL_PATH, or under the cache at user/{seed}/"
+            )
+        })?;
     }
     let mut options = TextInitOptions::new(model.clone()).with_show_download_progress(false);
     if let Some(dir) = cache_dir() {
@@ -476,6 +516,8 @@ fn late_interaction(query: bool) -> anyhow::Result<()> {
     // saying out loud: a number from it sits a little under what the
     // full-precision model would give, so it bounds late interaction from
     // below rather than measuring it exactly.
+    let info = Bgem3Embedding::get_model_info(&Bgem3Model::BGEM3Q);
+    refuse_uncached(&info.model_code, &info.model_file)?;
     let mut options = Bgem3InitOptions::new(Bgem3Model::BGEM3Q).with_show_download_progress(false);
     if let Some(dir) = cache_dir() {
         options = options.with_cache_dir(dir);
@@ -568,6 +610,8 @@ fn cross_encode() -> anyhow::Result<()> {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n >= 32)
         .unwrap_or(RERANK_MAX_LENGTH);
+    let info = TextRerank::get_model_info(&model);
+    refuse_uncached(&info.model_code, &info.model_file)?;
     let mut options = RerankInitOptions::new(model)
         .with_show_download_progress(false)
         .with_max_length(max_length);
@@ -622,6 +666,8 @@ fn cross_encode() -> anyhow::Result<()> {
 /// Same line shape as the sparse field the late path emits, so a caller reads
 /// both with one parser.
 fn learned_sparse() -> anyhow::Result<()> {
+    let info = SparseTextEmbedding::get_model_info(&SparseModel::SPLADEPPV1);
+    refuse_uncached(&info.model_code, &info.model_file)?;
     let mut options =
         SparseInitOptions::new(SparseModel::SPLADEPPV1).with_show_download_progress(false);
     if let Some(dir) = cache_dir() {
@@ -678,6 +724,7 @@ const USAGE: &str = "packset-embed: text in, vectors out\n\
                                    mxbai-large, or e5-large-v2 from files\n\
         PACKSET_EMBED_MODEL_PATH   hub layout of the named model; used as-is\n\
         HF_HUB_OFFLINE             1 refuses the fetch; a seeded directory still loads\n\
+        LJOS_OFFLINE               1 refuses every fetch, as HF_HUB_OFFLINE; a cached model still loads\n\
         ORT_LIB_PATH               build: directory of a source or system ONNX Runtime\n\
         ORT_LIB_LOCATION           same directory, the older name\n\
         ORT_PREFER_DYNAMIC_LINK    1 links the shared library in that directory\n\
@@ -775,6 +822,22 @@ mod tests {
             super::model_dir_from(Some(&named), Some(&root), "bge-small").unwrap(),
             Some(named)
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A model the hub cache holds loads offline; one it does
+    /// not is refused before fastembed can fetch it.
+    #[test]
+    fn offline_loads_only_what_the_hub_cache_holds() {
+        let root = std::env::temp_dir().join(format!("packset-embed-hub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let snap = root.join("models--org--name/snapshots/abc/onnx");
+        std::fs::create_dir_all(&snap).unwrap();
+        assert!(!super::hub_cached(&root, "org/name", "onnx/model.onnx"));
+        std::fs::write(snap.join("model.onnx"), b"x").unwrap();
+        assert!(super::hub_cached(&root, "org/name", "onnx/model.onnx"));
+        assert!(!super::hub_cached(&root, "org/other", "onnx/model.onnx"));
+        assert!(super::hub_is_offline(Some("yes")) && super::hub_is_offline(Some("on")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

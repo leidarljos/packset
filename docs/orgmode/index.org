@@ -35,7 +35,7 @@ and every other tool is a client.
 * Install
 
 #+begin_src console
-$ cargo binstall packset          # packset, packsetd and packset-mcp
+$ cargo binstall --locked packset          # packset, packsetd and packset-mcp
 $ packset ensure
 #+end_src
 
