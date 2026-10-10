@@ -10,7 +10,13 @@
 //! two searches per remember, in its own workspace; with `HAMMER_SHARED=1`
 //! every client writes into one workspace, as a herd of seats does, and the
 //! run ends by counting the live claims there against what was written.
+//! `HAMMER_RERANK=1` has every search ask for the cross-encoder. A probe asks
+//! for the listing a status line reads, waits 250 ms between asks, and counts
+//! the answers within 300 ms.
 
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use packset_client::PacksetClient;
@@ -38,6 +44,24 @@ fn pseudo(seed: usize) -> String {
     word
 }
 
+/// The listing without vectors, asked the way the status line asks it.
+fn ask_like_a_status_line(url: &str, workspace: &str) -> Option<Duration> {
+    let patience = Duration::from_millis(300);
+    let started = Instant::now();
+    let addr = url.trim_start_matches("http://").parse().ok()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, patience).ok()?;
+    stream.set_read_timeout(Some(patience)).ok()?;
+    write!(
+        stream,
+        "GET /v1/atoms?workspace={workspace}&embedding=omit HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).ok()?;
+    let took = started.elapsed();
+    (answer.starts_with(b"HTTP/1.1 200") && took <= patience).then_some(took)
+}
+
 fn main() -> anyhow::Result<()> {
     let clients: usize = std::env::args()
         .nth(1)
@@ -50,6 +74,26 @@ fn main() -> anyhow::Result<()> {
     let url = std::env::var("PACKSET_URL").unwrap_or_else(|_| "http://127.0.0.1:8761".into());
     let run = std::process::id();
     let shared = std::env::var_os("HAMMER_SHARED").is_some();
+    let rerank = std::env::var_os("HAMMER_RERANK").is_some();
+    let done = Arc::new(AtomicBool::new(false));
+    let probe = {
+        let (url, done) = (url.clone(), Arc::clone(&done));
+        let workspace = if shared {
+            format!("hammer-{run}")
+        } else {
+            format!("hammer-{run}-0")
+        };
+        std::thread::spawn(move || {
+            let mut asked = 0usize;
+            let mut answered = Vec::new();
+            while !done.load(Ordering::SeqCst) {
+                asked += 1;
+                answered.extend(ask_like_a_status_line(&url, &workspace));
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            (asked, answered)
+        })
+    };
     let started = Instant::now();
     let handles: Vec<_> = (0..clients)
         .map(|c| {
@@ -87,7 +131,7 @@ fn main() -> anyhow::Result<()> {
                     writes.push(t.elapsed());
                     for q in [format!("fact {n}"), format!("client {c} grams")] {
                         let t = Instant::now();
-                        if client.search(&workspace, &q, 5).is_err() {
+                        if client.search_opts(&workspace, &q, 5, None, rerank).is_err() {
                             errors += 1;
                         }
                         reads.push(t.elapsed());
@@ -107,6 +151,9 @@ fn main() -> anyhow::Result<()> {
         errors += e;
     }
     let wall = started.elapsed();
+    done.store(true, Ordering::SeqCst);
+    let (asked, mut answered) = probe.join().expect("probe thread");
+    answered.sort();
     writes.sort();
     reads.sort();
     let total = writes.len() + reads.len();
@@ -124,6 +171,12 @@ fn main() -> anyhow::Result<()> {
             percentile(lat, 1.0)
         );
     }
+    println!(
+        "status line: {} of {asked} answered within 300 ms, p50 {:.1?}  p95 {:.1?}",
+        answered.len(),
+        percentile(&answered, 0.5),
+        percentile(&answered, 0.95)
+    );
     if shared {
         // Every write was a distinct claim: each is live, or closed by a
         // later one that says the same; none may vanish.
