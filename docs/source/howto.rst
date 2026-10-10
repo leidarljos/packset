@@ -141,6 +141,10 @@ variable. ``ORT_PREFER_DYNAMIC_LINK=1`` selects the shared library; leave it
 unset to link the static archive. Point ``PKG_CONFIG_PATH`` at a prefix that
 provides ``libonnxruntime.pc`` when that is the library you want.
 
+A build with none of these, and neither feature, stops within the first
+minute with this recipe, instead of at the linker once everything else
+has compiled. ``PACKSET_EMBED_NO_ORT_CHECK=1`` skips that check.
+
 A runtime load does not link at build time:
 
 .. code:: console

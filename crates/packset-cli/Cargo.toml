@@ -15,8 +15,10 @@ pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target
 bin-dir = "packset-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 # cargo-quickinstall only ships the crate's default bin (`packset`). The
-# GitHub tarball has packset, packsetd and packset-mcp.
-disabled-strategies = ["quick-install", "compile"]
+# GitHub tarball has packset, packsetd and packset-mcp. Without a tarball
+# for the target, binstall builds from source: this crate links no native
+# runtime, so that build needs nothing beyond a Rust toolchain.
+disabled-strategies = ["quick-install"]
 
 [[bin]]
 name = "packset"

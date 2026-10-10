@@ -32,7 +32,7 @@ Install
 
 .. code:: console
 
-   $ cargo binstall packset          # packset, packsetd and packset-mcp
+   $ cargo binstall --locked packset          # packset, packsetd and packset-mcp
    $ packset ensure
 
 ``packset ensure`` starts the writer when it is down. With nothing set, every
