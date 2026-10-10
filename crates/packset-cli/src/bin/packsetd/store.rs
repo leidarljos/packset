@@ -96,6 +96,10 @@ pub struct Store {
     /// re-parse the pack on every call: ten thousand atoms scan eighty
     /// milliseconds a status, once per generation instead of once per call.
     counts: RwLock<HashMap<Option<String>, (u64, Counts)>>,
+    /// One count at a time, as for the index.
+    counts_build: Mutex<()>,
+    #[cfg(test)]
+    counted: AtomicU64,
 }
 
 /// What `status` reports over one workspace: live, tombstoned and expired
@@ -147,6 +151,9 @@ impl Store {
             terms: RwLock::new(HashMap::new()),
             terms_build: Mutex::new(()),
             counts: RwLock::new(HashMap::new()),
+            counts_build: Mutex::new(()),
+            #[cfg(test)]
+            counted: AtomicU64::new(0),
         })
     }
 
@@ -333,15 +340,17 @@ impl Store {
     ///
     /// Fails when the scan does.
     pub fn counts(&self, workspace: Option<&str>) -> anyhow::Result<Counts> {
-        let generation = self.generation.load(Ordering::Acquire);
         let key = workspace.map(str::to_string);
-        if let Ok(cache) = self.counts.read() {
-            if let Some((seen, found)) = cache.get(&key) {
-                if *seen == generation {
-                    return Ok(found.clone());
-                }
-            }
+        if let Some(found) = self.counts_cached(&key) {
+            return Ok(found);
         }
+        let _count = self.counts_build.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(found) = self.counts_cached(&key) {
+            return Ok(found);
+        }
+        #[cfg(test)]
+        self.counted.fetch_add(1, Ordering::SeqCst);
+        let generation = self.generation.load(Ordering::Acquire);
         let now = packset_core::clock::utcnow();
         let mut counts = Counts::default();
         self.for_each(workspace, |rec| {
@@ -374,6 +383,14 @@ impl Store {
             cache.insert(key, (generation, counts.clone()));
         }
         Ok(counts)
+    }
+
+    /// Counts kept at the current generation, if any.
+    fn counts_cached(&self, key: &Option<String>) -> Option<Counts> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let cache = self.counts.read().ok()?;
+        let (seen, found) = cache.get(key)?;
+        (*seen == generation).then(|| found.clone())
     }
 
     /// [`Self::live`] with the generation the set belongs to, for a cache
@@ -976,6 +993,26 @@ mod tests {
             .unwrap();
         assert_eq!(store.current("w", Some("review")).unwrap().len(), 1);
         assert_eq!(store.current("w", None).unwrap().len(), 2);
+    }
+
+    /// Overlapping statuses share one count.
+    #[test]
+    fn overlapping_statuses_after_a_write_count_once() {
+        let (_dir, store) = store();
+        for n in 0..200 {
+            store
+                .upsert(&record(
+                    json!({"id": format!("a{n}"), "workspace": "w", "text": "x"}),
+                ))
+                .unwrap();
+        }
+        let before = store.counted.load(Ordering::SeqCst);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| store.counts(Some("w")).unwrap());
+            }
+        });
+        assert_eq!(store.counted.load(Ordering::SeqCst) - before, 1);
     }
 
     #[test]
