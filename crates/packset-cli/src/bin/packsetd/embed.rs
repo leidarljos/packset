@@ -1068,7 +1068,9 @@ mod tests {
     /// the first slot before it is free; two distinct child PIDs are the
     /// assertion. No pump, no timing windows: `encode_spread` joins both
     /// chunks itself. Serialised on `EMBED` with the other stub tests,
-    /// and the pool slots are cleared behind it.
+    /// and the pool slots are cleared behind it. A stub logs its pid only
+    /// for this test's batch: a test that does not hold `EMBED` can
+    /// encode through the stub while `PACKSET_EMBED` names it.
     #[test]
     fn a_batch_encodes_on_one_child_per_free_slot() {
         let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
@@ -1090,8 +1092,9 @@ for line in sys.stdin:
         asked = json.loads(line)
     except json.JSONDecodeError:
         continue
-    with log.open("a") as handle:
-        handle.write(str(os.getpid()) + "\n")
+    if any(text.startswith("spread ") for text in asked.get("texts", [])):
+        with log.open("a") as handle:
+            handle.write(str(os.getpid()) + "\n")
     time.sleep(0.2)
     count = len(asked.get("texts", [])) or 1
     if "texts" in asked:
@@ -1114,12 +1117,10 @@ for line in sys.stdin:
                 *held = None;
             }
         }
-        let texts = vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ];
+        let texts: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|t| format!("spread {t}"))
+            .collect();
         let vecs = encode_spread(&texts, true);
         for slot in pool_slots() {
             if let Ok(mut held) = slot.lock() {
