@@ -5,6 +5,7 @@ Contract
 ========
 
 -  URL: ``PACKSET_URL`` (``INSIDE_MEMORY_URL`` alias); unset, ``http://127.0.0.1:8761``; ``off`` means no pack
+-  Auth: every request but ``GET /health`` sends ``Authorization: Bearer TOKEN``, the token packsetd keeps in ``{home}/token`` (mode 0600). ``PACKSET_TOKEN`` or ``PACKSET_TOKEN_FILE`` name it elsewhere; ``PACKSET_AUTH=off`` on the writer drops the check
 -  Host: ``127.0.0.1`` only. Never ``localhost``.
 -  Port: ``8761`` (``PACKSET_PORT``)
 -  Health: ``packsetd ok``

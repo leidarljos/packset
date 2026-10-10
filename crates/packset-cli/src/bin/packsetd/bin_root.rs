@@ -4,6 +4,7 @@
 //! same modules for the examples and the tests.
 #![allow(dead_code, unused_imports)]
 
+pub mod auth;
 pub mod cards;
 pub mod context;
 pub mod embed;

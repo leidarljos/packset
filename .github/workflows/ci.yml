@@ -57,9 +57,15 @@ jobs:
           bin/packset ensure
           bin/packset status
           bin/packset accessions ci
-          curl -fsS -X POST "http://127.0.0.1:8791/v1/atoms" \
+          # The writer answers its owner only: a write without the token in
+          # the pack home is refused, and one that carries it lands.
+          atom='{"workspace":"ci","kind":"conclusion","text":"The lifecycle check passed.","entities":["deed-ci-smoke"]}'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${PACKSET_PORT}/v1/atoms" \
+            -H 'Content-Type: application/json' -d "$atom")" = 401
+          curl -fsS -X POST "http://127.0.0.1:${PACKSET_PORT}/v1/atoms" \
+            -H "Authorization: Bearer $(head -n 1 "$GROKINSIDE_HOME/token")" \
             -H 'Content-Type: application/json' \
-            -d '{"workspace":"ci","kind":"conclusion","text":"The lifecycle check passed.","entities":["deed-ci-smoke"]}' >/dev/null
+            -d "$atom" >/dev/null
           test "$(bin/packset accessions ci)" = "deed-ci-smoke"
           # Both directions of the join, over the pack that just answered.
           bin/packset citers deed-ci-smoke | grep -q "The lifecycle check passed."
