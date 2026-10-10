@@ -7,7 +7,7 @@
 |---+---|
 | =packset ensure= | start the writer if it is down, print =PACKSET_URL= |
 | =packset start= / =stop= | the writer alone |
-| =packset status [WS]= | up or down; counts by kind, the pin, the index and dense state |
+| =packset status [--all \vert WS]= | up or down; counts by kind, the pin, the index and dense state; =--all= over every workspace |
 | =packset port= / =url= / =which= | the port, the URL, the daemon binary |
 | =packset remember [--workspace WS] TEXT= | one lesson |
 | =packset prefer [--workspace WS] TEXT= | one standing preference |
@@ -28,6 +28,12 @@
 
 A workspace argument defaults to =PACKSET_WORKSPACE=, else the git remote of
 the working directory, else =default=.
+
+Every verb takes =-h= or =--help=: it prints that verb's usage and runs
+nothing, wherever it stands before =--=. A flag the verb does not take is
+refused rather than read as a workspace, an id or a word of the text. =--=
+ends the flags, so =packset forget -- -odd= names a workspace that starts
+with a dash.
 
 * HTTP
 

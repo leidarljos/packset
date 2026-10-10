@@ -64,6 +64,38 @@ fn run() -> anyhow::Result<()> {
     let port = port();
 
     match verb {
+        "-h" | "--help" | "help" => {
+            match rest.first().map(String::as_str) {
+                Some(named) if spec(named).is_some() => println!("{}", verb_usage(named)),
+                _ => println!("{}", usage()),
+            }
+            return Ok(());
+        }
+        "-V" | "--version" => {
+            println!(
+                "packset {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("PACKSET_COMMIT")
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+    let Some(takes) = spec(verb) else {
+        anyhow::bail!("unknown command: {verb}\n\n{}", usage());
+    };
+    // Every verb's arguments go through one parser before anything runs, so
+    // `packset forget --help` prints help rather than forgetting a workspace
+    // called `--help`, and a flag a verb does not know is refused.
+    let args = match parse(verb, &takes, rest)? {
+        Parsed::Help => {
+            println!("{}", verb_usage(verb));
+            return Ok(());
+        }
+        Parsed::Run(args) => args,
+    };
+
+    match verb {
         "ensure" => {
             if procfs::listening(port) && !is_ours(port) {
                 anyhow::bail!("port {port} is held by something else; set PACKSET_PORT");
@@ -77,7 +109,7 @@ fn run() -> anyhow::Result<()> {
         }
         "start" => start(port),
         "stop" => stop(port),
-        "status" => status(port, rest.first().map(String::as_str)),
+        "status" => status(port, args.switch("--all"), args.first()),
         "port" => {
             println!("{port}");
             Ok(())
@@ -92,39 +124,264 @@ fn run() -> anyhow::Result<()> {
             println!("{}", daemon.display());
             Ok(())
         }
-        "remember" => write("lesson", rest),
-        "prefer" => write("preference", rest),
-        "search" => search(rest),
-        "due" => due(rest.first().map(String::as_str)),
-        "sweep" => sweep(rest.first().map(String::as_str)),
-        "forget" => forget(rest.first().map(String::as_str)),
-        "islands" => islands(rest.first().map(String::as_str)),
-        "hubs" => hubs(rest.first().map(String::as_str)),
-        "island" => island(rest),
-        "fire" => fire(rest),
-        "grade" => grade(rest),
-        "pin" => pin(rest.first().map(String::as_str)),
-        "accessions" => accessions(rest.first().map(String::as_str)),
-        "atoms" => atoms(rest),
-        "export" => export(rest),
-        "citers" => citers(
-            rest.first().map(String::as_str),
-            rest.get(1).map(String::as_str),
-        ),
-        "-h" | "--help" | "help" => {
-            println!("{}", usage());
-            Ok(())
-        }
-        "-V" | "--version" => {
-            println!(
-                "packset {} ({})",
-                env!("CARGO_PKG_VERSION"),
-                env!("PACKSET_COMMIT")
-            );
-            Ok(())
-        }
-        other => anyhow::bail!("unknown command: {other}\n\n{}", usage()),
+        "remember" => write("lesson", &args),
+        "prefer" => write("preference", &args),
+        "search" => search(&args),
+        "due" => due(args.first()),
+        "sweep" => sweep(args.first()),
+        "forget" => forget(args.first()),
+        "islands" => islands(args.first()),
+        "hubs" => hubs(args.first()),
+        "island" => island(&args),
+        "fire" => fire(&args),
+        "grade" => grade(&args),
+        "pin" => pin(args.first()),
+        "accessions" => accessions(args.first()),
+        "atoms" => atoms(&args),
+        "export" => export(&args),
+        "citers" => citers(args.first(), args.second()),
+        other => unreachable!("{other} has a spec and no arm"),
     }
+}
+
+/// What one verb takes besides its name.
+#[derive(Debug, Clone, Copy)]
+struct Spec {
+    /// Flags that take the next argument as their value.
+    values: &'static [&'static str],
+    /// Flags that stand alone.
+    switches: &'static [&'static str],
+    /// The most positionals the verb reads; `None` when they are free text
+    /// or a list.
+    most: Option<usize>,
+    /// The positionals are the words of a text, so once a plain word has
+    /// been read, a later word that starts with a dash is a word too.
+    text: bool,
+}
+
+const NOTHING: Spec = Spec {
+    values: &[],
+    switches: &[],
+    most: Some(0),
+    text: false,
+};
+
+const ONE_WORKSPACE: Spec = Spec {
+    values: &[],
+    switches: &[],
+    most: Some(1),
+    text: false,
+};
+
+/// The arguments each verb takes, or `None` for a verb packset does not have.
+fn spec(verb: &str) -> Option<Spec> {
+    Some(match verb {
+        "ensure" | "start" | "stop" | "port" | "url" | "which" => NOTHING,
+        "status" => Spec {
+            switches: &["--all"],
+            ..ONE_WORKSPACE
+        },
+        "due" | "sweep" | "forget" | "islands" | "hubs" | "pin" | "accessions" => ONE_WORKSPACE,
+        "remember" | "prefer" => Spec {
+            values: &["--workspace"],
+            switches: &[],
+            most: None,
+            text: true,
+        },
+        "search" => Spec {
+            values: &["--workspace", "--as-of"],
+            switches: &["--rerank"],
+            most: None,
+            text: true,
+        },
+        "island" => Spec {
+            values: &["--workspace"],
+            switches: &["--fire"],
+            most: None,
+            text: true,
+        },
+        "fire" => Spec {
+            values: &["--workspace"],
+            switches: &[],
+            most: None,
+            text: false,
+        },
+        "grade" => Spec {
+            values: &[],
+            switches: &["--lapsed"],
+            most: Some(2),
+            text: false,
+        },
+        "atoms" => Spec {
+            values: &["--as-of"],
+            ..ONE_WORKSPACE
+        },
+        "export" => Spec {
+            values: &["--into"],
+            ..ONE_WORKSPACE
+        },
+        "citers" => Spec {
+            most: Some(2),
+            ..ONE_WORKSPACE
+        },
+        _ => return None,
+    })
+}
+
+/// A verb's arguments, sorted into flags and positionals.
+#[derive(Debug, Default)]
+struct Args {
+    values: Vec<(&'static str, String)>,
+    switches: Vec<&'static str>,
+    positional: Vec<String>,
+}
+
+impl Args {
+    /// The value a flag was given; the last one when it was given twice.
+    fn value(&self, flag: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(name, _)| *name == flag)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn switch(&self, flag: &str) -> bool {
+        self.switches.contains(&flag)
+    }
+
+    fn first(&self) -> Option<&str> {
+        self.positional.first().map(String::as_str)
+    }
+
+    fn second(&self) -> Option<&str> {
+        self.positional.get(1).map(String::as_str)
+    }
+}
+
+#[derive(Debug)]
+enum Parsed {
+    /// `-h` or `--help` came before any `--`: print the verb's usage and do
+    /// nothing else.
+    Help,
+    Run(Args),
+}
+
+/// Whether an argument looks like a flag. A lone `-` is a positional.
+fn dashed(arg: &str) -> bool {
+    arg.len() > 1 && arg.starts_with('-')
+}
+
+/// Sort `args` into what `takes` says the verb takes.
+///
+/// `-h` or `--help` anywhere before `--` asks for help, even in a text, so
+/// help never runs the verb. A flag the verb does not take is refused rather
+/// than read as a workspace, an id or the first word of a text. `--` ends the
+/// flags: everything after it is a positional, dash or not.
+fn parse(verb: &str, takes: &Spec, args: &[String]) -> anyhow::Result<Parsed> {
+    let mut out = Args::default();
+    let mut at = 0;
+    let mut ended = false;
+    while at < args.len() {
+        let arg = args[at].as_str();
+        at += 1;
+        if ended || !dashed(arg) {
+            out.positional.push(arg.to_string());
+            continue;
+        }
+        if arg == "--" {
+            ended = true;
+            continue;
+        }
+        if arg == "-h" || arg == "--help" {
+            return Ok(Parsed::Help);
+        }
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+            _ => (arg, None),
+        };
+        if let Some(flag) = takes.values.iter().copied().find(|f| *f == name) {
+            let value = match inline {
+                Some(value) => value.to_string(),
+                None => {
+                    let next = args.get(at).ok_or_else(|| {
+                        anyhow::anyhow!("{verb}: {flag} needs a value\n\n{}", verb_usage(verb))
+                    })?;
+                    if dashed(next) {
+                        anyhow::bail!(
+                            "{verb}: {flag} needs a value, not {next}\n\n{}",
+                            verb_usage(verb)
+                        );
+                    }
+                    at += 1;
+                    next.clone()
+                }
+            };
+            if value.trim().is_empty() {
+                anyhow::bail!("{verb}: {flag} needs a value\n\n{}", verb_usage(verb));
+            }
+            out.values.push((flag, value));
+            continue;
+        }
+        if inline.is_none() {
+            if let Some(flag) = takes.switches.iter().copied().find(|f| *f == name) {
+                out.switches.push(flag);
+                continue;
+            }
+        }
+        if takes.text && !out.positional.is_empty() {
+            out.positional.push(arg.to_string());
+            continue;
+        }
+        anyhow::bail!(
+            "{verb}: unknown flag {arg}; put -- before an argument that starts with a dash\n\n{}",
+            verb_usage(verb)
+        );
+    }
+    if let Some(most) = takes.most {
+        if out.positional.len() > most {
+            let extra = out.positional[most..].join(" ");
+            anyhow::bail!(
+                "{verb}: takes at most {most} argument{}, and {extra} is one too many\n\n{}",
+                if most == 1 { "" } else { "s" },
+                verb_usage(verb)
+            );
+        }
+    }
+    Ok(Parsed::Run(out))
+}
+
+/// The verbs one usage line names: `forget WS ...` names `forget`, and
+/// `start | stop` names both.
+fn line_names(line: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut words = line.split_whitespace();
+    while let Some(word) = words.next() {
+        names.push(word);
+        if words.next() != Some("|") {
+            break;
+        }
+    }
+    names
+}
+
+/// One verb's lines of [`usage`], or the whole of it for a verb it does not
+/// name.
+fn verb_usage(verb: &str) -> String {
+    let all = usage();
+    let lines: Vec<&str> = all
+        .lines()
+        .skip(1)
+        .filter(|line| line_names(line).contains(&verb))
+        .map(str::trim)
+        .collect();
+    if lines.is_empty() {
+        return all;
+    }
+    let mut out = String::from("usage: packset ");
+    out.push_str(&lines.join("\n       packset "));
+    out.push_str("\n\n-h, --help prints this and runs nothing; -- ends the flags");
+    out
 }
 
 fn usage() -> String {
@@ -134,7 +391,7 @@ fn usage() -> String {
          sweep [WS]             lapse the reviews left due past twice their interval; the third miss forgets a never-recalled lesson\n\
          forget WS              drop a scratch workspace's atoms whole, no tombstones; smoke and herd runs call this on the way out\n\
          start | stop\n\
-         status [WORKSPACE]     counts by kind, pin, index\n\
+         status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
          remember [--workspace WS] TEXT   one lesson, two sentences at most\n\
          prefer [--workspace WS] TEXT     one standing preference\n\
@@ -231,10 +488,6 @@ fn load_seat_env() {
             env::set_var(k, v);
         }
     }
-}
-
-fn is_all_workspaces(given: Option<&str>) -> bool {
-    given == Some("--all")
 }
 
 /// The workspace a command was given, or the one the environment names.
@@ -406,7 +659,7 @@ fn print_url(port: u16) {
     println!("INSIDE_MEMORY_URL=http://127.0.0.1:{port}");
 }
 
-fn status(port: u16, given: Option<&str>) -> anyhow::Result<()> {
+fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
     let client = client()?;
     // A named PACKSET_URL points the read at that writer; the loopback
     // port gates only when the URL did not name one.
@@ -423,11 +676,10 @@ fn status(port: u16, given: Option<&str>) -> anyhow::Result<()> {
         anyhow::bail!("down");
     }
     println!("packset: up on {} ({})", client.base(), health.trim());
-    let scope = if is_all_workspaces(given) {
-        None
-    } else {
-        Some(workspace(given)?)
-    };
+    if all && given.is_some() {
+        anyhow::bail!("status: --all counts every workspace; drop the workspace or the flag");
+    }
+    let scope = if all { None } else { Some(workspace(given)?) };
     let detail = client.status(scope.as_deref())?;
     println!("{}", serde_json::to_string_pretty(&detail)?);
     Ok(())
@@ -485,25 +737,12 @@ fn citers(accession: Option<&str>, given: Option<&str>) -> anyhow::Result<()> {
 /// the satchel would make this the thing that decides what a satchel needs,
 /// and that is the tracker's call: the pack only knows what its own atoms
 /// mention.
-fn export(args: &[String]) -> anyhow::Result<()> {
-    let mut into: Option<std::path::PathBuf> = None;
-    let mut given: Option<String> = None;
-    let mut at = 0;
-    while at < args.len() {
-        match args[at].as_str() {
-            "--into" => {
-                at += 1;
-                into =
-                    Some(std::path::PathBuf::from(args.get(at).ok_or_else(|| {
-                        anyhow::anyhow!("--into needs a directory")
-                    })?));
-            }
-            other => given = Some(other.to_string()),
-        }
-        at += 1;
-    }
-    let into = into.ok_or_else(|| anyhow::anyhow!("export needs --into DIR"))?;
-    let workspace = workspace(given.as_deref())?;
+fn export(args: &Args) -> anyhow::Result<()> {
+    let into = args
+        .value("--into")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("export needs --into DIR"))?;
+    let workspace = workspace(args.first())?;
     let held = client()?;
     let atoms = held.atoms(&workspace)?;
     // The accessions come from the endpoint that already answers this, rather
@@ -526,31 +765,13 @@ fn export(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `--workspace WS` pulled out of an argument list; the rest is the text.
-fn split_workspace(args: &[String]) -> (Option<String>, Vec<String>) {
-    let mut workspace = None;
-    let mut rest = Vec::new();
-    let mut at = 0;
-    while at < args.len() {
-        if args[at] == "--workspace" {
-            workspace = args.get(at + 1).cloned();
-            at += 2;
-            continue;
-        }
-        rest.push(args[at].clone());
-        at += 1;
-    }
-    (workspace, rest)
-}
-
 /// POST one explicit claim of `kind`; the text is stored as given.
-fn write(kind: &str, args: &[String]) -> anyhow::Result<()> {
-    let (given, words) = split_workspace(args);
-    let text = words.join(" ").trim().to_string();
+fn write(kind: &str, args: &Args) -> anyhow::Result<()> {
+    let text = args.positional.join(" ").trim().to_string();
     if text.is_empty() {
         anyhow::bail!("{kind}: the text is the claim; pass it");
     }
-    let workspace = workspace(given.as_deref())?;
+    let workspace = workspace(args.value("--workspace"))?;
     let atom = serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
@@ -568,67 +789,23 @@ fn write(kind: &str, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Flags a search takes besides the question.
-#[derive(Debug)]
-struct SearchFlags {
-    workspace: Option<String>,
-    as_of: Option<String>,
-    rerank: bool,
-    words: Vec<String>,
-}
-
-/// `--workspace`, `--as-of` and `--rerank` pulled out; the rest is the question.
-fn search_flags(args: &[String]) -> anyhow::Result<SearchFlags> {
-    let mut workspace = None;
-    let mut as_of = None;
-    let mut rerank = false;
-    let mut words = Vec::new();
-    let mut at = 0;
-    while at < args.len() {
-        match args[at].as_str() {
-            "--workspace" => {
-                at += 1;
-                workspace = Some(
-                    args.get(at)
-                        .ok_or_else(|| anyhow::anyhow!("--workspace needs a name"))?
-                        .to_string(),
-                );
-            }
-            "--as-of" => {
-                at += 1;
-                as_of = Some(
-                    args.get(at)
-                        .ok_or_else(|| anyhow::anyhow!("--as-of needs a timestamp"))?
-                        .to_string(),
-                );
-            }
-            "--rerank" => rerank = true,
-            other => words.push(other.to_string()),
-        }
-        at += 1;
-    }
-    Ok(SearchFlags {
-        workspace,
-        as_of,
-        rerank,
-        words,
-    })
-}
-
 /// Ranked claims for a question: score, kind, id, text.
 /// `--as-of TS` ranks the claims whose window contained TS.
 /// `--rerank` runs the measured cross-encoder second stage.
-fn search(args: &[String]) -> anyhow::Result<()> {
-    let flags = search_flags(args)?;
-    let query = flags.words.join(" ").trim().to_string();
+fn search(args: &Args) -> anyhow::Result<()> {
+    let query = args.positional.join(" ").trim().to_string();
     if query.is_empty() {
         anyhow::bail!("search: pass a question");
     }
-    let workspace = workspace(flags.workspace.as_deref())?;
+    let workspace = workspace(args.value("--workspace"))?;
     eprintln!("packset: workspace {workspace}");
-    for hit in
-        client()?.search_opts(&workspace, &query, 10, flags.as_of.as_deref(), flags.rerank)?
-    {
+    for hit in client()?.search_opts(
+        &workspace,
+        &query,
+        10,
+        args.value("--as-of"),
+        args.switch("--rerank"),
+    )? {
         println!(
             "{:.4}\t{}\t{}\t{}",
             hit.score,
@@ -729,33 +906,25 @@ fn islands(given: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// Two or more claims fired together.
-fn fire(args: &[String]) -> anyhow::Result<()> {
-    let (given, ids) = split_workspace(args);
+fn fire(args: &Args) -> anyhow::Result<()> {
+    let ids = &args.positional;
     if ids.len() < 2 {
         anyhow::bail!("fire: pass two or more claim ids that fired together");
     }
-    let workspace = workspace(given.as_deref())?;
-    let body = client()?.fire(&workspace, &ids)?;
+    let workspace = workspace(args.value("--workspace"))?;
+    let body = client()?.fire(&workspace, ids)?;
     println!("{} fired, {} changed", body["fired"], body["changed"]);
     Ok(())
 }
 
 /// The memories a cue activates: activation, seed mark, id, text.
-fn island(args: &[String]) -> anyhow::Result<()> {
-    let (given, words) = split_workspace(args);
-    let firing = words.iter().any(|w| w == "--fire");
-    let cue = words
-        .iter()
-        .filter(|w| *w != "--fire")
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
+fn island(args: &Args) -> anyhow::Result<()> {
+    let firing = args.switch("--fire");
+    let cue = args.positional.join(" ").trim().to_string();
     if cue.is_empty() {
         anyhow::bail!("island: pass the cue, the task or question at hand");
     }
-    let workspace = workspace(given.as_deref())?;
+    let workspace = workspace(args.value("--workspace"))?;
     let body = client()?.activate(&workspace, &cue, 24, firing)?;
     for atom in body["island"].as_array().into_iter().flatten() {
         println!(
@@ -774,16 +943,13 @@ fn island(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// Grade one review: recalled unless `--lapsed`.
-fn grade(args: &[String]) -> anyhow::Result<()> {
-    let lapsed = args.iter().any(|a| a == "--lapsed");
-    let mut rest: Vec<&String> = args.iter().filter(|a| *a != "--lapsed").collect();
-    let id = rest
+fn grade(args: &Args) -> anyhow::Result<()> {
+    let lapsed = args.switch("--lapsed");
+    let id = args
         .first()
-        .map(|s| s.to_string())
         .ok_or_else(|| anyhow::anyhow!("grade needs an atom id"))?;
-    rest.remove(0);
-    let workspace = workspace(rest.first().map(|s| s.as_str()))?;
-    let graded = client()?.grade(&workspace, &id, !lapsed)?;
+    let workspace = workspace(args.second())?;
+    let graded = client()?.grade(&workspace, id, !lapsed)?;
     println!("{}", graded["due_at"].as_str().unwrap_or("graded"));
     Ok(())
 }
@@ -805,27 +971,10 @@ fn export_file_name(workspace: &str) -> String {
 }
 
 /// Live-now atoms, or those live at `--as-of`, one JSON object a line.
-fn atoms(args: &[String]) -> anyhow::Result<()> {
-    let mut as_of: Option<String> = None;
-    let mut given: Option<String> = None;
-    let mut at = 0;
-    while at < args.len() {
-        match args[at].as_str() {
-            "--as-of" => {
-                at += 1;
-                as_of = Some(
-                    args.get(at)
-                        .ok_or_else(|| anyhow::anyhow!("--as-of needs a timestamp"))?
-                        .to_string(),
-                );
-            }
-            other => given = Some(other.to_string()),
-        }
-        at += 1;
-    }
-    let workspace = workspace(given.as_deref())?;
+fn atoms(args: &Args) -> anyhow::Result<()> {
+    let workspace = workspace(args.first())?;
     eprintln!("packset: workspace {workspace}");
-    for atom in client()?.atoms_as_of(&workspace, as_of.as_deref())? {
+    for atom in client()?.atoms_as_of(&workspace, args.value("--as-of"))? {
         println!("{}", serde_json::to_string(&atom)?);
     }
     Ok(())
@@ -841,67 +990,232 @@ fn accessions(given: Option<&str>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{parse, spec, verb_usage, Args, Parsed};
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The verb's arguments as it would run them; a panic on help or a refusal.
+    fn run_args(verb: &str, args: &[&str]) -> Args {
+        match parse(verb, &spec(verb).unwrap(), &strings(args)).unwrap() {
+            Parsed::Run(args) => args,
+            Parsed::Help => panic!("{verb} {args:?} asked for help"),
+        }
+    }
+
+    fn refused(verb: &str, args: &[&str]) -> String {
+        parse(verb, &spec(verb).unwrap(), &strings(args))
+            .map(|parsed| panic!("{verb} {args:?} ran: {parsed:?}"))
+            .unwrap_err()
+            .to_string()
+    }
+
+    /// Every verb `run` dispatches.
+    const VERBS: &[&str] = &[
+        "ensure",
+        "start",
+        "stop",
+        "status",
+        "port",
+        "url",
+        "which",
+        "remember",
+        "prefer",
+        "search",
+        "due",
+        "sweep",
+        "forget",
+        "islands",
+        "hubs",
+        "island",
+        "fire",
+        "grade",
+        "pin",
+        "accessions",
+        "atoms",
+        "export",
+        "citers",
+    ];
+
+    #[test]
+    fn forget_help_is_help_not_a_workspace() {
+        for help in ["--help", "-h"] {
+            assert!(matches!(
+                parse("forget", &spec("forget").unwrap(), &strings(&[help])).unwrap(),
+                Parsed::Help
+            ));
+        }
+        assert!(verb_usage("forget").contains("packset forget WS"));
+    }
+
+    #[test]
+    fn help_runs_no_verb_wherever_it_comes_before_the_end_of_flags() {
+        for verb in VERBS {
+            let takes = spec(verb).unwrap();
+            for args in [
+                &["--help"][..],
+                &["-h"],
+                &["seat", "--help"],
+                &["--help", "seat"],
+            ] {
+                assert!(
+                    matches!(parse(verb, &takes, &strings(args)), Ok(Parsed::Help)),
+                    "{verb} {args:?} did not ask for help"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_verb_has_its_own_usage_line() {
+        for verb in VERBS {
+            let usage = verb_usage(verb);
+            assert!(
+                usage.starts_with("usage: packset "),
+                "{verb} has no usage line: {usage}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_flag_is_refused_not_read_as_a_workspace() {
+        for verb in [
+            "forget",
+            "sweep",
+            "pin",
+            "status",
+            "due",
+            "islands",
+            "hubs",
+            "accessions",
+            "atoms",
+            "citers",
+            "grade",
+            "fire",
+            "stop",
+            "start",
+            "ensure",
+        ] {
+            let err = refused(verb, &["--hepl"]);
+            assert!(err.contains("unknown flag --hepl"), "{verb}: {err}");
+        }
+        // A text verb refuses a flag before its first word, too.
+        for verb in ["remember", "prefer", "search", "island"] {
+            let err = refused(verb, &["--hepl", "the", "claim"]);
+            assert!(err.contains("unknown flag --hepl"), "{verb}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_dash_workspace_needs_the_end_of_flags() {
+        let args = run_args("forget", &["--", "--odd"]);
+        assert_eq!(args.first(), Some("--odd"));
+        let args = run_args("forget", &["scratch-1"]);
+        assert_eq!(args.first(), Some("scratch-1"));
+        // After `--`, even help is a positional.
+        let args = run_args("forget", &["--", "--help"]);
+        assert_eq!(args.first(), Some("--help"));
+        // A lone dash is a positional, not a flag.
+        let args = run_args("forget", &["-"]);
+        assert_eq!(args.first(), Some("-"));
+    }
+
+    #[test]
+    fn extra_positionals_are_refused() {
+        let err = refused("forget", &["one", "two"]);
+        assert!(err.contains("at most 1 argument"), "{err}");
+        let err = refused("stop", &["now"]);
+        assert!(err.contains("at most 0 arguments"), "{err}");
+        let err = refused("citers", &["acc", "seat", "more"]);
+        assert!(err.contains("at most 2 arguments"), "{err}");
+    }
+
     #[test]
     fn the_workspace_flag_leaves_the_text() {
-        let args: Vec<String> = ["--workspace", "seat", "the", "claim"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let (ws, rest) = super::split_workspace(&args);
-        assert_eq!(ws.as_deref(), Some("seat"));
-        assert_eq!(rest, ["the", "claim"]);
-        let (ws, rest) = super::split_workspace(&["only".to_string()]);
-        assert!(ws.is_none());
-        assert_eq!(rest, ["only"]);
+        let args = run_args("remember", &["--workspace", "seat", "the", "claim"]);
+        assert_eq!(args.value("--workspace"), Some("seat"));
+        assert_eq!(args.positional, ["the", "claim"]);
+        let args = run_args("remember", &["only"]);
+        assert!(args.value("--workspace").is_none());
+        assert_eq!(args.positional, ["only"]);
+        let args = run_args("remember", &["--workspace=seat", "claim"]);
+        assert_eq!(args.value("--workspace"), Some("seat"));
+    }
+
+    #[test]
+    fn a_dash_word_inside_a_text_is_a_word() {
+        let args = run_args("remember", &["pass", "-x", "for", "a", "trace"]);
+        assert_eq!(args.positional, ["pass", "-x", "for", "a", "trace"]);
+        let args = run_args("remember", &["--", "--force", "is", "never", "safe"]);
+        assert_eq!(args.positional, ["--force", "is", "never", "safe"]);
+    }
+
+    #[test]
+    fn a_value_flag_does_not_take_a_flag_as_its_value() {
+        let err = refused("remember", &["--workspace", "--help"]);
+        assert!(
+            err.contains("--workspace needs a value, not --help"),
+            "{err}"
+        );
+        let err = refused("remember", &["--workspace"]);
+        assert!(err.contains("--workspace needs a value"), "{err}");
+        let err = refused("export", &["--into="]);
+        assert!(err.contains("--into needs a value"), "{err}");
     }
 
     #[test]
     fn search_as_of_is_not_the_query() {
-        let args: Vec<String> = ["--as-of", "2024-06-01T00:00:00Z", "Borda"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let flags = super::search_flags(&args).unwrap();
-        assert_eq!(flags.as_of.as_deref(), Some("2024-06-01T00:00:00Z"));
-        assert_eq!(flags.words, ["Borda"]);
-        assert!(flags.workspace.is_none());
-        let both: Vec<String> = [
-            "--workspace",
-            "acme-cli",
-            "--as-of",
-            "2024-06-01T00:00:00Z",
-            "Borda",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let flags = super::search_flags(&both).unwrap();
-        assert_eq!(flags.workspace.as_deref(), Some("acme-cli"));
-        assert_eq!(flags.as_of.as_deref(), Some("2024-06-01T00:00:00Z"));
-        assert_eq!(flags.words, ["Borda"]);
-        assert!(!flags.rerank);
+        let args = run_args("search", &["--as-of", "2024-06-01T00:00:00Z", "Borda"]);
+        assert_eq!(args.value("--as-of"), Some("2024-06-01T00:00:00Z"));
+        assert_eq!(args.positional, ["Borda"]);
+        assert!(args.value("--workspace").is_none());
+        let args = run_args(
+            "search",
+            &[
+                "--workspace",
+                "acme-cli",
+                "--as-of",
+                "2024-06-01T00:00:00Z",
+                "Borda",
+            ],
+        );
+        assert_eq!(args.value("--workspace"), Some("acme-cli"));
+        assert_eq!(args.value("--as-of"), Some("2024-06-01T00:00:00Z"));
+        assert_eq!(args.positional, ["Borda"]);
+        assert!(!args.switch("--rerank"));
     }
 
     #[test]
     fn search_rerank_is_not_the_query() {
-        let args: Vec<String> = ["--rerank", "fusion"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let flags = super::search_flags(&args).unwrap();
-        assert!(flags.rerank);
-        assert_eq!(flags.words, ["fusion"]);
-        assert!(flags.as_of.is_none());
+        let args = run_args("search", &["--rerank", "fusion"]);
+        assert!(args.switch("--rerank"));
+        assert_eq!(args.positional, ["fusion"]);
+        assert!(args.value("--as-of").is_none());
+        // A known flag after the words is still the flag.
+        let args = run_args("island", &["the", "cue", "--fire"]);
+        assert!(args.switch("--fire"));
+        assert_eq!(args.positional, ["the", "cue"]);
     }
 
     #[test]
     fn search_as_of_needs_a_timestamp() {
-        let args: Vec<String> = ["--as-of"].iter().map(|s| s.to_string()).collect();
-        let err = super::search_flags(&args).unwrap_err();
-        assert!(
-            err.to_string().contains("--as-of needs a timestamp"),
-            "{err}"
-        );
+        let err = refused("search", &["--as-of"]);
+        assert!(err.contains("--as-of needs a value"), "{err}");
+    }
+
+    #[test]
+    fn grade_and_export_and_atoms_keep_their_shapes() {
+        let args = run_args("grade", &["abc", "--lapsed", "seat"]);
+        assert!(args.switch("--lapsed"));
+        assert_eq!(args.first(), Some("abc"));
+        assert_eq!(args.second(), Some("seat"));
+        let args = run_args("export", &["--into", "bag/data/atoms", "git:x/y"]);
+        assert_eq!(args.value("--into"), Some("bag/data/atoms"));
+        assert_eq!(args.first(), Some("git:x/y"));
+        let args = run_args("atoms", &["--as-of", "2024-06-01T00:00:00Z", "seat"]);
+        assert_eq!(args.value("--as-of"), Some("2024-06-01T00:00:00Z"));
+        assert_eq!(args.first(), Some("seat"));
     }
 
     #[test]
@@ -923,9 +1237,12 @@ mod tests {
 
     #[test]
     fn status_all_is_the_global_count() {
-        assert!(super::is_all_workspaces(Some("--all")));
-        assert!(!super::is_all_workspaces(None));
-        assert!(!super::is_all_workspaces(Some("seat")));
+        let args = run_args("status", &["--all"]);
+        assert!(args.switch("--all"));
+        assert!(args.first().is_none());
+        let args = run_args("status", &["seat"]);
+        assert!(!args.switch("--all"));
+        assert_eq!(args.first(), Some("seat"));
     }
 
     #[test]
