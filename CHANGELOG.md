@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A preference no longer retires an earlier preference that opens with the same words. `Never force push to main.` and `Never force push to a release branch.` are two rules, and the second used to close the first. A rewrite, a correction or an explicit `supersedes` still closes it.
 - The README's LongMemEval_S figure says what it measures: session retrieval over 470 answerable questions, 0.889 hit@1 and 0.949 recall@5 for BM25+ fused with multilingual-e5-large. It is not answer accuracy, which is 0.549 with a local seven-billion-parameter reader. The run and its method are on the explanation page.
 - packset-embed fetches no model while `LJOS_OFFLINE` or `HF_HUB_OFFLINE` is set. The rerank, late interaction and learned sparse models used to be fetched on first use even with `HF_HUB_OFFLINE=1`. A model already in the hub cache still loads. `LJOS_OFFLINE` is the seat-wide switch that ljos reads too.
 - `cargo binstall packset` builds from source on a target with no release tarball. The `compile` strategy was off, so binstall failed on every target the release does not build, x86_64 macOS, aarch64 Linux and Windows among them. The packset crate links no native runtime, so that build needs only a Rust toolchain. `packset-embed` still takes the release tarball or nothing, since its source build needs ONNX Runtime first. cargo-quickinstall stays off.
