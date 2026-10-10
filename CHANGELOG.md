@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An `agent-derived` write and a hook write are one open proposal for that text. The proposal keeps the atom. Accept stores that atom, records the acceptance by raising its origin to `user-declared`, and a second accept returns the same atom. A mined proposal is still a derived lesson.
 - Every atom carries an `origin`: `user-declared`, `agent-derived`, `tool-echo`, `external` or `peer`. A stored atom with none reads as `user-declared` and is left as stored. An `agent-derived` write and a hook write are proposals until an accept. Content typed `authoritative` on a tool echo or an external atom ranks and promotes at that origin.
 
 ## 0.13.0 (2026-10-09)

@@ -1603,6 +1603,13 @@ impl Service {
     /// The miner's, or the store's.
     pub fn accept(&self, workspace: &str, proposal_id: &str) -> anyhow::Result<Record> {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        // A retry after the atom was stored returns that atom. It does not
+        // open another proposal and it does not write a second claim.
+        if let Some(atom_id) = crate::proposals::accepted_atom(&self.home, workspace, proposal_id) {
+            if let Some(atom) = self.store.get(workspace, &atom_id)? {
+                return Ok(atom);
+            }
+        }
         let (atom, rec) = crate::proposals::accept(&self.home, workspace, proposal_id)?;
         let stored = self.add_prepared(self.prepare(atom)?)?;
         let atom_id = stored.get("id").and_then(Value::as_str).unwrap_or("");
@@ -2244,6 +2251,15 @@ mod tests {
         (dir, svc)
     }
 
+    fn held_id(err: &anyhow::Error) -> String {
+        let text = err.to_string();
+        text.split_whitespace()
+            .map(|word| word.trim_matches(|c: char| !c.is_ascii_hexdigit()))
+            .find(|word| word.len() == 32 && word.chars().all(|c| c.is_ascii_hexdigit()))
+            .unwrap_or_else(|| panic!("no proposal id in {text}"))
+            .to_string()
+    }
+
     fn atom(text: &str) -> Record {
         json!({
             "workspace": "w",
@@ -2633,6 +2649,70 @@ mod tests {
             .unwrap()
             .iter()
             .any(|a| a.get("id") == stored.get("id")));
+    }
+
+    #[test]
+    fn accepting_a_held_lesson_keeps_its_body_and_a_retry_is_that_atom() {
+        let (_dir, svc) = service();
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("level".into(), json!("explicit"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        lesson.insert(
+            "entities".into(),
+            json!(["seat:inky", "issue:Software-amz9", "horizon:transient"]),
+        );
+        lesson.insert("source".into(), json!({"via": "ljos", "harness": "inky"}));
+        let err = svc.add(lesson.clone()).unwrap_err();
+        let again = svc.add(lesson).unwrap_err();
+        let id = held_id(&err);
+        assert!(
+            again.to_string().contains(&id),
+            "a retry is the same proposal: {again}"
+        );
+        assert_eq!(crate::proposals::list_open(&svc.home, "w").len(), 1);
+        let stored = svc.accept("w", &id).unwrap();
+        assert_eq!(stored["kind"], json!("lesson"));
+        assert_eq!(stored["level"], json!("explicit"));
+        assert_eq!(stored["origin"], json!("user-declared"));
+        assert_eq!(stored["source"]["harness"], json!("inky"));
+        let tags: Vec<&str> = stored["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(tags.contains(&"issue:Software-amz9"), "{tags:?}");
+        assert!(crate::proposals::list_open(&svc.home, "w").is_empty());
+        let retry = svc.accept("w", &id).unwrap();
+        assert_eq!(retry["id"], stored["id"]);
+        let live = svc.store.live("w").unwrap();
+        assert_eq!(live.len(), 1, "{live:?}");
+        let mut typed = atom("The fuse is CombMNZ for this seat.");
+        typed.insert("kind".into(), json!("lesson"));
+        let posted = svc.add(typed).unwrap();
+        assert_eq!(
+            posted["id"], stored["id"],
+            "the same text already live is not a second atom"
+        );
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_hook_write_becomes_live_only_through_accept() {
+        let (_dir, svc) = service();
+        let mut caught = atom("A correction the hook caught in the cue.");
+        caught.insert("kind".into(), json!("preference"));
+        caught.insert("hook".into(), json!(true));
+        let err = svc.add(caught).unwrap_err();
+        assert!(err.to_string().contains("hook"), "{err}");
+        let id = held_id(&err);
+        let stored = svc.accept("w", &id).unwrap();
+        assert_eq!(stored["kind"], json!("preference"));
+        assert_eq!(stored["origin"], json!("user-declared"));
+        assert_ne!(stored.get("hook"), Some(&json!(true)));
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+        assert!(crate::proposals::list_open(&svc.home, "w").is_empty());
     }
 
     #[test]

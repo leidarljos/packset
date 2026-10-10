@@ -302,10 +302,74 @@ pub fn compact_day(
     Ok(out)
 }
 
+/// Whether an open proposal is this write again.
+///
+/// A retry of the same text, kind, origin and hook is the proposal already
+/// held. It does not append another one.
+fn same_hold(rec: &Value, atom: &Record) -> bool {
+    let text = atom
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let norm = norm_claim(text);
+    if norm.is_empty() || norm_claim(rec.get("text").and_then(Value::as_str).unwrap_or("")) != norm
+    {
+        return false;
+    }
+    if rec.get("origin").and_then(Value::as_str) != Some(packset_core::record::origin_of(atom)) {
+        return false;
+    }
+    if rec.get("hook").and_then(Value::as_bool).unwrap_or(false)
+        != packset_core::record::hook_of(atom)
+    {
+        return false;
+    }
+    match (
+        rec.get("atom")
+            .and_then(|body| body.get("kind"))
+            .and_then(Value::as_str),
+        atom.get("kind").and_then(Value::as_str),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+/// The last record for one proposal id. The file is append-only, so the
+/// later status is the answer.
+fn latest(home: &Home, workspace: &str, proposal_id: &str) -> Option<Value> {
+    let raw = std::fs::read_to_string(proposals_path(home, workspace)).ok()?;
+    let mut found = None;
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("id").and_then(Value::as_str) == Some(proposal_id) {
+            found = Some(value);
+        }
+    }
+    found
+}
+
+/// The atom id an accepted proposal names, when that is its latest status.
+#[must_use]
+pub fn accepted_atom(home: &Home, workspace: &str, proposal_id: &str) -> Option<String> {
+    let rec = latest(home, workspace, proposal_id)?;
+    if rec.get("status").and_then(Value::as_str) != Some("accepted") {
+        return None;
+    }
+    rec.get("atom_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 /// File a write that must not become a live atom.
 ///
-/// An `agent-derived` lesson and a hook write land here. Accept is the
-/// only way either becomes a stored claim.
+/// An `agent-derived` lesson and a hook write land here. The atom is kept
+/// on the proposal, so accept can store that lesson rather than a mined
+/// one. The same write again returns the open proposal.
 ///
 /// # Errors
 ///
@@ -317,12 +381,20 @@ pub fn hold(
     why: &str,
     new_id: impl FnOnce() -> String,
 ) -> Result<Value, CheapError> {
+    if let Some(existing) = list_open(home, workspace)
+        .into_iter()
+        .find(|rec| same_hold(rec, atom))
+    {
+        return Ok(existing);
+    }
     let text = atom
         .get("text")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
     let origin = packset_core::record::origin_of(atom);
+    let mut body = atom.clone();
+    body.remove("embedding");
     let rec = json!({
         "schema": SCHEMA,
         "id": new_id(),
@@ -338,6 +410,7 @@ pub fn hold(
         "verdict": "SUPPORTED",
         "transcript": "",
         "why": why,
+        "atom": body,
     });
     append(home, workspace, &rec).map_err(|e| CheapError(e.to_string()))?;
     Ok(rec)
@@ -361,6 +434,18 @@ pub fn accept(
     let verdict = rec.get("verdict").and_then(Value::as_str).unwrap_or("NEI");
     if verdict != "SUPPORTED" {
         return Err(CheapError(format!("extractAccept rejected: {verdict}")));
+    }
+    // An admission hold carries the atom that was refused. Accept stores
+    // that atom. The origin rises, which is the record that the person
+    // accepted it. Kind, level, entities, source and text stay. The hook
+    // flag comes off, or the store would hold the write again.
+    if let Some(stored) = rec.get("atom").and_then(Value::as_object) {
+        let mut atom = stored.clone();
+        atom.insert("origin".into(), json!(packset_core::atom::USER_DECLARED));
+        atom.remove("hook");
+        atom.remove("embedding");
+        atom.insert("workspace".into(), json!(workspace));
+        return Ok((atom, rec));
     }
     let text = rec.get("text").and_then(Value::as_str).unwrap_or("");
     let now = clock::utcnow();
@@ -619,6 +704,45 @@ mod tests {
         assert_eq!(open.len(), 1);
         let (atom, _) = accept(&home, "w", rec["id"].as_str().unwrap()).unwrap();
         assert_eq!(atom["origin"], json!("user-declared"));
+    }
+
+    #[test]
+    fn a_held_atom_is_what_accept_writes_and_a_retry_is_the_same_proposal() {
+        let (_dir, home) = home();
+        let mut next = ids();
+        let lesson = json!({
+            "text": "The fuse is CombMNZ for this seat.",
+            "origin": "agent-derived",
+            "kind": "lesson",
+            "level": "explicit",
+            "entities": ["seat:inky", "issue:Software-amz9", "horizon:transient"],
+            "source": {"via": "ljos", "harness": "inky"},
+            "embedding": [0.1, 0.2],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let first = hold(&home, "w", &lesson, "agent-derived", &mut next).unwrap();
+        let again = hold(&home, "w", &lesson, "agent-derived", &mut next).unwrap();
+        assert_eq!(first["id"], again["id"]);
+        assert_eq!(list_open(&home, "w").len(), 1);
+        assert!(
+            first.get("embedding").is_none(),
+            "the proposal stores no vector"
+        );
+        assert!(
+            first["atom"].get("embedding").is_none(),
+            "the held atom stores no vector"
+        );
+        let (atom, _) = accept(&home, "w", first["id"].as_str().unwrap()).unwrap();
+        assert_eq!(atom["origin"], json!("user-declared"));
+        assert_eq!(atom["kind"], json!("lesson"));
+        assert_eq!(atom["level"], json!("explicit"));
+        assert_eq!(atom["text"], json!("The fuse is CombMNZ for this seat."));
+        assert_eq!(atom["source"]["via"], json!("ljos"));
+        let tags = atom["entities"].as_array().unwrap();
+        assert!(tags.iter().any(|t| t == "issue:Software-amz9"), "{tags:?}");
+        assert!(atom.get("hook").is_none());
     }
 
     #[test]
