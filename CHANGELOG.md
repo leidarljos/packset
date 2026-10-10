@@ -2,13 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.13.0 (2026-10-10)
 
 - An `agent-derived` write and a hook write are one open proposal for that text. The proposal keeps the atom. Accept stores that atom, records the acceptance by raising its origin to `user-declared`, and a second accept returns the same atom. A mined proposal is still a derived lesson.
 - Every atom carries an `origin`: `user-declared`, `agent-derived`, `tool-echo`, `external` or `peer`. A stored atom with none reads as `user-declared` and is left as stored. An `agent-derived` write and a hook write are proposals until an accept. Content typed `authoritative` on a tool echo or an external atom ranks and promotes at that origin.
-
-## 0.13.0 (2026-10-09)
-
 - Seat mail is stored as atoms. A `message` is one letter and a `receipt` is one read. A `group` atom is one membership change. The two-sentence cap does not apply; the text stops at 500 characters. A later mail atom does not close an earlier one, and a repeat is kept. Search and recall leave mail out unless `kind` names it.
 - `packset-embed` links a system or source-built Open Neural Network Exchange (ONNX) Runtime. The prebuilt runtime from cdn.pyke.io is the `download-binaries` feature. A hub checkout at `PACKSET_EMBED_MODEL_PATH`, or under the cache at `user/<model>/`, is the model, so a seeded directory is not fetched. An absent encoder leaves a sitting on the lexical ballots; doctor still reads `embedder.available`.
 - The explanation names Zep's graph, which records when a fact became true and when the store learned it, and names A-MEM beside agentic memory. The measured rows are unchanged.
