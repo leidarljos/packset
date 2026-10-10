@@ -20,6 +20,7 @@ pub mod decay;
 pub mod dowdall;
 pub mod dpp;
 pub mod extract;
+pub mod home;
 pub mod identity;
 pub mod island;
 pub mod jury;

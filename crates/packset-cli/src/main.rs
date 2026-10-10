@@ -118,6 +118,7 @@ fn run() -> anyhow::Result<()> {
             print_url(port);
             Ok(())
         }
+        "migrate-home" => migrate_home(port),
         "which" => {
             let daemon = resolve_daemon()
                 .ok_or_else(|| anyhow::anyhow!("no packsetd binary; cargo build --release"))?;
@@ -176,7 +177,7 @@ const ONE_WORKSPACE: Spec = Spec {
 /// The arguments each verb takes, or `None` for a verb packset does not have.
 fn spec(verb: &str) -> Option<Spec> {
     Some(match verb {
-        "ensure" | "start" | "stop" | "port" | "url" | "which" => NOTHING,
+        "ensure" | "start" | "stop" | "port" | "url" | "which" | "migrate-home" => NOTHING,
         "status" => Spec {
             switches: &["--all"],
             ..ONE_WORKSPACE
@@ -393,6 +394,7 @@ fn usage() -> String {
          start | stop\n\
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
+         migrate-home           move ~/.grokinside/memory to $XDG_DATA_HOME/packset; the writer must be stopped\n\
          remember [--workspace WS] TEXT   one lesson, two sentences at most\n\
          prefer [--workspace WS] TEXT     one standing preference\n\
          search [--workspace WS] [--as-of TS] [--rerank] QUERY  ranked claims live now, or at TS\n\
@@ -651,6 +653,27 @@ fn stop(port: u16) -> anyhow::Result<()> {
         anyhow::bail!("packset: signalled {pid}, and {port} is still held after 10s");
     }
     eprintln!("packset: stopped {pid}");
+    Ok(())
+}
+
+/// Move the old pack home to the XDG one. The writer holds the database
+/// open, so this refuses while one of ours listens.
+fn migrate_home(port: u16) -> anyhow::Result<()> {
+    if let Some(named) = packset_core::home::named_home() {
+        anyhow::bail!(
+            "PACKSET_HOME (or an older name) is set to {}; that home stays where it is",
+            named.display()
+        );
+    }
+    let old = packset_core::home::legacy_home()
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let new = packset_core::home::current_home()
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    if is_ours(port) {
+        anyhow::bail!("a writer is listening on {port}; `packset stop` first");
+    }
+    packset_core::home::migrate(&old, &new).map_err(|e| anyhow::anyhow!(e))?;
+    println!("packset: moved {} to {}; the old name links to it", old.display(), new.display());
     Ok(())
 }
 

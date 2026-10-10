@@ -17,10 +17,7 @@ pub fn run() -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(http::DEFAULT_PORT);
-    let mut root = std::env::var_os("PACKSET_HOME")
-        .or_else(|| std::env::var_os("GROKINSIDE_HOME"))
-        .or_else(|| std::env::var_os("GROK_INSIDE_MEMORY_HOME"))
-        .map_or_else(Home::default_root, Into::into);
+    let mut root = packset_core::home::named_home().unwrap_or_else(Home::default_root);
     let mut fuse = None;
     let mut diversify = None;
     let mut decay = None;

@@ -4,7 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
-- packsetd answers its owner only. At start it keeps a random token in `{home}/token`, mode 0600, and answers 401 to any request but `GET /health` that does not send it as `Authorization: Bearer TOKEN`. Before, any local user could read the pack and write a preference the prompt hook would inject. `packset-client` reads the token from the same home (`PACKSET_TOKEN_FILE`, `PACKSET_HOME`, or `~/.grokinside/memory`) or from `PACKSET_TOKEN`, and a 401 names the likely cause. `PACKSET_AUTH=off` drops the check for a client that cannot send the token. ljos up to 0.28 sends none, so it needs a release with this client.
+- The default pack home is now `$XDG_DATA_HOME/packset` (`~/.local/share/packset`). A seat that has `~/.grokinside/memory` and not the new path keeps using the old one, and packsetd says so at start. `packset migrate-home` moves the old home to the new path with the writer stopped and leaves a link at the old name, so a client that still looks there finds the token. A home named by `PACKSET_HOME` is never moved.
+- packsetd answers its owner only. At start it keeps a random token in `{home}/token`, mode 0600, and answers 401 to any request but `GET /health` that does not send it as `Authorization: Bearer TOKEN`. Before, any local user could read the pack and write a preference the prompt hook would inject. `packset-client` reads the token from the same home (`PACKSET_TOKEN_FILE`, `PACKSET_HOME`, or the default home) or from `PACKSET_TOKEN`, and a 401 names the likely cause. `PACKSET_AUTH=off` drops the check for a client that cannot send the token. ljos up to 0.28 sends none, so it needs a release with this client.
 
 ## 0.14.0 (2026-10-10)
 

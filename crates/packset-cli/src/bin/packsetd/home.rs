@@ -21,11 +21,22 @@ impl Home {
         Self { root: root.into() }
     }
 
-    /// The default home, `~/.grokinside/memory`.
+    /// The default home: `$XDG_DATA_HOME/packset`, or `~/.grokinside/memory`
+    /// while only that one exists. See [`packset_core::home`].
     #[must_use]
     pub fn default_root() -> PathBuf {
-        let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
-        home.join(".grokinside").join("memory")
+        packset_core::home::default_home().map_or_else(
+            || PathBuf::from(".").join("packset"),
+            |found| {
+                if let packset_core::home::DefaultHome::Legacy(old) = &found {
+                    eprintln!(
+                        "packsetd: using the old pack home {}; `packset migrate-home` moves it",
+                        old.display()
+                    );
+                }
+                found.path().to_path_buf()
+            },
+        )
     }
 
     /// The root path.
