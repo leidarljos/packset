@@ -23,7 +23,10 @@ pub type Record = Map<String, Value>;
 
 /// One workspace's live set at a write count: as stored (what a write folds
 /// into) and as shown (links narrowed to ids present).
-type Snapshot = (u64, Vec<Record>, Arc<Vec<Record>>, HashSet<String>);
+type Snapshot = (u64, Vec<Record>, Live, HashSet<String>);
+
+/// A workspace's live set, one `Arc` per record.
+pub type Live = Arc<Vec<Arc<Record>>>;
 
 /// A workspace's index at one generation: the id and stamp of each atom
 /// the index was built over, in order, beside the index and its tokens.
@@ -35,7 +38,7 @@ type Searchable = (
 );
 
 /// The id and stamp of each atom, the fingerprint an index is keyed on.
-fn fingerprint(atoms: &[Record]) -> Vec<(String, String)> {
+fn fingerprint(atoms: &[Arc<Record>]) -> Vec<(String, String)> {
     atoms
         .iter()
         .map(|a| {
@@ -55,7 +58,7 @@ fn fingerprint(atoms: &[Record]) -> Vec<(String, String)> {
 
 /// What a search runs over: the snapshot, the inverted index, and the tokens
 /// the index was built from, all shared.
-pub type SearchSet = (Arc<Vec<Record>>, Arc<Index>, Arc<Vec<Vec<String>>>);
+pub type SearchSet = (Live, Arc<Index>, Arc<Vec<Vec<String>>>);
 
 /// The key for one atom.
 #[must_use]
@@ -327,7 +330,7 @@ impl Store {
     /// # Errors
     ///
     /// Fails when the scan does.
-    pub fn live(&self, workspace: &str) -> anyhow::Result<Arc<Vec<Record>>> {
+    pub fn live(&self, workspace: &str) -> anyhow::Result<Live> {
         self.live_versioned(workspace).map(|(shown, _)| shown)
     }
 
@@ -399,7 +402,7 @@ impl Store {
     /// # Errors
     ///
     /// Fails when the scan does.
-    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<(Arc<Vec<Record>>, u64)> {
+    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<(Live, u64)> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.live.read() {
             if let Some((seen, _stored, shown, _dangling)) = cache.get(workspace) {
@@ -487,7 +490,7 @@ impl Store {
             _ => {
                 let documents: Vec<Vec<String>> = atoms
                     .iter()
-                    .map(packset_core::search::atom_tokens)
+                    .map(|atom| packset_core::search::atom_tokens(atom))
                     .collect();
                 let index = Index::build(documents.iter().map(Vec::as_slice));
                 (Arc::new(index), Arc::new(documents))
@@ -530,7 +533,7 @@ impl Store {
     /// # Errors
     ///
     /// Fails when the scan does, or when `at` is not a timestamp.
-    pub fn as_of(&self, workspace: &str, at: &str) -> anyhow::Result<Vec<Record>> {
+    pub fn as_of(&self, workspace: &str, at: &str) -> anyhow::Result<Vec<Arc<Record>>> {
         let at = packset_core::clock::canonicalize(at)
             .ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
         let stored: Vec<Record> = self
@@ -548,14 +551,13 @@ impl Store {
     /// Fails when the scan does.
     pub fn current(&self, workspace: &str, set: Option<&str>) -> anyhow::Result<Vec<Record>> {
         let live = self.live(workspace)?;
-        Ok(match set {
-            None => live.as_ref().clone(),
-            Some(name) => live
-                .iter()
-                .filter(|atom| atom.get("set").and_then(Value::as_str) == Some(name))
-                .cloned()
-                .collect(),
-        })
+        Ok(live
+            .iter()
+            .filter(|atom| {
+                set.is_none_or(|name| atom.get("set").and_then(Value::as_str) == Some(name))
+            })
+            .map(|atom| Record::clone(atom))
+            .collect())
     }
 
     /// Distinct workspace names with their live counts. `global` is always in.
@@ -668,16 +670,20 @@ fn shown_at(atom: &Record, now: &str) -> bool {
 
 /// The shown copy of a stored set, links cut to live ids, and the ids the
 /// cuts named: the targets a later arrival may restore.
-fn shown_from(stored: &[Record]) -> (Vec<Record>, HashSet<String>) {
+fn shown_from(stored: &[Record]) -> (Vec<Arc<Record>>, HashSet<String>) {
     let live: HashSet<&str> = stored
         .iter()
         .filter_map(|a| a.get("id").and_then(Value::as_str))
         .collect();
     let mut dangling = HashSet::new();
-    let mut shown = stored.to_vec();
-    for atom in &mut shown {
-        dangling.extend(cut_links(atom, &live));
-    }
+    let shown = stored
+        .iter()
+        .map(|atom| {
+            let mut copy = atom.clone();
+            dangling.extend(cut_links(&mut copy, &live));
+            Arc::new(copy)
+        })
+        .collect();
     (shown, dangling)
 }
 
@@ -690,7 +696,7 @@ fn shown_from(stored: &[Record]) -> (Vec<Record>, HashSet<String>) {
 /// `shown_from(stored)`; a shown copy another reader still holds is cloned
 /// once by `Arc::make_mut`, an unshared one is edited in place.
 fn patch_shown(
-    shown: &mut Arc<Vec<Record>>,
+    shown: &mut Live,
     stored: &[Record],
     written: &[Record],
     now: &str,
@@ -713,9 +719,9 @@ fn patch_shown(
             let mut copy = record.clone();
             dangling.extend(cut_links(&mut copy, &live));
             match at {
-                Some(i) => out[i] = copy,
+                Some(i) => out[i] = Arc::new(copy),
                 None => {
-                    out.push(copy);
+                    out.push(Arc::new(copy));
                     if dangling.remove(id) {
                         moved.push(id.to_string());
                     }
@@ -753,7 +759,7 @@ fn patch_shown(
         {
             let mut copy = atom.clone();
             dangling.extend(cut_links(&mut copy, &live));
-            out[i] = copy;
+            out[i] = Arc::new(copy);
         }
     }
 }
@@ -995,6 +1001,30 @@ mod tests {
         assert_eq!(store.current("w", None).unwrap().len(), 2);
     }
 
+    /// A write while a reader holds the live set copies pointers, not records.
+    #[test]
+    fn a_write_under_a_reader_shares_the_records_it_did_not_touch() {
+        let (_dir, store) = store();
+        for id in ["a", "b", "c"] {
+            store
+                .upsert(&record(json!({"id": id, "workspace": "w", "text": id})))
+                .unwrap();
+        }
+        let held = store.live("w").unwrap();
+        store
+            .upsert(&record(json!({"id": "d", "workspace": "w", "text": "d"})))
+            .unwrap();
+        let next = store.live("w").unwrap();
+        assert_eq!((held.len(), next.len()), (3, 4));
+        for (before, after) in held.iter().zip(next.iter()) {
+            assert!(
+                Arc::ptr_eq(before, after),
+                "{:?} was copied",
+                before.get("id")
+            );
+        }
+    }
+
     /// Overlapping statuses share one count.
     #[test]
     fn overlapping_statuses_after_a_write_count_once() {
@@ -1217,7 +1247,7 @@ mod snapshot_tests {
         let (atoms, index, documents) = store.searchable(workspace).unwrap();
         let fresh_docs: Vec<Vec<String>> = atoms
             .iter()
-            .map(packset_core::search::atom_tokens)
+            .map(|atom| packset_core::search::atom_tokens(atom))
             .collect();
         assert_eq!(*documents, fresh_docs, "the cached tokens drifted");
         let fresh = Index::build(fresh_docs.iter().map(Vec::as_slice));
@@ -1251,7 +1281,7 @@ mod snapshot_tests {
             .live(workspace)
             .unwrap()
             .iter()
-            .map(|a| Value::Object(a.clone()))
+            .map(|a| Value::Object(Record::clone(a)))
             .collect();
         // Force the next read to derive from the database rather than the
         // cache, and compare what comes back.
@@ -1260,7 +1290,7 @@ mod snapshot_tests {
             .live(workspace)
             .unwrap()
             .iter()
-            .map(|a| Value::Object(a.clone()))
+            .map(|a| Value::Object(Record::clone(a)))
             .collect();
         assert_eq!(
             patched, fresh,

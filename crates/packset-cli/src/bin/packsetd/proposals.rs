@@ -112,7 +112,7 @@ pub fn norm_claim(text: &str) -> String {
 /// Without this the miner proposes back what the cards and atoms already say,
 /// once per day, forever.
 #[must_use]
-pub fn fence(home: &Home, workspace: &str, live: &[Record]) -> BTreeSet<String> {
+pub fn fence(home: &Home, workspace: &str, live: &[std::sync::Arc<Record>]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for path in [home.user_path(), home.memory_path(workspace)] {
         for part in entries(&cards::read_text(&path)) {
@@ -279,7 +279,7 @@ pub fn compact_day(
     home: &Home,
     workspace: &str,
     day: Option<&str>,
-    live: &[Record],
+    live: &[std::sync::Arc<Record>],
     transcript: Option<&str>,
     mut new_id: impl FnMut() -> String,
 ) -> Result<Vec<Value>, CheapError> {
@@ -816,10 +816,12 @@ mod tests {
         let path = home.archive_path("w", day);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "The first claim worth keeping.\n").unwrap();
-        let live = vec![serde_json::from_str::<Map<String, Value>>(
-            r#"{"id":"a","text":"The first claim worth keeping."}"#,
-        )
-        .unwrap()];
+        let live = vec![std::sync::Arc::new(
+            serde_json::from_str::<Map<String, Value>>(
+                r#"{"id":"a","text":"The first claim worth keeping."}"#,
+            )
+            .unwrap(),
+        )];
         let got = compact_day(&home, "w", Some(day), &live, None, ids()).unwrap();
         assert!(got.is_empty(), "already remembered: {got:?}");
     }

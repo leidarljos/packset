@@ -1,6 +1,8 @@
 //! Scoring over a pack: the prefix-and-edit scan, BM25 over the index, the
 //! learned ballots, and the fuse that merges them.
 
+use std::borrow::Borrow;
+
 use serde_json::{json, Map, Value};
 
 use crate::{clock, record};
@@ -363,15 +365,16 @@ fn sort_hits(hits: &mut [Value]) {
     });
 }
 
-/// What a search is asked, apart from how it is scored.
-#[derive(Debug, Clone, Copy)]
-pub struct Ask<'a> {
+/// What a search is asked, apart from how it is scored. `atoms` is any slice
+/// that lends a [`Record`].
+#[derive(Debug)]
+pub struct Ask<'a, R = Record> {
     /// The seat card.
     pub user: &'a str,
     /// The workspace card.
     pub memory: &'a str,
     /// The live atoms to score.
-    pub atoms: &'a [Record],
+    pub atoms: &'a [R],
     /// What was asked.
     pub query: &'a str,
     /// How many hits to return.
@@ -384,6 +387,14 @@ pub struct Ask<'a> {
     pub now: &'a str,
 }
 
+impl<R> Clone for Ask<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for Ask<'_, R> {}
+
 /// Whether this atom is in the answer: live scope, and mail only when named.
 fn serves(atom: &Record, set: Option<&str>, kind: Option<&str>, now: &str) -> bool {
     record::is_live_at(atom, now)
@@ -393,8 +404,12 @@ fn serves(atom: &Record, set: Option<&str>, kind: Option<&str>, now: &str) -> bo
 
 /// The prefix-and-one-edit scan over a whole pack.
 #[must_use]
-pub fn search_linear(ask: &Ask<'_>) -> Vec<Value> {
-    let documents: Vec<Vec<String>> = ask.atoms.iter().map(atom_tokens).collect();
+pub fn search_linear<R: Borrow<Record>>(ask: &Ask<'_, R>) -> Vec<Value> {
+    let documents: Vec<Vec<String>> = ask
+        .atoms
+        .iter()
+        .map(|atom| atom_tokens(atom.borrow()))
+        .collect();
     search_linear_with(ask, &documents)
 }
 
@@ -404,7 +419,10 @@ pub fn search_linear(ask: &Ask<'_>) -> Vec<Value> {
 /// writer holds from building the index; an atom past the end of `documents`
 /// is tokenised here. The scan then pays for the comparison alone.
 #[must_use]
-pub fn search_linear_with(ask: &Ask<'_>, documents: &[Vec<String>]) -> Vec<Value> {
+pub fn search_linear_with<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
+    documents: &[Vec<String>],
+) -> Vec<Value> {
     let Ask {
         user,
         memory,
@@ -427,6 +445,7 @@ pub fn search_linear_with(ask: &Ask<'_>, documents: &[Vec<String>]) -> Vec<Value
     let mut best = TopK::new(limit);
     let mut owned: Vec<String>;
     for (ordinal, atom) in atoms.iter().enumerate() {
+        let atom: &Record = atom.borrow();
         if !serves(atom, set, kind, now) {
             continue;
         }
@@ -453,7 +472,7 @@ pub fn search_linear_with(ask: &Ask<'_>, documents: &[Vec<String>]) -> Vec<Value
         });
     }
     for candidate in best.into_sorted() {
-        hits.push(atom_hit(&atoms[candidate.ordinal], candidate.score));
+        hits.push(atom_hit(atoms[candidate.ordinal].borrow(), candidate.score));
     }
     sort_hits(&mut hits);
     hits.truncate(limit);
@@ -483,20 +502,23 @@ pub fn atom_tokens(atom: &Record) -> Vec<String> {
 /// `index` must have been built over `ask.atoms` in that order. Cards are
 /// scored against the same corpus.
 #[must_use]
-pub fn search_bm25(ask: &Ask<'_>, index: &crate::bm25::Index) -> Vec<Value> {
+pub fn search_bm25<R: Borrow<Record>>(ask: &Ask<'_, R>, index: &crate::bm25::Index) -> Vec<Value> {
     search_lexical(ask, index, crate::bm25::Scorer::default())
 }
 
 /// Plain Okapi BM25, for a caller measuring against the formula.
 #[must_use]
-pub fn search_bm25_plain(ask: &Ask<'_>, index: &crate::bm25::Index) -> Vec<Value> {
+pub fn search_bm25_plain<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
+    index: &crate::bm25::Index,
+) -> Vec<Value> {
     search_lexical(ask, index, crate::bm25::Scorer::Bm25)
 }
 
 /// The same, in the scoring family the caller names.
 #[must_use]
-pub fn search_lexical(
-    ask: &Ask<'_>,
+pub fn search_lexical<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
     index: &crate::bm25::Index,
     scorer: crate::bm25::Scorer,
 ) -> Vec<Value> {
@@ -520,8 +542,8 @@ const RM3_ALPHA: f64 = 0.5;
 /// [`crate::bm25::Index::expand`]. `documents` is the tokenised corpus the
 /// index was built over, in that order.
 #[must_use]
-pub fn search_bm25_expanded(
-    ask: &Ask<'_>,
+pub fn search_bm25_expanded<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
     index: &crate::bm25::Index,
     documents: &[Vec<String>],
 ) -> Vec<Value> {
@@ -545,8 +567,8 @@ pub fn search_bm25_expanded(
 }
 
 /// The hits a weighted query scores, cards and atoms together.
-fn bm25_hits(
-    ask: &Ask<'_>,
+fn bm25_hits<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
     index: &crate::bm25::Index,
     query: &[(String, f64)],
     scorer: crate::bm25::Scorer,
@@ -589,6 +611,7 @@ fn bm25_hits(
         let Some(atom) = atoms.get(ordinal) else {
             continue;
         };
+        let atom: &Record = atom.borrow();
         if !serves(atom, set, kind, now) {
             continue;
         }
@@ -600,7 +623,7 @@ fn bm25_hits(
         });
     }
     for candidate in best.into_sorted() {
-        hits.push(atom_hit(&atoms[candidate.ordinal], candidate.score));
+        hits.push(atom_hit(atoms[candidate.ordinal].borrow(), candidate.score));
     }
 
     sort_hits(&mut hits);
@@ -681,7 +704,7 @@ pub fn max_sim(query: &[Vec<f32>], document: &[Vec<f32>]) -> f64 {
 /// The dense ballot. Atoms without a stored vector are skipped, not scored
 /// zero: a missing encoder is not a vote.
 #[must_use]
-pub fn search_dense(ask: &Ask<'_>, query: &[f32]) -> Vec<Value> {
+pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<Value> {
     let Ask {
         atoms,
         limit,
@@ -695,6 +718,7 @@ pub fn search_dense(ask: &Ask<'_>, query: &[f32]) -> Vec<Value> {
     }
     let mut best = TopK::new(limit);
     for (ordinal, atom) in atoms.iter().enumerate() {
+        let atom: &Record = atom.borrow();
         if !serves(atom, set, kind, now) {
             continue;
         }
@@ -715,7 +739,7 @@ pub fn search_dense(ask: &Ask<'_>, query: &[f32]) -> Vec<Value> {
     let mut hits: Vec<Value> = best
         .into_sorted()
         .into_iter()
-        .map(|c| atom_hit(&atoms[c.ordinal], c.score))
+        .map(|c| atom_hit(atoms[c.ordinal].borrow(), c.score))
         .collect();
     sort_hits(&mut hits);
     hits.truncate(limit);
@@ -724,9 +748,10 @@ pub fn search_dense(ask: &Ask<'_>, query: &[f32]) -> Vec<Value> {
 
 /// Live atoms whose review is due; these lead the answer regardless of query.
 #[must_use]
-pub fn due_hits(atoms: &[Record], set: Option<&str>, now: &str) -> Vec<Value> {
+pub fn due_hits<R: Borrow<Record>>(atoms: &[R], set: Option<&str>, now: &str) -> Vec<Value> {
     let mut hits: Vec<Value> = atoms
         .iter()
+        .map(|atom| -> &Record { atom.borrow() })
         .filter(|atom| {
             record::is_live(atom, now)
                 && atom_in_set(atom, set)

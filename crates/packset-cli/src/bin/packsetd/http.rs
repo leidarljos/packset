@@ -201,7 +201,9 @@ fn route(
                                 .map(String::as_str)
                                 .filter(|k| !k.is_empty());
                             if kind.is_none() && !omit {
-                                Answer::ok(json!({ "atoms": atoms.as_ref() }))
+                                Answer::ok(json!({
+                                    "atoms": atoms.iter().map(AsRef::as_ref).collect::<Vec<&Map<String, Value>>>()
+                                }))
                             } else {
                                 Answer::ok(json!({
                                     "atoms": atoms
@@ -209,7 +211,7 @@ fn route(
                                         .filter(|a| kind.is_none_or(|k| {
                                             a.get("kind").and_then(Value::as_str) == Some(k)
                                         }))
-                                        .map(lean)
+                                        .map(|atom| lean(atom))
                                         .collect::<Vec<_>>()
                                 }))
                             }

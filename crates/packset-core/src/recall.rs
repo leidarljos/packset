@@ -251,8 +251,8 @@ fn one_hop(live: &[Record], seed_ids: &[String]) -> (Vec<Record>, Vec<Record>) {
 /// `atoms` is the caller's live set, which is what the store already computed;
 /// this function never reads a store of its own.
 #[must_use]
-pub fn recall(
-    atoms: &[Record],
+pub fn recall<R: std::borrow::Borrow<Record>>(
+    atoms: &[R],
     seeds: &[String],
     hints: &Hints,
     limit: Option<i64>,
@@ -265,6 +265,7 @@ pub fn recall(
     }
     let mut live: Vec<Record> = atoms
         .iter()
+        .map(|a| -> &Record { a.borrow() })
         .filter(|a| {
             record::in_memory(a.get("kind").and_then(Value::as_str).unwrap_or(""), kind)
                 && (record::is_live(a, now) || record::is_due(a, now))

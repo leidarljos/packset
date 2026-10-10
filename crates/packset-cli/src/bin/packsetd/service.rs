@@ -178,7 +178,7 @@ fn head_key(shape: &record::Shape) -> Option<String> {
 }
 
 /// The live set with mail left out. Islands, hubs and activation are memory.
-fn memory_only(atoms: &[Record]) -> Vec<Record> {
+fn memory_only(atoms: &[Arc<Record>]) -> Vec<Arc<Record>> {
     atoms
         .iter()
         .filter(|atom| {
@@ -411,7 +411,7 @@ impl Service {
                 .and_then(|r| r.get("used"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let mut changed = atom.clone();
+            let mut changed = Record::clone(atom);
             if neglected >= NEGLECT_LIMIT
                 && recalls == 0
                 && used == 0
@@ -618,7 +618,7 @@ impl Service {
                     .unwrap_or(record::DEFAULT_STABILITY);
                 let r =
                     packset_core::decay::retrievability(clock::elapsed_days(last, now), stability);
-                (r, last.to_string(), a.clone())
+                (r, last.to_string(), Record::clone(a))
             })
             .collect();
         ranked.sort_by(|a, b| {
@@ -768,11 +768,13 @@ impl Service {
         let live: Vec<&Record> = match named.as_deref() {
             Some(name) => snapshot
                 .iter()
-                .filter(|peer| peer.get("set").and_then(Value::as_str) == Some(name))
+                .map(AsRef::as_ref)
+                .filter(|peer: &&Record| peer.get("set").and_then(Value::as_str) == Some(name))
                 .collect(),
             None => snapshot
                 .iter()
-                .filter(|peer| !peer.contains_key("set"))
+                .map(AsRef::as_ref)
+                .filter(|peer: &&Record| !peer.contains_key("set"))
                 .collect(),
         };
         let shape = record::Shape::of(&atom);
@@ -974,7 +976,7 @@ impl Service {
         let mut updated = current
             .iter()
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-            .cloned()
+            .map(|a| Record::clone(a))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
         if let Some(to) = fields.get("origin").and_then(Value::as_str) {
             if packset_core::atom::launders(record::origin_of(&updated), to) {
@@ -995,8 +997,9 @@ impl Service {
         let now = clock::utcnow();
         let mut batch = Vec::new();
         if record::is_live(&updated, &now) {
+            let peers: Vec<&Record> = current.iter().map(AsRef::as_ref).collect();
             let rewritten =
-                record::apply_links(&mut updated, &current, record::LINK_THRESHOLD, &now);
+                record::apply_links_among(&mut updated, &peers, record::LINK_THRESHOLD, &now);
             for mut peer in rewritten {
                 peer.insert("ts".into(), Value::String(clock::utcnow()));
                 batch.push(peer);
@@ -1023,7 +1026,7 @@ impl Service {
             .live(workspace)?
             .iter()
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-            .cloned()
+            .map(|a| Record::clone(a))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
         let grade = if recalled {
             record::Grade::Recalled
@@ -1348,7 +1351,7 @@ impl Service {
         } else {
             cards::read_text(&self.home.memory_path(workspace))
         };
-        let docs = crate::milli::pack_documents(workspace, &user, &memory, &[]);
+        let docs = crate::milli::pack_documents::<Record>(workspace, &user, &memory, &[]);
         self.queue_projection(docs.into_iter().map(ProjectionOp::Upsert).collect());
     }
 
@@ -1361,6 +1364,7 @@ impl Service {
         let at =
             clock::canonicalize(at).ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
         let atoms = self.store.as_of(workspace, &at)?;
+        let atoms: Vec<&Record> = atoms.iter().map(AsRef::as_ref).collect();
         Ok(json!({ "atoms": atoms, "as_of": at }))
     }
 
@@ -1420,11 +1424,11 @@ impl Service {
         let dated = as_of.as_deref().map(|at| self.store.as_of(workspace, at));
         let (atoms, index, documents) = match dated {
             Some(scan) => {
-                let atoms = std::sync::Arc::new(scan?);
+                let atoms: crate::store::Live = std::sync::Arc::new(scan?);
                 let documents: std::sync::Arc<Vec<Vec<String>>> = std::sync::Arc::new(
                     atoms
                         .iter()
-                        .map(packset_core::search::atom_tokens)
+                        .map(|atom| packset_core::search::atom_tokens(atom))
                         .collect(),
                 );
                 let index = std::sync::Arc::new(packset_core::bm25::Index::build(
@@ -1728,7 +1732,7 @@ impl Service {
             recent.insert(key, now);
         }
         let live = self.store.live(workspace)?;
-        let mut atoms: Vec<Record> = live.iter().cloned().collect();
+        let mut atoms: Vec<Record> = live.iter().map(|a| Record::clone(a)).collect();
         let fired: Vec<usize> = ids
             .iter()
             .filter_map(|id| {
@@ -1780,7 +1784,7 @@ impl Service {
     pub fn consolidate(&self, workspace: &str, apply: bool) -> anyhow::Result<Value> {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         let live = self.store.live(workspace)?;
-        let mut atoms: Vec<Record> = live.iter().cloned().collect();
+        let mut atoms: Vec<Record> = live.iter().map(|a| Record::clone(a)).collect();
         atoms.sort_by(|a, b| {
             a.get("ts")
                 .and_then(Value::as_str)

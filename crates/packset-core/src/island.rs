@@ -2,6 +2,7 @@
 //! activates. A persona is a view over everything; an island is what one
 //! task touches.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use crate::search::Record;
@@ -25,7 +26,7 @@ impl Graph {
     /// Symmetric edges from every atom's `links`; a link to an id outside the
     /// set is dropped.
     #[must_use]
-    pub fn from_atoms(atoms: &[Record]) -> Self {
+    pub fn from_atoms<R: Borrow<Record>>(atoms: &[R]) -> Self {
         Self::from_atoms_as(atoms, None)
     }
 
@@ -33,10 +34,11 @@ impl Graph {
     /// the edges it fired, the shared weight where it wrote none. The nodes
     /// and the links are the pack's; only the weights are the persona's.
     #[must_use]
-    pub fn from_atoms_as(atoms: &[Record], lens: Option<&str>) -> Self {
+    pub fn from_atoms_as<R: Borrow<Record>>(atoms: &[R], lens: Option<&str>) -> Self {
         let ids: Vec<String> = atoms
             .iter()
             .map(|a| {
+                let a: &Record = a.borrow();
                 a.get("id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -50,6 +52,7 @@ impl Graph {
             .collect();
         let mut adjacency: Vec<HashMap<usize, f64>> = vec![HashMap::new(); atoms.len()];
         for (i, atom) in atoms.iter().enumerate() {
+            let atom: &Record = atom.borrow();
             let Some(links) = atom.get("links").and_then(|v| v.as_array()) else {
                 continue;
             };

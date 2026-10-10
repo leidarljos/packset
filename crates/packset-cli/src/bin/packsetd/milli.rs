@@ -6,6 +6,7 @@
 //! scorer rather than answering with a partial index, because a wrong answer
 //! that looks complete is worse than a slower one that is.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -325,7 +326,12 @@ pub fn atom_document(atom: &Record) -> Value {
 
 /// Every document a workspace projects: the two cards and its live atoms.
 #[must_use]
-pub fn pack_documents(workspace: &str, user: &str, memory: &str, atoms: &[Record]) -> Vec<Value> {
+pub fn pack_documents<R: Borrow<Record>>(
+    workspace: &str,
+    user: &str,
+    memory: &str,
+    atoms: &[R],
+) -> Vec<Value> {
     let mut docs = Vec::new();
     if !user.is_empty() {
         docs.push(json!({
@@ -343,6 +349,7 @@ pub fn pack_documents(workspace: &str, user: &str, memory: &str, atoms: &[Record
     }
     let now = packset_core::clock::utcnow();
     for atom in atoms {
+        let atom: &Record = atom.borrow();
         if record::is_live(atom, &now) || record::is_due(atom, &now) {
             docs.push(atom_document(atom));
         }
@@ -403,7 +410,7 @@ pub struct Corpus<'a> {
     /// The workspace card, or a set's stand-in for it.
     pub memory: &'a str,
     /// The live atoms.
-    pub atoms: &'a [Record],
+    pub atoms: &'a [std::sync::Arc<Record>],
 }
 
 /// Rebuild the projection from a whole workspace.
@@ -425,10 +432,11 @@ pub fn replace(corpus: Corpus<'_>, dir: &Path) -> bool {
 
 /// Upsert the live atoms only, leaving the prose documents alone.
 #[must_use]
-pub fn reindex_atoms(atoms: &[Record], dir: &Path) -> bool {
+pub fn reindex_atoms<R: Borrow<Record>>(atoms: &[R], dir: &Path) -> bool {
     let now = packset_core::clock::utcnow();
     let docs: Vec<Value> = atoms
         .iter()
+        .map(|a| -> &Record { a.borrow() })
         .filter(|a| {
             a.get("id")
                 .and_then(Value::as_str)
@@ -453,14 +461,15 @@ pub fn index_ready(dir: &Path) -> bool {
 /// an atom that has since been tombstoned never reaches a reader. Prose hits
 /// from the index are dropped because prose always comes from the pack.
 #[must_use]
-pub fn filter_atom_hits(
+pub fn filter_atom_hits<R: Borrow<Record>>(
     hits: &[Value],
-    live: &[Record],
+    live: &[R],
     set: Option<&str>,
     kind: Option<&str>,
 ) -> Vec<Value> {
     let by_id: BTreeMap<&str, &Record> = live
         .iter()
+        .map(|a| -> &Record { a.borrow() })
         .filter_map(|a| a.get("id").and_then(Value::as_str).map(|id| (id, a)))
         .collect();
     hits.iter()
@@ -523,7 +532,7 @@ fn ensure_atoms(corpus: Corpus<'_>, dir: &Path, set: Option<&str>) -> bool {
                     a.get("set").and_then(Value::as_str) == Some(name)
                         && (record::is_live(a, &now) || record::is_due(a, &now))
                 })
-                .map(atom_document)
+                .map(|a| atom_document(a))
                 .collect();
             let done = upsert(&docs, dir);
             if done {
@@ -744,9 +753,9 @@ mod tests {
 
     #[test]
     fn a_pack_projects_its_cards_only_when_they_say_something() {
-        let docs = pack_documents("w", "", "", &[]);
+        let docs = pack_documents::<Record>("w", "", "", &[]);
         assert!(docs.is_empty(), "{docs:?}");
-        let docs = pack_documents("w", "seat card", "workspace card", &[]);
+        let docs = pack_documents::<Record>("w", "seat card", "workspace card", &[]);
         assert_eq!(docs.len(), 2);
         assert!(docs[0]["trust"].as_f64().unwrap() > docs[1]["trust"].as_f64().unwrap());
     }
