@@ -140,27 +140,41 @@ pub(crate) fn is_cheap(method: &Method, target: &str) -> bool {
 /// Searches and writes in flight, and the ones waiting for a slot.
 struct Lane {
     limit: usize,
+    /// How many may wait for a slot. While parked, a request keeps its
+    /// connection and its body, so the bound is on descriptors and memory,
+    /// not only on waiting.
+    room: usize,
     in_flight: usize,
     parked: VecDeque<Held>,
 }
 
+/// What the lane did with a job.
+enum Begin {
+    Run(Held),
+    Parked,
+    Full(Held),
+}
+
 impl Lane {
-    fn new(workers: usize) -> Self {
+    fn new(workers: usize, room: usize) -> Self {
         Self {
             limit: dear_limit(workers),
+            room: room.max(1),
             in_flight: 0,
             parked: VecDeque::new(),
         }
     }
 
-    /// Run `job` now, or park it when the dear slots are full.
-    fn begin(&mut self, job: Held) -> Option<Held> {
+    /// Run `job` now, park it, or hand it back when the lane is full.
+    fn begin(&mut self, job: Held) -> Begin {
         if self.in_flight < self.limit {
             self.in_flight += 1;
-            Some(job)
-        } else {
+            Begin::Run(job)
+        } else if self.parked.len() < self.room {
             self.parked.push_back(job);
-            None
+            Begin::Parked
+        } else {
+            Begin::Full(job)
         }
     }
 
@@ -179,8 +193,9 @@ impl Lane {
 ///
 /// `workers` threads answer; at most `queue` accepted connections wait for
 /// them, and a connection past that is answered busy by the accept loop
-/// itself. `handle` runs once a request, and a panic inside it is that
-/// request's 500, not the worker's end.
+/// itself. Searches and writes that find no dear slot wait in the lane, at
+/// most `queue` of them. `handle` runs once a request, and a panic inside
+/// it is that request's 500, not the worker's end.
 pub fn serve<H>(listener: &TcpListener, workers: usize, queue: usize, handle: H)
 where
     H: Fn(&Request) -> Response + Send + Sync + 'static,
@@ -189,7 +204,7 @@ where
     let (tx, rx) = sync_channel::<Waiting>(queue.max(1));
     let rx = Arc::new(Mutex::new(rx));
     let slots = workers.max(1);
-    let lane = Arc::new(Mutex::new(Lane::new(slots)));
+    let lane = Arc::new(Mutex::new(Lane::new(slots, queue)));
     for n in 0..slots {
         let rx = Arc::clone(&rx);
         let handle = Arc::clone(&handle);
@@ -272,7 +287,8 @@ mod libc_errno {
 ///
 /// A cheap request runs on the worker that read it. A search or a write
 /// runs only while a dear slot is free; otherwise it waits on the lane and
-/// this worker goes back to the queue, so health is not stuck behind it.
+/// this worker goes back to the queue, so health is not stuck behind it. A
+/// full lane answers busy.
 fn work<H>(rx: &Mutex<Receiver<Waiting>>, lane: &Mutex<Lane>, handle: &H)
 where
     H: Fn(&Request) -> Response,
@@ -311,8 +327,14 @@ where
             let mut lane = lane.lock().unwrap_or_else(|poison| poison.into_inner());
             lane.begin(held)
         };
-        let Some(mut held) = admitted else {
-            continue;
+        let mut held = match admitted {
+            Begin::Run(held) => held,
+            Begin::Parked => continue,
+            Begin::Full(held) => {
+                let _ = write_response(&held.stream, &busy(), &[("Retry-After", "1")]);
+                let _ = held.stream.shutdown(std::net::Shutdown::Write);
+                continue;
+            }
         };
         loop {
             reply_ran(&held.stream, held.accepted, &held.request, handle);
@@ -419,14 +441,20 @@ fn shed(stream: &TcpStream) {
     let response = if probe {
         Response::text(200, "packsetd ok, busy")
     } else {
-        Response::json(
-            503,
-            r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#
-                .to_string(),
-        )
+        busy()
     };
     let _ = write_response(stream, &response, &[("Retry-After", "1")]);
     let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// The answer to a request this writer has no room for: none of it ran, so
+/// the client may send it again.
+fn busy() -> Response {
+    Response::json(
+        503,
+        r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#
+            .to_string(),
+    )
 }
 
 fn reason(code: u16) -> &'static str {
@@ -894,6 +922,39 @@ mod tests {
             "/v1/search?workspace=seat&q=fusion"
         ));
         assert!(!is_cheap(&Method::Post, "/health"));
+    }
+
+    /// Two workers, one dear slot, a queue of one: the third search is
+    /// answered busy and never runs.
+    #[test]
+    fn a_search_past_the_lanes_room_is_answered_busy_and_not_run() {
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (g, r) = (Arc::clone(&gate), Arc::clone(&ran));
+        let port = start(2, 1, move |request: &Request| {
+            r.lock().unwrap().push(request.target.clone());
+            let _wait = g.lock();
+            Response::text(200, "done")
+        });
+        let first =
+            std::thread::spawn(move || exchange(port, b"GET /v1/search?q=a HTTP/1.1\r\n\r\n"));
+        while ran.lock().unwrap().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let second =
+            std::thread::spawn(move || exchange(port, b"GET /v1/search?q=b HTTP/1.1\r\n\r\n"));
+        std::thread::sleep(Duration::from_millis(100));
+        let busy = exchange(port, b"GET /v1/search?q=c HTTP/1.1\r\n\r\n");
+        assert!(busy.starts_with("HTTP/1.1 503 "), "{busy}");
+        assert!(busy.contains("Retry-After: 1\r\n"), "{busy}");
+        drop(held);
+        assert!(first.join().unwrap().starts_with("HTTP/1.1 200 OK"));
+        assert!(second.join().unwrap().starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            *ran.lock().unwrap(),
+            vec!["/v1/search?q=a", "/v1/search?q=b"]
+        );
     }
 
     /// Two workers, one dear slot. A health check returns while a search

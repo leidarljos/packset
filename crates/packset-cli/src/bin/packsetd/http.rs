@@ -41,7 +41,8 @@ pub fn worker_count() -> usize {
     positive_env("PACKSET_WORKERS").map_or(DEFAULT_WORKERS, |n| n.min(MAX_WORKERS))
 }
 
-/// How many accepted connections may wait for a worker, `PACKSET_QUEUE`.
+/// How many accepted connections may wait for a worker, `PACKSET_QUEUE`;
+/// the lane takes the same bound.
 #[must_use]
 pub fn queue_depth() -> usize {
     positive_env("PACKSET_QUEUE").map_or(DEFAULT_QUEUE, |n| n.min(MAX_QUEUE))
