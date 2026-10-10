@@ -12,6 +12,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A missing encoder or index binary is looked for again after five seconds. A found one is kept.
 - The reference lists `PACKSET_TIMEOUT_MS`, `PACKSET_WORKERS` and `PACKSET_QUEUE`.
 - `packset-core`'s `Ask`, its search functions, `due_hits`, `recall` and `Graph::from_atoms` take any slice that lends a `Record`, so the writer passes its shared live set without a copy. A caller that passes an empty slice now names its element type.
+- `-h` or `--help` on any verb prints that verb's usage and runs nothing. Before, `packset forget --help` forgot a workspace called `--help`, and `packset stop --help` stopped the writer. A flag a verb does not take is refused, extra arguments are refused, and `--` ends the flags, so `packset forget -- -odd` names a workspace that starts with a dash. `packset-mcp --help` prints a line instead of starting the server.
 
 ## 0.13.0 (2026-10-10)
 
