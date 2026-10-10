@@ -327,7 +327,21 @@ seat writes name none, and before that reading the pack of one seat had
 closed nothing in a day of lessons. The closed claim keeps its window and
 answers an as-of read. ``POST /v1/consolidate`` runs the same rule over what
 is held, for a pack filled before the rule or by import, and reports the
-pairs before it writes them.
+pairs before it writes them. The MemoryAgentBench conflict-resolution rows
+measure this rule on public data: a list of facts where a later one
+overwrites an earlier one about the same subject. At 262K, scored per
+source as the paper scores it, the fused live panel answers 0.395 of
+the questions (95% CI 0.350 to 0.440) and the lexical ballot answers
+0.240. The published rows on this split are BM25 0.255 and HippoRAG-v2
+0.295, each with a GPT-4o-mini reader. The lexical ballot is under both.
+The fused live panel uses a seven-billion-parameter reader.
+
+The same benchmark's accurate retrieval is the four-source mean. Lexical
+job 11759, with a seven-billion-parameter reader, answers 0.568 of the
+questions (95% CI 0.530 to 0.605). That is below the published BM25 row
+of 0.605 and below HippoRAG-v2 at 0.651, both with a GPT-4o-mini reader.
+The scorer and verdict files for these rows are private; I share them on
+request.
 
 Trust is memory too
 ===================
