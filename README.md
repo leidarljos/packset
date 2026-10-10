@@ -48,7 +48,7 @@ $ packset island fusing two ballots     # the memories a task activates
 - Writes are `remember` and `prefer`, two sentences at most, stored as given. Nothing is extracted from a transcript.
 - Every claim has a validity window and a review clock (FSRS). Retrievability scales search; on a longitudinal corpus it ranks a recalled claim first 0.947 of the time against 0.230 for words alone.
 - A later claim closes the earlier one it rewrites; the closed one keeps its window for an as-of read (`packset search --as-of TS`, `packset atoms --as-of TS`). `consolidate` runs the rule over what is held.
-- Search fuses a prefix scan, BM25+ and a dense ballot. `packset search --rerank` (or `PACKSET_RERANK=1` / `/v1/search?rerank=1`) runs the measured cross-encoder over the top 20; off by default. LongMemEval_S sessions: 0.889 hit@1. MemoryAgentBench, scored per source as its paper scores it, with a seven-billion-parameter reader: lexical retrieval answers 0.568 of the accurate-retrieval questions (95% CI 0.530 to 0.605), below the published BM25 row of 0.605 with a hosted reader, and the replacement rule answers 0.395 of the conflict-resolution questions at 262K.
+- Search fuses a prefix scan, BM25+ and a dense ballot. `packset search --rerank` (or `PACKSET_RERANK=1` / `/v1/search?rerank=1`) runs the measured cross-encoder over the top 20; off by default. LongMemEval_S sessions: 0.889 hit@1.
 - A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
 - Forgetting by neglect: a review left due past twice its interval lapses as a missed review would, and a never-recalled lesson missed three times is forgotten. The writer sweeps once a day; `packset sweep` runs it now.
 - Claims link by shared names; links carry weights that use strengthens; `island` returns the cluster a task activates.
@@ -66,7 +66,7 @@ $ packset island fusing two ballots     # the memories a task activates
   | 32 | 19200 | 826.18 s | 23 req/s | 0 | shared, 6382 live + 18 closed of 6400 (rerun 2026-10-08; slower container, same counts) |
 - Trust rows and personas live in the pack and reach the seat's consensus.
 
-The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html) and in the [bench package](https://github.com/leidarljos/bench).
+The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html).
 
 ## Crates
 
