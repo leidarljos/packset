@@ -94,7 +94,10 @@ pub fn migrate(old: &Path, new: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(old) {
         Err(_) => return Err(format!("no pack at {}; nothing to move", old.display())),
         Ok(m) if m.file_type().is_symlink() => {
-            return Err(format!("{} is already a link; nothing moved", old.display()))
+            return Err(format!(
+                "{} is already a link; nothing moved",
+                old.display()
+            ))
         }
         Ok(m) if !m.is_dir() => return Err(format!("{} is not a directory", old.display())),
         Ok(_) => {}
@@ -136,9 +139,15 @@ mod tests {
         let dir = scratch("pick");
         let old = dir.join(".grokinside/memory");
         let new = dir.join("share/packset");
-        assert_eq!(pick(new.clone(), Some(old.clone())), DefaultHome::Current(new.clone()));
+        assert_eq!(
+            pick(new.clone(), Some(old.clone())),
+            DefaultHome::Current(new.clone())
+        );
         std::fs::create_dir_all(&old).unwrap();
-        assert_eq!(pick(new.clone(), Some(old.clone())), DefaultHome::Legacy(old.clone()));
+        assert_eq!(
+            pick(new.clone(), Some(old.clone())),
+            DefaultHome::Legacy(old.clone())
+        );
         std::fs::create_dir_all(&new).unwrap();
         assert_eq!(pick(new.clone(), Some(old)), DefaultHome::Current(new));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -153,7 +162,10 @@ mod tests {
         std::fs::write(old.join("token"), "t\n").unwrap();
         migrate(&old, &new).unwrap();
         assert_eq!(std::fs::read_to_string(new.join("token")).unwrap(), "t\n");
-        assert!(std::fs::symlink_metadata(&old).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&old)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(old.join("token")).unwrap(), "t\n");
         assert!(pick(new.clone(), Some(old.clone())) == DefaultHome::Current(new.clone()));
         let again = migrate(&old, &new).unwrap_err();

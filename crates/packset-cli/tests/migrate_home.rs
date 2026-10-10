@@ -22,10 +22,17 @@ fn migrate_home_moves_the_old_pack_and_links_it() {
     std::fs::write(old.join("token"), "abc\n").unwrap();
 
     let out = packset(home.path()).arg("migrate-home").output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let new = home.path().join(".local/share/packset");
     assert_eq!(std::fs::read_to_string(new.join("token")).unwrap(), "abc\n");
-    assert!(std::fs::symlink_metadata(&old).unwrap().file_type().is_symlink());
+    assert!(std::fs::symlink_metadata(&old)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 
     let again = packset(home.path()).arg("migrate-home").output().unwrap();
     assert!(!again.status.success());

@@ -665,15 +665,19 @@ fn migrate_home(port: u16) -> anyhow::Result<()> {
             named.display()
         );
     }
-    let old = packset_core::home::legacy_home()
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
-    let new = packset_core::home::current_home()
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let old =
+        packset_core::home::legacy_home().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let new =
+        packset_core::home::current_home().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
     if is_ours(port) {
         anyhow::bail!("a writer is listening on {port}; `packset stop` first");
     }
     packset_core::home::migrate(&old, &new).map_err(|e| anyhow::anyhow!(e))?;
-    println!("packset: moved {} to {}; the old name links to it", old.display(), new.display());
+    println!(
+        "packset: moved {} to {}; the old name links to it",
+        old.display(),
+        new.display()
+    );
     Ok(())
 }
 
