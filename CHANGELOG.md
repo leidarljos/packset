@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- packset-embed fetches no model while `LJOS_OFFLINE` or `HF_HUB_OFFLINE` is set. The rerank, late interaction and learned sparse models used to be fetched on first use even with `HF_HUB_OFFLINE=1`. A model already in the hub cache still loads. `LJOS_OFFLINE` is the seat-wide switch that ljos reads too.
+
 ## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.
