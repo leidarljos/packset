@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A source build of `packset-embed` with no ONNX Runtime in reach stops within the first minute and prints the recipe: build the runtime with `build-onnxruntime.sh`, then point `ORT_LIB_PATH` at it. Before, `cargo install packset-embed` compiled for minutes and failed at the linker with an error that never named the runtime. The check looks where `ort` does: either feature, `ORT_LIB_PATH` or `ORT_LIB_LOCATION`, or a `libonnxruntime` of 1.24 or newer that pkg-config sees. `PACKSET_EMBED_NO_ORT_CHECK=1` skips it.
+
 ## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.
