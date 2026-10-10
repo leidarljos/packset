@@ -566,7 +566,7 @@ fn route(
                 cheap_answer(service.compact(&workspace, day, transcript))
             }
         },
-        (Method::Post, "/v1/atoms") => answer(service.add(body.clone())),
+        (Method::Post, "/v1/atoms") => answer(service.add(body.clone()).map(written)),
         (Method::Post, "/v1/atoms/update") => {
             let (Some(workspace), Some(id)) = (
                 body.get("workspace").and_then(Value::as_str),
@@ -579,7 +579,7 @@ fn route(
                 .get("fields")
                 .and_then(Value::as_object)
                 .unwrap_or(&empty);
-            answer(service.update(workspace, id, fields))
+            answer(service.update(workspace, id, fields).map(written))
         }
         (Method::Post, "/v1/atoms/delete") => {
             let (Some(workspace), Some(id)) = (
@@ -629,6 +629,14 @@ fn route(
 }
 
 /// Turn a service result into an answer, keeping the store's own message.
+/// What a write answers: the stored claim without its vector. The writer
+/// needs the id, the text and what it superseded; the 384 floats were most
+/// of every reply and no client reads them back from a write.
+fn written(mut atom: Map<String, Value>) -> Map<String, Value> {
+    atom.remove("embedding");
+    atom
+}
+
 fn answer<T: Into<Value>>(result: anyhow::Result<T>) -> Answer {
     match result {
         Ok(value) => Answer::ok(value.into()),
@@ -1009,6 +1017,44 @@ mod tests {
         assert_eq!(voices.len(), 2);
         assert!(voices.iter().all(|a| a.get("embedding").is_none()));
         assert!(list(&[("embedding", "omit"), ("kind", "lesson")]).is_empty());
+    }
+
+    #[test]
+    fn a_write_answers_without_the_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let q = HashMap::new();
+        let body = json!({"workspace": "w", "text": "Prefer ripgrep for search.", "kind": "voice"});
+        let added = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms",
+            &q,
+            body.as_object().unwrap(),
+        );
+        assert_eq!(added.code, 200, "{:?}", added.body);
+        assert!(added.body.get("embedding").is_none());
+        let id = added.body["id"].as_str().unwrap().to_string();
+        assert!(
+            svc.store().live("w").unwrap()[0]
+                .as_ref()
+                .contains_key("embedding"),
+            "the store keeps it"
+        );
+        let update = json!({"workspace": "w", "id": id, "fields": {"tags": ["search"]}});
+        let updated = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/update",
+            &q,
+            update.as_object().unwrap(),
+        );
+        assert_eq!(updated.code, 200, "{:?}", updated.body);
+        assert!(updated.body.get("embedding").is_none());
+        assert_eq!(updated.body["id"], id);
     }
 
     fn search_query(rerank: Option<&str>) -> HashMap<String, String> {
