@@ -69,8 +69,18 @@ pub fn resolve() -> Option<PathBuf> {
 
 fn pick(current: PathBuf, legacy: Option<PathBuf>) -> DefaultHome {
     match legacy {
-        Some(old) if !current.exists() && old.is_dir() => DefaultHome::Legacy(old),
+        Some(old) if is_vacant(&current) && old.is_dir() => DefaultHome::Legacy(old),
         _ => DefaultHome::Current(current),
+    }
+}
+
+/// Absent, or an empty directory. An empty `~/.local/share/packset` made by
+/// hand or by a packager holds no pack, and choosing it would hide the
+/// memories in the old home behind a fresh, empty one.
+fn is_vacant(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => !path.exists(),
     }
 }
 
@@ -88,7 +98,7 @@ fn user_home() -> Option<PathBuf> {
 ///
 /// Returns the reason it did nothing, or the I/O error that stopped it.
 pub fn migrate(old: &Path, new: &Path) -> Result<(), String> {
-    if new.exists() {
+    if new.exists() && !is_vacant(new) {
         return Err(format!("{} already exists; nothing moved", new.display()));
     }
     match std::fs::symlink_metadata(old) {
@@ -104,6 +114,10 @@ pub fn migrate(old: &Path, new: &Path) -> Result<(), String> {
     }
     if let Some(parent) = new.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    if new.is_dir() {
+        // Empty, checked above; `remove_dir` refuses one that is not.
+        std::fs::remove_dir(new).map_err(|e| format!("{}: {e}", new.display()))?;
     }
     std::fs::rename(old, new).map_err(|e| {
         format!(
@@ -170,6 +184,24 @@ mod tests {
         assert!(pick(new.clone(), Some(old.clone())) == DefaultHome::Current(new.clone()));
         let again = migrate(&old, &new).unwrap_err();
         assert!(again.contains("already exists"), "{again}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_empty_new_home_does_not_hide_the_old_pack() {
+        let dir = scratch("empty");
+        let old = dir.join(".grokinside/memory");
+        let new = dir.join("share/packset");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("token"), "t\n").unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        assert_eq!(
+            pick(new.clone(), Some(old.clone())),
+            DefaultHome::Legacy(old.clone())
+        );
+        migrate(&old, &new).unwrap();
+        assert_eq!(std::fs::read_to_string(new.join("token")).unwrap(), "t\n");
+        assert_eq!(pick(new.clone(), Some(old)), DefaultHome::Current(new));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
