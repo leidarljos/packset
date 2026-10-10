@@ -126,20 +126,15 @@ pub fn default_port() -> u16 {
 
 /// The token file a writer leaves in its pack home: `PACKSET_TOKEN_FILE`,
 /// else `token` under `PACKSET_HOME` (`GROKINSIDE_HOME`,
-/// `GROK_INSIDE_MEMORY_HOME`), else under `~/.grokinside/memory`. packsetd
-/// resolves its home from the same variables.
+/// `GROK_INSIDE_MEMORY_HOME`), else under the default home
+/// ([`packset_core::home::resolve`]). packsetd resolves its home the same
+/// way.
 #[must_use]
 pub fn token_path() -> Option<PathBuf> {
-    let named = |key: &str| env::var_os(key).filter(|v| !v.is_empty());
-    if let Some(file) = named("PACKSET_TOKEN_FILE") {
+    if let Some(file) = env::var_os("PACKSET_TOKEN_FILE").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(file));
     }
-    let home = named("PACKSET_HOME")
-        .or_else(|| named("GROKINSIDE_HOME"))
-        .or_else(|| named("GROK_INSIDE_MEMORY_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| named("HOME").map(|h| PathBuf::from(h).join(".grokinside").join("memory")))?;
-    Some(home.join(TOKEN_FILE))
+    packset_core::home::resolve().map(|home| home.join(TOKEN_FILE))
 }
 
 /// The name of the token file in a pack home.

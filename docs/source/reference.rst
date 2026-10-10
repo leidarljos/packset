@@ -151,7 +151,7 @@ Variable                                                   Read by              
 ========================================================== ========================= ================================================================================================================================================================================================
 ``PACKSET_URL``                                            clients                   the writer; ``INSIDE_MEMORY_URL`` is an alias
 ``PACKSET_PORT``                                           ``packset``, ``packsetd`` the port; default 8761
-``PACKSET_HOME``                                           ``packsetd``              the pack home; default ``~/.grokinside/memory``; two writers on one host want two homes and two ports
+``PACKSET_HOME``                                           ``packsetd``              the pack home; default ``$XDG_DATA_HOME/packset`` (``~/.local/share/packset``), or ``~/.grokinside/memory`` while only that exists (``packset migrate-home`` moves it); two writers on one host want two homes and two ports
 ``PACKSET_WORKSPACE``                                      clients                   the workspace when none is given
 ``PACKSET_TIMEOUT_MS``                                     clients                   how long one request may take, default thirty seconds; a busy writer is asked again after 50, 150 and 450 ms inside it
 ``PACKSET_WORKERS``                                        ``packsetd``              requests answered at once, default 4, at most 8; with two or more, searches and writes hold all but one
