@@ -1155,6 +1155,9 @@ for line in sys.stdin:
         let before = std::env::var_os("PACKSET_EMBED");
         // SAFETY: EMBED serialises every test that points PACKSET_EMBED.
         unsafe { std::env::set_var("PACKSET_EMBED", "/bin/false") };
+        // A test that does not hold EMBED can leave a stub child here while
+        // another test names the stub; that child would answer for this one.
+        *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
         if binary().is_some() {
             assert!(encode_now(&["a text".to_string()], false).is_none());
             assert_eq!(last_dense(), Some(false));
