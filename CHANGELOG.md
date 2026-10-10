@@ -5,6 +5,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - packset-embed fetches no model while `LJOS_OFFLINE` or `HF_HUB_OFFLINE` is set. The rerank, late interaction and learned sparse models used to be fetched on first use even with `HF_HUB_OFFLINE=1`. A model already in the hub cache still loads. `LJOS_OFFLINE` is the seat-wide switch that ljos reads too.
+- `cargo binstall packset` builds from source on a target with no release tarball. The `compile` strategy was off, so binstall failed on every target the release does not build, x86_64 macOS, aarch64 Linux and Windows among them. The packset crate links no native runtime, so that build needs only a Rust toolchain. `packset-embed` still takes the release tarball or nothing, since its source build needs ONNX Runtime first. cargo-quickinstall stays off.
+- The install lines say `cargo binstall --locked`, which binstall passes to that source build so it takes the versions in `Cargo.lock`.
 
 ## 0.14.0 (2026-10-10)
 

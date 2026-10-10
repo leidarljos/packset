@@ -20,8 +20,8 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 ## Install
 
 ```console
-$ cargo binstall packset
-# or: cargo install packset
+$ cargo binstall --locked packset
+# or: cargo install --locked packset
 $ packset ensure
 ```
 
