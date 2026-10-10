@@ -20,6 +20,15 @@ use crate::store::Record;
 /// Environment variables naming the search binary.
 pub const BIN_VARS: &[&str] = &["PACKSET_MILLI", "INSIDE_MILLI", "GROK_INSIDE_MILLI"];
 
+/// Whether a variable in [`BIN_VARS`] names the binary. A binary found only
+/// on PATH is not a request to search with it when no encoder answers.
+#[must_use]
+pub fn named() -> bool {
+    BIN_VARS
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
+}
+
 /// Sets already backfilled into an index by this process.
 ///
 /// The backfill exists for a projection written before atoms carried a `set`,
