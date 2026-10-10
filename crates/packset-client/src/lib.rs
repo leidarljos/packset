@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long one request may take: `PACKSET_TIMEOUT_MS`, else thirty seconds.
 /// A write that waits behind thirty others on a busy seat is late, not failed.
@@ -16,6 +16,45 @@ fn timeout() -> Duration {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map_or(Duration::from_secs(30), Duration::from_millis)
+}
+
+/// The wait before a busy writer is asked again, tripled each time.
+const BUSY_WAIT: Duration = Duration::from_millis(50);
+/// How many times to ask again.
+const BUSY_RETRIES: u32 = 3;
+
+/// Send `req`, with `body` when there is one, inside `budget`, and send it
+/// again when the writer answers busy. The writer answers 503 only when its
+/// queue or its lane is full, before any of the request runs, so a write
+/// sent again is not stored twice.
+fn send(
+    req: ureq::Request,
+    body: Option<&serde_json::Value>,
+    budget: Duration,
+) -> Result<ureq::Response, Box<ureq::Error>> {
+    let started = Instant::now();
+    let mut wait = BUSY_WAIT;
+    let mut retries = 0;
+    loop {
+        let left = budget
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_millis(1));
+        let attempt = req.clone().timeout(left);
+        let answered = match body {
+            Some(json) => attempt.send_json(json),
+            None => attempt.call(),
+        };
+        match answered {
+            Err(ureq::Error::Status(503, _))
+                if retries < BUSY_RETRIES && started.elapsed() + wait < budget =>
+            {
+                std::thread::sleep(wait);
+                wait *= 3;
+                retries += 1;
+            }
+            other => return other.map_err(Box::new),
+        }
+    }
 }
 
 fn path_seg(id: &str) -> String {
@@ -132,8 +171,8 @@ pub struct Hit {
 }
 
 /// A refusal, carrying the reason the writer gave in its body.
-fn refused(url: &str, e: ureq::Error) -> Error {
-    match e {
+fn refused(url: &str, e: Box<ureq::Error>) -> Error {
+    match *e {
         ureq::Error::Status(code, response) => {
             let text = response.into_string().unwrap_or_default();
             let reason = serde_json::from_str::<serde_json::Value>(&text)
@@ -217,12 +256,13 @@ impl PacksetClient {
     pub fn workspace_for_cwd(&self, cwd: &std::path::Path) -> String {
         let abs = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let url = format!("{}/v1/identity", self.base);
-        let body = ureq::get(&url)
-            .query("cwd", abs.to_string_lossy().as_ref())
-            .timeout(timeout())
-            .call()
-            .ok()
-            .and_then(|r| r.into_string().ok());
+        let body = send(
+            ureq::get(&url).query("cwd", abs.to_string_lossy().as_ref()),
+            None,
+            timeout(),
+        )
+        .ok()
+        .and_then(|r| r.into_string().ok());
         if let Some(body) = body {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
                 if let Some(ws) = val.get("workspace").and_then(|v| v.as_str()) {
@@ -237,9 +277,7 @@ impl PacksetClient {
 
     pub fn health(&self) -> Result<String, Error> {
         let url = format!("{}/health", self.base);
-        let body = ureq::get(&url)
-            .timeout(timeout())
-            .call()
+        let body = send(ureq::get(&url), None, timeout())
             .map_err(|e| refused(&url, e))?
             .into_string()?;
         Ok(body)
@@ -248,16 +286,16 @@ impl PacksetClient {
     pub fn get_atom(&self, workspace: &str, id: &str) -> Result<serde_json::Value, Error> {
         let encoded = path_seg(id);
         let url = format!("{}/v1/atoms/{encoded}", self.base);
-        let resp = match ureq::get(&url)
-            .query("workspace", workspace)
-            .timeout(timeout())
-            .call()
-        {
+        let resp = match send(
+            ureq::get(&url).query("workspace", workspace),
+            None,
+            timeout(),
+        ) {
             Ok(resp) => resp,
-            Err(ureq::Error::Status(404, _)) => {
+            Err(e) if matches!(*e, ureq::Error::Status(404, _)) => {
                 return Err(Error::Bad(format!("no atom {id}")));
             }
-            Err(e) => return Err(Error::Http(Box::new(e))),
+            Err(e) => return Err(Error::Http(e)),
         };
         Ok(resp.into_json()?)
     }
@@ -277,13 +315,13 @@ impl PacksetClient {
         as_of: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/atoms", self.base);
-        let mut req = ureq::get(&url)
-            .query("workspace", workspace)
-            .timeout(timeout());
+        let mut req = ureq::get(&url).query("workspace", workspace);
         if let Some(at) = as_of {
             req = req.query("as_of", at);
         }
-        let mut body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        let mut body: serde_json::Value = send(req, None, timeout())
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
         let atoms = body
             .get_mut("atoms")
             .map(serde_json::Value::take)
@@ -306,12 +344,13 @@ impl PacksetClient {
         let url = format!("{}/v1/atoms", self.base);
         let mut req = ureq::get(&url)
             .query("workspace", workspace)
-            .query("embedding", "omit")
-            .timeout(timeout());
+            .query("embedding", "omit");
         if let Some(at) = as_of {
             req = req.query("as_of", at);
         }
-        let mut body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        let mut body: serde_json::Value = send(req, None, timeout())
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
         let atoms = body
             .get_mut("atoms")
             .map(serde_json::Value::take)
@@ -364,15 +403,16 @@ impl PacksetClient {
         let mut req = ureq::get(&url)
             .query("workspace", workspace)
             .query("q", q)
-            .query("limit", &limit.to_string())
-            .timeout(budget);
+            .query("limit", &limit.to_string());
         if let Some(at) = as_of {
             req = req.query("as_of", at);
         }
         if rerank {
             req = req.query("rerank", "1");
         }
-        let body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        let body: serde_json::Value = send(req, None, budget)
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
         let hits = body
             .get("hits")
             .cloned()
@@ -387,11 +427,13 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn status(&self, workspace: Option<&str>) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/status", self.base);
-        let mut req = ureq::get(&url).timeout(timeout());
+        let mut req = ureq::get(&url);
         if let Some(workspace) = workspace {
             req = req.query("workspace", workspace);
         }
-        Ok(req.call().map_err(|e| refused(&url, e))?.into_json()?)
+        Ok(send(req, None, timeout())
+            .map_err(|e| refused(&url, e))?
+            .into_json()?)
     }
 
     /// The set a workspace is pinned to.
@@ -401,12 +443,13 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn pin(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/pin", self.base);
-        Ok(ureq::get(&url)
-            .query("workspace", workspace)
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?)
+        Ok(send(
+            ureq::get(&url).query("workspace", workspace),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?)
     }
 
     /// Pin a workspace to a set.
@@ -416,11 +459,13 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn set_pin(&self, workspace: &str, name: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/pin", self.base);
-        Ok(ureq::put(&url)
-            .timeout(timeout())
-            .send_json(serde_json::json!({ "workspace": workspace, "name": name }))
-            .map_err(|e| refused(&url, e))?
-            .into_json()?)
+        Ok(send(
+            ureq::put(&url),
+            Some(&serde_json::json!({ "workspace": workspace, "name": name })),
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?)
     }
 
     /// The deed accessions a workspace's live atoms cite, sorted.
@@ -433,12 +478,13 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn accessions(&self, workspace: &str) -> Result<Vec<String>, Error> {
         let url = format!("{}/v1/accessions", self.base);
-        let body: serde_json::Value = ureq::get(&url)
-            .query("workspace", workspace)
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::get(&url).query("workspace", workspace),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         let found = body
             .get("accessions")
             .cloned()
@@ -469,13 +515,15 @@ impl PacksetClient {
         kind: &str,
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/atoms", self.base);
-        let body: serde_json::Value = ureq::get(&url)
-            .query("workspace", workspace)
-            .query("kind", kind)
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::get(&url)
+                .query("workspace", workspace)
+                .query("kind", kind),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body
             .get("atoms")
             .and_then(serde_json::Value::as_array)
@@ -494,13 +542,15 @@ impl PacksetClient {
         accession: &str,
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/citers", self.base);
-        let body: serde_json::Value = ureq::get(&url)
-            .query("workspace", workspace)
-            .query("accession", accession)
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::get(&url)
+                .query("workspace", workspace)
+                .query("accession", accession),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         let found = body
             .get("atoms")
             .cloned()
@@ -534,9 +584,9 @@ impl PacksetClient {
         if let Some(accession) = why {
             body["why"] = serde_json::Value::String(accession.to_string());
         }
-        let resp = match ureq::post(&url).timeout(timeout()).send_json(body) {
+        let resp = match send(ureq::post(&url), Some(&body), timeout()) {
             Ok(resp) => resp,
-            Err(ureq::Error::Status(404, _)) => {
+            Err(e) if matches!(*e, ureq::Error::Status(404, _)) => {
                 return Err(Error::Bad(format!("no atom {id}")));
             }
             Err(e) => return Err(refused(&url, e)),
@@ -552,15 +602,17 @@ impl PacksetClient {
         recalled: bool,
     ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/grade", self.base);
-        let body: serde_json::Value = ureq::post(&url)
-            .timeout(timeout())
-            .send_json(serde_json::json!({
+        let body: serde_json::Value = send(
+            ureq::post(&url),
+            Some(&serde_json::json!({
                 "workspace": workspace,
                 "id": id,
                 "recalled": recalled,
-            }))
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+            })),
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
@@ -568,24 +620,27 @@ impl PacksetClient {
     /// The claims the link graph turns on, highest first.
     pub fn hubs(&self, workspace: &str, limit: usize) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/hubs", self.base);
-        let body: serde_json::Value = ureq::get(&url)
-            .query("workspace", workspace)
-            .query("limit", &limit.to_string())
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::get(&url)
+                .query("workspace", workspace)
+                .query("limit", &limit.to_string()),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
     pub fn islands(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/islands", self.base);
-        let body: serde_json::Value = ureq::get(&url)
-            .query("workspace", workspace)
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::get(&url).query("workspace", workspace),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
@@ -607,13 +662,15 @@ impl PacksetClient {
         lens: Option<&str>,
     ) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/fire", self.base);
-        let body: serde_json::Value = ureq::post(&url)
-            .timeout(timeout())
-            .send_json(
-                serde_json::json!({"workspace": workspace, "ids": ids, "as": lens.unwrap_or("")}),
-            )
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::post(&url),
+            Some(
+                &serde_json::json!({"workspace": workspace, "ids": ids, "as": lens.unwrap_or("")}),
+            ),
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
@@ -622,11 +679,13 @@ impl PacksetClient {
     /// false reports the pairs and writes nothing.
     pub fn consolidate(&self, workspace: &str, apply: bool) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/consolidate", self.base);
-        let body: serde_json::Value = ureq::post(&url)
-            .timeout(timeout())
-            .send_json(serde_json::json!({"workspace": workspace, "apply": apply}))
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::post(&url),
+            Some(&serde_json::json!({"workspace": workspace, "apply": apply})),
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
@@ -638,11 +697,13 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn sweep(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/sweep", self.base);
-        let body: serde_json::Value = ureq::post(&url)
-            .timeout(timeout())
-            .send_json(serde_json::json!({"workspace": workspace}))
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::post(&url),
+            Some(&serde_json::json!({"workspace": workspace})),
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
@@ -655,11 +716,13 @@ impl PacksetClient {
     /// The request's, or a body that is not JSON.
     pub fn forget_workspace(&self, workspace: &str) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/forget", self.base);
-        let body: serde_json::Value = ureq::post(&url)
-            .timeout(timeout())
-            .send_json(serde_json::json!({"workspace": workspace}))
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::post(&url),
+            Some(&serde_json::json!({"workspace": workspace})),
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body)
     }
 
@@ -694,12 +757,13 @@ impl PacksetClient {
             .query("workspace", workspace)
             .query("q", q)
             .query("limit", &limit.to_string())
-            .query("fire", if fire { "1" } else { "0" })
-            .timeout(timeout());
+            .query("fire", if fire { "1" } else { "0" });
         if let Some(name) = lens.filter(|n| !n.trim().is_empty()) {
             req = req.query("as", name);
         }
-        let body: serde_json::Value = req.call().map_err(|e| refused(&url, e))?.into_json()?;
+        let body: serde_json::Value = send(req, None, timeout())
+            .map_err(|e| refused(&url, e))?
+            .into_json()?;
         Ok(body)
     }
 
@@ -715,13 +779,15 @@ impl PacksetClient {
         set: &str,
     ) -> Result<Vec<serde_json::Value>, Error> {
         let url = format!("{}/v1/pack", self.base);
-        let body: serde_json::Value = ureq::get(&url)
-            .query("workspace", workspace)
-            .query("set", set)
-            .timeout(timeout())
-            .call()
-            .map_err(|e| refused(&url, e))?
-            .into_json()?;
+        let body: serde_json::Value = send(
+            ureq::get(&url)
+                .query("workspace", workspace)
+                .query("set", set),
+            None,
+            timeout(),
+        )
+        .map_err(|e| refused(&url, e))?
+        .into_json()?;
         Ok(body
             .get("atoms")
             .and_then(serde_json::Value::as_array)
@@ -731,9 +797,7 @@ impl PacksetClient {
 
     pub fn post_atom(&self, atom: &serde_json::Value) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/atoms", self.base);
-        let body: serde_json::Value = ureq::post(&url)
-            .timeout(timeout())
-            .send_json(atom.clone())
+        let body: serde_json::Value = send(ureq::post(&url), Some(atom), timeout())
             .map_err(|e| refused(&url, e))?
             .into_json()?;
         Ok(body)
@@ -804,5 +868,100 @@ mod tests {
         }
         assert_eq!(got, "seat");
         assert_ne!(got, "default");
+    }
+
+    /// A writer that answers busy to its first `busy` requests and counts every
+    /// request.
+    fn busy_for(
+        busy: usize,
+    ) -> (
+        PacksetClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = PacksetClient::new(format!("http://{}", listener.local_addr().unwrap()));
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut length = 0;
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                let _ = reader.read_exact(&mut body);
+                let (status, text) = if counted.fetch_add(1, Ordering::SeqCst) < busy {
+                    ("503 Service Unavailable", r#"{"error":"busy"}"#)
+                } else {
+                    ("200 OK", r#"{"ok":true}"#)
+                };
+                let _ = (&stream).write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        text.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (client, seen)
+    }
+
+    #[test]
+    fn a_busy_writer_is_asked_again_for_a_read_and_a_write() {
+        use std::sync::atomic::Ordering;
+        let _env = ENV_LOCK.lock().unwrap();
+        let (client, seen) = busy_for(2);
+        assert_eq!(client.status(None).unwrap()["ok"], true);
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+        let (client, seen) = busy_for(1);
+        let stored = client
+            .post_atom(&serde_json::json!({"text": "one write", "workspace": "w"}))
+            .unwrap();
+        assert_eq!(stored["ok"], true);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "the write was not sent again"
+        );
+    }
+
+    #[test]
+    fn a_writer_busy_past_three_retries_is_a_refusal() {
+        use std::sync::atomic::Ordering;
+        let _env = ENV_LOCK.lock().unwrap();
+        let (client, seen) = busy_for(usize::MAX);
+        let err = client.status(None).unwrap_err().to_string();
+        assert!(err.contains("503") && err.contains("busy"), "{err}");
+        assert_eq!(seen.load(Ordering::SeqCst), 4);
+    }
+
+    /// A 100 ms budget leaves no room for the 150 ms wait.
+    #[test]
+    fn the_retries_stop_where_the_budget_does() {
+        use std::sync::atomic::Ordering;
+        let _env = ENV_LOCK.lock().unwrap();
+        let old = env::var_os("PACKSET_TIMEOUT_MS");
+        unsafe { env::set_var("PACKSET_TIMEOUT_MS", "100") };
+        let (client, seen) = busy_for(usize::MAX);
+        let started = Instant::now();
+        let answered = client.status(None);
+        let took = started.elapsed();
+        unsafe {
+            match old {
+                Some(v) => env::set_var("PACKSET_TIMEOUT_MS", v),
+                None => env::remove_var("PACKSET_TIMEOUT_MS"),
+            }
+        }
+        assert!(answered.is_err());
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        assert!(took < Duration::from_millis(300), "{took:?}");
     }
 }
