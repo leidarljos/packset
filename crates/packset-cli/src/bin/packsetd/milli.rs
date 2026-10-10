@@ -61,12 +61,14 @@ pub fn binary() -> Option<PathBuf> {
 }
 
 /// The discovery every call used to repeat: the tree candidates and the
-/// names on `PATH`, none of which moves under a running writer. Found
-/// once and kept, so a burst of searches and flushes does not walk the
-/// filesystem per request.
+/// names on `PATH`. A binary found there does not move under a running
+/// writer, so it is kept for good and a burst of searches and flushes does
+/// not walk the filesystem per request. A miss is kept for
+/// [`crate::embed::LOOK_AGAIN`]: a binary can be installed after the
+/// writer starts.
 fn found_binary() -> Option<PathBuf> {
-    static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    FOUND.get_or_init(discover).clone()
+    static FOUND: crate::embed::Kept = crate::embed::Kept::new(crate::embed::LOOK_AGAIN);
+    FOUND.get(discover)
 }
 
 /// Where the binary lives when no variable names it.

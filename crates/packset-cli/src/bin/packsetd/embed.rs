@@ -34,12 +34,44 @@ pub fn binary() -> Option<PathBuf> {
 }
 
 /// The discovery every call used to repeat: the binary beside this one
-/// and the name on `PATH`, neither of which moves under a running writer.
-/// Found once and kept, so a burst of searches does not walk the
-/// filesystem per request.
+/// and the name on `PATH`. A binary found there does not move under a
+/// running writer, so it is kept for good and a burst of searches does
+/// not walk the filesystem per request. A miss is kept for
+/// [`LOOK_AGAIN`]: a binary can be installed after the writer starts.
 fn found_binary() -> Option<PathBuf> {
-    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
-    FOUND.get_or_init(discover).clone()
+    static FOUND: Kept = Kept::new(LOOK_AGAIN);
+    FOUND.get(discover)
+}
+
+/// How long a miss is kept.
+pub const LOOK_AGAIN: Duration = Duration::from_secs(5);
+
+/// The last answer, found or not, and when.
+pub struct Kept {
+    again: Duration,
+    seen: Mutex<Option<(std::time::Instant, Option<PathBuf>)>>,
+}
+
+impl Kept {
+    pub const fn new(again: Duration) -> Self {
+        Self {
+            again,
+            seen: Mutex::new(None),
+        }
+    }
+
+    /// The kept answer, or `discover`'s when there is none to keep.
+    pub fn get(&self, discover: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        match &*seen {
+            Some((_, Some(found))) => return Some(found.clone()),
+            Some((at, None)) if at.elapsed() < self.again => return None,
+            _ => {}
+        }
+        let found = discover();
+        *seen = Some((std::time::Instant::now(), found.clone()));
+        found
+    }
 }
 
 /// The three places a seat puts the encoder when no variable names it.
@@ -853,6 +885,36 @@ mod tests {
         assert!(started.elapsed() >= std::time::Duration::from_millis(50));
         drop(held);
         assert!(wait_for(&slot, std::time::Duration::from_millis(50)).is_some());
+    }
+
+    /// A found binary is kept for good; a miss, only until the wait runs out.
+    #[test]
+    fn a_found_binary_is_kept_and_a_miss_is_looked_for_again() {
+        let looked = std::cell::Cell::new(0);
+        let missing = || {
+            looked.set(looked.get() + 1);
+            None
+        };
+        let slow = Kept::new(Duration::from_secs(60));
+        assert_eq!(slow.get(missing), None);
+        assert_eq!(slow.get(missing), None);
+        assert_eq!(
+            looked.get(),
+            1,
+            "a miss was looked for again inside the wait"
+        );
+
+        let quick = Kept::new(Duration::ZERO);
+        assert_eq!(quick.get(|| None), None);
+        let installed = PathBuf::from("/opt/packset-embed");
+        assert_eq!(
+            quick.get(|| Some(installed.clone())),
+            Some(installed.clone())
+        );
+        assert_eq!(
+            quick.get(|| panic!("a found binary was looked for again")),
+            Some(installed)
+        );
     }
 
     /// A waiter takes whichever pool slot is free, not the first: with
