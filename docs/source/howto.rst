@@ -208,9 +208,12 @@ One writer serves every client on the seat. The worker pool is the balance:
 at a time so two identical claims arriving together are stored once. A burst
 waits in a queue of ``PACKSET_QUEUE`` connections (default 128) rather than
 becoming threads. Past that a request is answered 503 with ``Retry-After: 1``.
-Health, status and the workspace list keep one worker, so a search does not
-hold the last one. ``/health`` still answers. Reads share one parsed snapshot
-per write. The encoder runs before the write lock and is warmed at start.
+Searches and writes that a worker has read but cannot yet run are bounded the
+same way. ``packset-client`` asks a busy writer again after 50, 150 and 450
+ms. Health, status, the workspace list and the listing without vectors that a
+status line reads keep one worker, so a search does not hold the last one.
+``/health`` still answers. Reads share one parsed snapshot per write. The
+encoder runs before the write lock and is warmed at start.
 
 .. code:: console
 
