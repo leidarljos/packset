@@ -1,5 +1,6 @@
 #!/bin/sh
 # ONNX Runtime 1.28.0, CPU, shared library, installed under PREFIX.
+# Linux and macOS.
 # That is the runtime ort 2.0.0-rc.13 publishes as a prebuilt. This script
 # builds it from source instead. The encoder then links the result:
 #
@@ -23,7 +24,11 @@ fi
 if [ -z "${CXX:-}" ] && command -v g++ >/dev/null 2>&1; then
   export CXX=g++
 fi
-if [ -z "${LIBRARY_PATH:-}" ] && command -v gcc >/dev/null 2>&1; then
+case $(uname -s) in
+  Darwin) build=$src/build/MacOS/Release ;;
+  *) build=$src/build/Linux/Release ;;
+esac
+if [ "$(uname -s)" = Linux ] && [ -z "${LIBRARY_PATH:-}" ] && command -v gcc >/dev/null 2>&1; then
   export LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so)")"
 fi
 
@@ -47,15 +52,15 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 ./build.sh "$@"
 
-cmake --install "$src/build/Linux/Release" --prefix "$prefix"
+cmake --install "$build" --prefix "$prefix"
 
-lib=$(find "$prefix/lib" "$prefix/lib64" -name 'libonnxruntime.so' 2>/dev/null | head -n 1 || true)
+lib=$(find "$prefix/lib" "$prefix/lib64" \( -name 'libonnxruntime.so' -o -name 'libonnxruntime.dylib' \) 2>/dev/null | head -n 1 || true)
 if [ -z "$lib" ]; then
-  built=$(find "$src/build/Linux/Release" -name 'libonnxruntime.so' | head -n 1)
+  built=$(find "$build" \( -name 'libonnxruntime.so' -o -name 'libonnxruntime.dylib' \) | head -n 1)
   mkdir -p "$prefix/lib"
   cp -a "$built" "$prefix/lib/"
   # The soname sits beside the linker name when the install step skipped it.
-  find "$src/build/Linux/Release" -name 'libonnxruntime.so.*' -exec cp -a {} "$prefix/lib/" \;
-  lib=$prefix/lib/libonnxruntime.so
+  find "$build" \( -name 'libonnxruntime.so.*' -o -name 'libonnxruntime.*.dylib' \) -exec cp -a {} "$prefix/lib/" \;
+  lib=$prefix/lib/$(basename "$built")
 fi
 echo "onnxruntime_lib=$(dirname "$lib")"

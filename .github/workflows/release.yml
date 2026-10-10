@@ -3,13 +3,25 @@ name: release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  # Builds the release for a tag that already exists, with this workflow and
+  # this build script, and the tag's own source. The tag is not moved.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, such as v0.13.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -18,21 +30,90 @@ jobs:
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
+      - name: The tag names a release
+        run: |
+          set -eu
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      # The build script comes from the workflow's commit, so a fix to it
+      # applies when an older tag is rebuilt.
+      - uses: actions/checkout@v4
+        with:
+          path: .release
+          sparse-checkout: crates/packset-embed/build-onnxruntime.sh
+          sparse-checkout-cone-mode: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p packset -p packset-embed
-      - run: |
+      - name: Build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
+      # packset-embed links ONNX Runtime and does not download one. The
+      # release links it statically, so the encoder needs no library beside
+      # it and an install that copies only the binaries still starts. The
+      # script builds the shared library; its build tree holds the static
+      # archives of every part, and the cache keeps only those.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: ort
+        with:
+          path: ${{ runner.temp }}/onnxruntime-static
+          key: onnxruntime-1.28.0-cpu-static-${{ matrix.target }}-${{ hashFiles('.release/crates/packset-embed/build-onnxruntime.sh') }}
+      - name: Build ONNX Runtime 1.28.0 from source
+        if: steps.ort.outputs.cache-hit != 'true'
+        env:
+          ORT_SRC: ${{ runner.temp }}/onnxruntime-src
+        run: |
           set -eu
-          name="packset-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/packset \
-             target/${{ matrix.target }}/release/packsetd \
-             target/${{ matrix.target }}/release/packset-mcp \
-             target/${{ matrix.target }}/release/packset-embed \
-             "dist/$name/"
-          cp README.md CHANGELOG.md LICENSE* "dist/$name/" 2>/dev/null || true
+          bash .release/crates/packset-embed/build-onnxruntime.sh "${{ runner.temp }}/onnxruntime"
+          case "$RUNNER_OS" in
+            macOS) build="$ORT_SRC/build/MacOS/Release" ;;
+            *) build="$ORT_SRC/build/Linux/Release" ;;
+          esac
+          dest="${{ runner.temp }}/onnxruntime-static"
+          (cd "$build" && find . -name '*.a' -type f) | while IFS= read -r a; do
+            mkdir -p "$dest/$(dirname "$a")"
+            cp "$build/$a" "$dest/$a"
+          done
+          test -f "$dest/libonnxruntime_common.a"
+      - name: Build the writer
+        run: cargo build --locked --release --target ${{ matrix.target }} -p packset
+      # ort-sys links the archives it knows by name. ONNX Runtime 1.28 adds
+      # model_package, which it does not name; a link argument comes last on
+      # the command line, after the archives that call into it. pkg-config
+      # stays out, so a shared runtime on the runner cannot win.
+      - name: Build the encoder
+        env:
+          ORT_LIB_PATH: ${{ runner.temp }}/onnxruntime-static
+          ORT_SKIP_DOWNLOAD: "1"
+          LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+        run: |
+          set -eu
+          extra="$ORT_LIB_PATH/model_package/libmodel_package.a"
+          if [ -f "$extra" ]; then
+            export RUSTFLAGS="-C link-arg=$extra"
+          fi
+          cargo build --locked --release --target ${{ matrix.target }} -p packset-embed
+      - name: Package
+        run: |
+          set -eu
+          name="packset-${TAG}-${{ matrix.target }}"
+          out="dist/$name"
+          bin="target/${{ matrix.target }}/release"
+          mkdir -p "$out"
+          cp "$bin/packset" "$bin/packsetd" "$bin/packset-mcp" "$bin/packset-embed" "$out/"
+          # The encoder must not name a shared ONNX Runtime.
+          if [ "$RUNNER_OS" = macOS ]; then
+            otool -L "$out/packset-embed"
+            ! otool -L "$out/packset-embed" | grep -q onnxruntime
+          else
+            ldd "$out/packset-embed"
+            ! readelf -d "$out/packset-embed" | grep -q onnxruntime
+          fi
+          "$out/packset-embed" --help >/dev/null
+          "$out/packset" --version
+          cp README.md CHANGELOG.md LICENSE* "$out/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
@@ -44,15 +125,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Release notes from the changelog
         run: |
-          awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md
+          awk -v v="${TAG#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md
           test -s notes.md || echo "See CHANGELOG.md." > notes.md
-      - uses: softprops/action-gh-release@v2
-        with:
-          body_path: notes.md
-          files: dist/*
+      - name: Release the existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md dist/*
