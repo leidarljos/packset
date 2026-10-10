@@ -158,10 +158,79 @@ pub fn token() -> Option<String> {
 
 /// `request` with this seat's token as a bearer header. A caller that speaks
 /// to the writer outside [`PacksetClient`] wraps its request in this.
+///
+/// The token stays home when another user's process holds the writer's
+/// loopback port: anyone can answer `/health` with `packsetd ok`, and a
+/// listener that got there first would otherwise collect the token.
 pub fn authorize(request: ureq::Request) -> ureq::Request {
+    if foreign_listener(request.url()) {
+        return request;
+    }
     match token() {
         Some(t) => request.set("Authorization", &format!("Bearer {t}")),
         None => request,
+    }
+}
+
+/// The port of a loopback `url`, `None` for any other host.
+fn loopback_port(url: &str) -> Option<u16> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.contains(']') => (host, port.parse().ok()?),
+        _ => (authority, 80),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]").then_some(port)
+}
+
+/// The owners of the sockets listening on `port`, from one `/proc/net/tcp`
+/// or `tcp6` table: local address is the second column, state the fourth,
+/// uid the eighth.
+fn listen_uids(table: &str, port: u16) -> Vec<u32> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let local = fields.get(1)?;
+            if fields.get(3) != Some(&"0A") {
+                return None;
+            }
+            let hex = local.rsplit(':').next()?;
+            if u16::from_str_radix(hex, 16).ok()? != port {
+                return None;
+            }
+            fields.get(7)?.parse().ok()
+        })
+        .collect()
+}
+
+/// Whether every socket listening on the loopback port of `url` belongs to
+/// a user other than this one. Unknown is not foreign: off Linux, or when
+/// the tables cannot be read, the token goes as before.
+fn foreign_listener(url: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Some(port) = loopback_port(url) else {
+            return false;
+        };
+        let Ok(me) = std::fs::metadata("/proc/self").map(|m| m.uid()) else {
+            return false;
+        };
+        let owners: Vec<u32> = ["/proc/net/tcp", "/proc/net/tcp6"]
+            .iter()
+            .filter_map(|t| std::fs::read_to_string(t).ok())
+            .flat_map(|text| listen_uids(&text, port))
+            .collect();
+        !owners.is_empty() && owners.iter().all(|uid| *uid != me)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = url;
+        false
     }
 }
 
@@ -860,6 +929,43 @@ mod tests {
     // interleave one test's set-and-restore with the other's read, and
     // the suite fails one run in five on a polluted read.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn only_a_loopback_url_has_a_port_to_check() {
+        assert_eq!(loopback_port("http://127.0.0.1:8761/health"), Some(8761));
+        assert_eq!(loopback_port("http://localhost:18462"), Some(18462));
+        assert_eq!(loopback_port("http://[::1]:8761/v1/search?q=a"), Some(8761));
+        assert_eq!(loopback_port("http://127.0.0.1/health"), Some(80));
+        assert_eq!(loopback_port("http://example.org:8761/"), None);
+        assert_eq!(loopback_port("http://[::1]/"), Some(80));
+    }
+
+    #[test]
+    fn the_owner_of_a_listening_port_is_read_off_the_table() {
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:223A 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4242 1 0 100 0 0 10 0
+   1: 0100007F:223A 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 4343 1 0 20 4 30 10 -1
+   2: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4444 1 0 100 0 0 10 0
+";
+        assert_eq!(listen_uids(table, 8762), vec![1001], "only the listener");
+        assert_eq!(listen_uids(table, 8080), vec![1000]);
+        assert!(listen_uids(table, 9).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_port_this_user_holds_is_not_foreign() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        assert!(!foreign_listener(&format!(
+            "http://127.0.0.1:{port}/health"
+        )));
+        drop(held);
+        assert!(
+            !foreign_listener(&format!("http://127.0.0.1:{port}/health")),
+            "nobody listening is not foreign"
+        );
+    }
 
     #[test]
     fn resolved_workspace_reads_ljos_env_not_default() {
