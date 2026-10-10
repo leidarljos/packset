@@ -2,6 +2,16 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.
+- Searches and writes that a worker has read but cannot yet run wait in a queue of at most `PACKSET_QUEUE`. One past that gets 503 without running.
+- A write made while a search holds the live set copies pointers, not claims. With sixteen hammer clients writing into one workspace, the upsert stage traced 5.4 ms at p95 against 15.6.
+- Statuses that overlap after a write count the workspace once.
+- `packset-client` asks a busy writer again. The waits are 50, 150 and 450 ms, inside the request's timeout.
+- A missing encoder or index binary is looked for again after five seconds. A found one is kept.
+- The reference lists `PACKSET_TIMEOUT_MS`, `PACKSET_WORKERS` and `PACKSET_QUEUE`.
+
 ## 0.13.0 (2026-10-10)
 
 - An `agent-derived` write and a hook write are one open proposal for that text. The proposal keeps the atom. Accept stores that atom, records the acceptance by raising its origin to `user-declared`, and a second accept returns the same atom. A mined proposal is still a derived lesson.
