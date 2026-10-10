@@ -124,17 +124,23 @@ pub(crate) fn dear_limit(workers: usize) -> usize {
     }
 }
 
-/// Health, status and the workspace list. Everything else can encode, scan
-/// or take the write lock, and waits on [`dear_limit`].
+/// Health, status, the workspace list and the listing without vectors that
+/// a status line reads. Everything else can encode, scan or take the write
+/// lock, and waits on [`dear_limit`]. A listing as of a past time is not
+/// cheap: it scans the database.
 pub(crate) fn is_cheap(method: &Method, target: &str) -> bool {
     if !matches!(method, Method::Get) {
         return false;
     }
-    let path = target.split('?').next().unwrap_or(target);
-    matches!(
-        path,
-        "/health" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health"
-    )
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    match path {
+        "/health" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health" => true,
+        "/v1/atoms" => {
+            query.split('&').any(|pair| pair == "embedding=omit")
+                && !query.split('&').any(|pair| pair.starts_with("as_of="))
+        }
+        _ => false,
+    }
 }
 
 /// Searches and writes in flight, and the ones waiting for a slot.
@@ -917,6 +923,15 @@ mod tests {
         assert!(is_cheap(&Method::Get, "/v1/status?workspace=seat"));
         assert!(is_cheap(&Method::Get, "/v1/workspaces"));
         assert!(is_cheap(&Method::Get, "/__inside_memd/health"));
+        assert!(is_cheap(
+            &Method::Get,
+            "/v1/atoms?workspace=seat&embedding=omit"
+        ));
+        assert!(!is_cheap(&Method::Get, "/v1/atoms?workspace=seat"));
+        assert!(!is_cheap(
+            &Method::Get,
+            "/v1/atoms?workspace=seat&embedding=omit&as_of=2026-10-01T00:00:00Z"
+        ));
         assert!(!is_cheap(
             &Method::Get,
             "/v1/search?workspace=seat&q=fusion"
