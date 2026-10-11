@@ -129,7 +129,7 @@ impl Store {
     /// Fails when the home cannot be created, when another process already
     /// holds the lock, or when LMDB refuses the directory.
     pub fn open(root: &Path) -> anyhow::Result<Self> {
-        fs::create_dir_all(root)?;
+        private_home(root)?;
         let lock = take_lock(&root.join("packsetd.lock"))?;
         let db_path = root.join("memory.lmdb");
         fs::create_dir_all(&db_path)?;
@@ -797,6 +797,38 @@ fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
     }
 }
 
+/// Create the home, or narrow an existing one, so only its owner can enter
+/// it. The atoms, the cards and the search index sit under it in the clear;
+/// the owner token guards the port, and this guards the disk.
+fn private_home(root: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        if !root.is_dir() {
+            fs::DirBuilder::new().mode(0o700).create(root)?;
+        }
+        let mode = fs::metadata(root)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            // A home this user does not own stays as it is, with a warning:
+            // refusing to start would lock the owner out of their own pack.
+            if let Err(err) = fs::set_permissions(root, fs::Permissions::from_mode(0o700)) {
+                eprintln!(
+                    "packsetd: {} is open to other users ({mode:o}) and could not be narrowed: {err}",
+                    root.display()
+                );
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(root)
+    }
+}
+
 /// Take the exclusive lock, or say who has it. One writer per `memory.lmdb`.
 fn take_lock(path: &Path) -> anyhow::Result<File> {
     use std::os::fd::AsRawFd;
@@ -832,6 +864,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         (dir, store)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_home_is_closed_to_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let fresh = dir.path().join("new").join("home");
+        drop(Store::open(&fresh).unwrap());
+        assert_eq!(mode(&fresh), 0o700, "a new home");
+        let old = dir.path().join("old");
+        fs::create_dir(&old).unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+        drop(Store::open(&old).unwrap());
+        assert_eq!(mode(&old), 0o700, "a home made before this was narrowed");
     }
 
     #[test]
