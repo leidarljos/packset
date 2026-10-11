@@ -1295,8 +1295,18 @@ pub fn replaces_shaped(
     if new.get("kind").and_then(Value::as_str) == Some("correction") && shared {
         return true;
     }
-    (meets && shape_jaccard(&new_shape.tokens, &old_shape.tokens) >= 0.6)
-        || same_head(&new_shape.head, &old_shape.head)
+    if meets && shape_jaccard(&new_shape.tokens, &old_shape.tokens) >= 0.6 {
+        return true;
+    }
+    // A seat holds many standing preferences that open alike (`Never force
+    // push to main.`, `Never force push to a release branch.`). A new object
+    // under the same head adds one; it does not retire the other. A changed
+    // preference still closes the old one as a rewrite, a correction, or an
+    // explicit `supersedes`.
+    if new.get("kind").and_then(Value::as_str) == Some("preference") {
+        return false;
+    }
+    same_head(&new_shape.head, &old_shape.head)
 }
 
 /// Close the live window. Search already drops atoms whose `valid_to` is past.
@@ -1702,6 +1712,35 @@ The build failed. Look at the log. It is the writer.";
             !replaces(&tagged_new, &tagged_old),
             "different subjects by entity"
         );
+    }
+
+    #[test]
+    fn preferences_that_open_alike_stay_two() {
+        let pref = |t: &str| atom(json!({"text": t, "kind": "preference"}));
+        let pairs = [
+            (
+                "Never force push to main.",
+                "Never force push to a release branch.",
+            ),
+            (
+                "On Rohit's machines use rtrash, not rm.",
+                "On Rohit's machines use fish as the shell.",
+            ),
+        ];
+        for (old, new) in pairs {
+            assert!(!replaces(&pref(new), &pref(old)), "{new} keeps {old}");
+        }
+        // A changed preference is still a rewrite of the old one.
+        assert!(replaces(
+            &pref("Use zsh as the login shell."),
+            &pref("Use fish as the login shell.")
+        ));
+        // The head rule still holds for a lesson.
+        let lesson = |t: &str| atom(json!({"text": t, "kind": "lesson"}));
+        assert!(replaces(
+            &lesson("Never force push to a release branch."),
+            &lesson("Never force push to main.")
+        ));
     }
 
     #[test]
