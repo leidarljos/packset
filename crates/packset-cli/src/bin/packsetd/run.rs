@@ -17,7 +17,7 @@ pub fn run() -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(http::DEFAULT_PORT);
-    let mut root = packset_core::home::named_home().unwrap_or_else(Home::default_root);
+    let mut root: Option<std::path::PathBuf> = None;
     let mut fuse = None;
     let mut diversify = None;
     let mut decay = None;
@@ -31,7 +31,7 @@ pub fn run() -> anyhow::Result<()> {
         match arg.as_str() {
             "--host" => host = next("--host")?,
             "--port" => port = next("--port")?.parse()?,
-            "--home" => root = next("--home")?.into(),
+            "--home" => root = Some(next("--home")?.into()),
             "--fuse" => fuse = Some(next("--fuse")?),
             "--diversify" => diversify = Some(next("--diversify")?),
             "--decay" => decay = Some(next("--decay")?),
@@ -51,6 +51,11 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
 
+    // Resolved after the flags, so `--home` skips the default and its
+    // notice about an old home this writer will not open.
+    let root = root
+        .or_else(packset_core::home::named_home)
+        .unwrap_or_else(Home::default_root);
     let fuse = fuse.or_else(|| std::env::var("PACKSET_FUSE").ok());
     let diversify = diversify.or_else(|| std::env::var("PACKSET_DIVERSIFY").ok());
     let decay = decay.or_else(|| std::env::var("PACKSET_DECAY").ok());
