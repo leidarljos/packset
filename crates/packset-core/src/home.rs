@@ -163,6 +163,7 @@ mod tests {
             DefaultHome::Legacy(old.clone())
         );
         std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("token"), "t\n").unwrap();
         assert_eq!(pick(new.clone(), Some(old)), DefaultHome::Current(new));
         std::fs::remove_dir_all(&dir).unwrap();
     }
