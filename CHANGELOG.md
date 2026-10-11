@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- packsetd logs once when the encoder stops answering, and status then reports the reranker unavailable too. An encoder that could not load ONNX Runtime left search lexical with nothing in the log, while status said the reranker was available.
 - `packset migrate-home` refuses while any writer holds the old home, whatever port it listens on. It checked only the default port. An empty `~/.local/share/packset` no longer hides a full old home, and `packsetd --home DIR` no longer prints the notice about the old home.
 - A preference no longer retires an earlier preference that opens with the same words. `Never force push to main.` and `Never force push to a release branch.` are two rules, and the second used to close the first. A rewrite, a correction or an explicit `supersedes` still closes it.
 - packsetd creates its home with mode 0700 and narrows one it finds open to other users. The LMDB files were already 0600, but the cards and `proposals.jsonl` were written 0644 inside 0755 directories, so another local user could read them without the owner token.
