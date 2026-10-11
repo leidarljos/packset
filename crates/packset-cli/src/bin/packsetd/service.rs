@@ -1485,6 +1485,7 @@ impl Service {
         let ranked_meaning = crate::embed::encode_query(query)
             .map(|vector| packset_core::search::search_dense(&ask, &vector))
             .filter(|hits| !hits.is_empty());
+        let meaning = ranked_meaning.clone();
 
         // The milli projection is live-now. A dated question over a closed
         // window would otherwise miss the atom the retrieve just found.
@@ -1542,6 +1543,9 @@ impl Service {
             "off"
         };
         ranked.truncate(limit);
+        if let Some(dense) = &meaning {
+            packset_core::search::mark_dense(&mut ranked, dense);
+        }
         // Due is the clock (`/v1/due`, `ljos due`). Mixing it into search
         // put 212 due personas at score 3.1 on every query.
         Ok(json!({"hits": ranked, "engine": engine, "as_of": as_of, "rerank": stage}))
