@@ -360,7 +360,8 @@
    "input": {
     "kind": "voice",
     "text": "One. Two. Three.",
-    "workspace": "w"
+    "workspace": "w",
+    "origin": "agent-derived"
    },
    "error": "atom has 3 sentences; one claim is at most 2"
   },

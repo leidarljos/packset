@@ -5,6 +5,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - A search hit the encoder named carries `dense_rank`, its place on the dense ballot from 1, and `cosine`, its plain cosine with the question. The fuse keeps the first ballot's copy of a hit, so a client could not tell a hit the encoder ranked first from one it barely named. On a 20-memory set, the ljos prompt hook dropped 5 paraphrased prompts whose memory shared no word with them, though the encoder ranked 3 of those memories first. The cosine leaves out the trust and recency the score adds, so a client can set one floor on it. A hit the encoder did not name, or any hit from a seat with no encoder, carries neither field.
+- A person's write is stored as written when it reads hard, and the answer carries the reason the prose check gave as `prose.warning`. "The payments service retries webhooks three times with exponential backoff starting at 2 seconds" was refused at readability grade 14.78, and so was a memory of three short sentences, so the person's own words were lost. A claim an agent proposes (origin `agent-derived`) or a hook writes still meets the gate, and is refused as before.
 
 ## 0.14.0 (2026-10-11)
 
