@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A search hit the encoder named carries `dense_rank`, its place on the dense ballot from 1, and `cosine`, its plain cosine with the question. The fuse keeps the first ballot's copy of a hit, so a client could not tell a hit the encoder ranked first from one it barely named. On a 20-memory set, the ljos prompt hook dropped 5 paraphrased prompts whose memory shared no word with them, though the encoder ranked 3 of those memories first. The cosine leaves out the trust and recency the score adds, so a client can set one floor on it. A hit the encoder did not name, or any hit from a seat with no encoder, carries neither field.
+
 ## 0.14.0 (2026-10-11)
 
 - With no encoder, packsetd searches with the pack's own scorers and leaves the milli projection out unless `PACKSET_MILLI` names the binary. Through packsetd on LoCoMo with no encoder, hit@1 was 0.019 with milli as shipped and 0.342 without it. Search through milli now drops the commonest word first when no claim holds every word, not the last one, which kept a question's opening and lost its subject (hit@1 0.267 with milli named).
