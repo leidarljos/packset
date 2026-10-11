@@ -491,8 +491,22 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     if mail {
         atom.insert("prose".into(), prose_value(&prose::assess(&text)));
     } else {
-        let report = prose::refuse(&text, prose::Role::Atom)?;
-        atom.insert("prose".into(), prose_value(&report));
+        match prose::refuse(&text, prose::Role::Atom) {
+            Ok(report) => {
+                atom.insert("prose".into(), prose_value(&report));
+            }
+            // A person's own words are kept as written: the gate is for
+            // what an agent proposes. The answer carries the reason the
+            // gate gave, so the client can say it once.
+            Err(why) if !crate::atom::needs_accept(origin_of(atom), hook_of(atom)) => {
+                let mut prose = prose_value(&prose::assess(&text));
+                if let Value::Object(fields) = &mut prose {
+                    fields.insert("warning".into(), Value::String(why.0));
+                }
+                atom.insert("prose".into(), prose);
+            }
+            Err(why) => return Err(why.into()),
+        }
     }
     Ok(())
 }
@@ -1482,6 +1496,36 @@ mod tests {
         assert!(MAIL_KINDS.iter().all(|k| UNREVIEWED_KINDS.contains(k)));
     }
 
+    /// A person's own words are stored as written, with the reason the
+    /// prose gate gave; the same words from an agent, or from a hook, are
+    /// refused as before.
+    #[test]
+    fn a_persons_hard_prose_is_kept_with_a_warning() {
+        let hard = [
+            "The payments service retries webhooks three times with exponential backoff starting at 2 seconds",
+            "Payment webhooks are retried three times. The backoff starts at 2 seconds. It doubles each time.",
+        ];
+        for text in hard {
+            let mut person = atom(json!({"kind": "lesson", "text": text, "workspace": "seat"}));
+            assert!(validate(&mut person).is_ok(), "{text}");
+            let warning = person["prose"]["warning"].as_str().unwrap_or("");
+            assert!(!warning.is_empty(), "{text}: {:?}", person["prose"]);
+            let mut declared = atom(json!({"kind": "preference", "text": text,
+                "workspace": "seat", "origin": "user-declared"}));
+            assert!(validate(&mut declared).is_ok(), "{text}");
+            let mut agent = atom(json!({"kind": "lesson", "text": text,
+                "workspace": "seat", "origin": "agent-derived"}));
+            assert_eq!(validate(&mut agent).unwrap_err().0, warning, "{text}");
+            let mut hook = atom(json!({"kind": "lesson", "text": text,
+                "workspace": "seat", "hook": true}));
+            assert!(validate(&mut hook).is_err(), "{text}");
+        }
+        let mut plain =
+            atom(json!({"kind": "lesson", "text": "Use pnpm for installs.", "workspace": "seat"}));
+        assert!(validate(&mut plain).is_ok());
+        assert!(plain["prose"].get("warning").is_none());
+    }
+
     /// The header ljos writes is several sentences. The soft cap still holds.
     #[test]
     fn mail_keeps_a_header_and_stops_at_the_soft_cap() {
@@ -1511,10 +1555,11 @@ The build failed. Look at the log. It is the writer.";
             "kind": "lesson",
             "text": header,
             "workspace": "seat",
+            "origin": "agent-derived",
         })));
         assert!(
             lesson.unwrap_err().0.contains("sentences"),
-            "a claim is still at most two sentences"
+            "a claim an agent proposes is still at most two sentences"
         );
         let long = "x".repeat(TEXT_SOFT_CAP + 1);
         let over = check("message", &long);

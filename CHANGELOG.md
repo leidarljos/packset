@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A person's write is stored as written when it reads hard, and the answer carries the reason the prose check gave as `prose.warning`. "The payments service retries webhooks three times with exponential backoff starting at 2 seconds" was refused at readability grade 14.78, and so was a memory of three short sentences, so the person's own words were lost. A claim an agent proposes (origin `agent-derived`) or a hook writes still meets the gate, and is refused as before.
+
 ## 0.14.0 (2026-10-11)
 
 - With no encoder, packsetd searches with the pack's own scorers and leaves the milli projection out unless `PACKSET_MILLI` names the binary. Through packsetd on LoCoMo with no encoder, hit@1 was 0.019 with milli as shipped and 0.342 without it. Search through milli now drops the commonest word first when no claim holds every word, not the last one, which kept a question's opening and lost its subject (hit@1 0.267 with milli named).
