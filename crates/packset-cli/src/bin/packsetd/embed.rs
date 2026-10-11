@@ -629,7 +629,15 @@ fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
         }
         *held = None;
     }
-    LAST_DENSE.store(2, Ordering::Relaxed);
+    // The child's stderr goes nowhere, so a runtime it cannot load would
+    // otherwise leave every search lexical with nothing in the log. Say it
+    // once per outage; the next encode that answers ends the outage.
+    if LAST_DENSE.swap(2, Ordering::Relaxed) != 2 {
+        eprintln!(
+            "packsetd: the encoder {} did not answer; search is lexical until it does (run it by hand to see why)",
+            binary.display()
+        );
+    }
     None
 }
 
@@ -860,6 +868,7 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
 
 #[cfg(test)]
 pub fn reset_for_test() {
+    LAST_DENSE.store(0, Ordering::Relaxed);
     for slot in [dense_slot(), rerank_slot(), late_slot(), sparse_slot()] {
         if let Ok(mut held) = slot.lock() {
             *held = None;

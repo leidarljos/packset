@@ -672,6 +672,14 @@ fn migrate_home(port: u16) -> anyhow::Result<()> {
     if is_ours(port) {
         anyhow::bail!("a writer is listening on {port}; `packset stop` first");
     }
+    // A writer on another port holds the same database open. Its lock says
+    // so whatever port it took.
+    if home_is_held(&old) {
+        anyhow::bail!(
+            "a writer has {} open; stop it first",
+            old.join("packsetd.lock").display()
+        );
+    }
     packset_core::home::migrate(&old, &new).map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "packset: moved {} to {}; the old name links to it",
@@ -679,6 +687,21 @@ fn migrate_home(port: u16) -> anyhow::Result<()> {
         new.display()
     );
     Ok(())
+}
+
+/// Whether a running packsetd holds the lock in `home`. A home with no lock
+/// file has never had a writer, so it is free.
+fn home_is_held(home: &std::path::Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = fs::OpenOptions::new()
+        .append(true)
+        .open(home.join("packsetd.lock"))
+    else {
+        return false;
+    };
+    // SAFETY: flock on a descriptor this function owns; closing it on return
+    // drops the lock again.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
 }
 
 fn print_url(port: u16) {

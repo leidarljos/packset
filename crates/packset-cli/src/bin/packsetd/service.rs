@@ -2146,6 +2146,8 @@ impl Service {
         let milli_dir = self.home.milli_dir();
         let index_ready = crate::milli::index_ready(&milli_dir);
         let pin = workspace.map(|w| self.pin(w)).unwrap_or_default();
+        let answering_binary =
+            crate::embed::binary().is_some() && crate::embed::last_dense() != Some(false);
         Ok(json!({
             "home": self.home.root().display().to_string(),
             // Which build is answering. The version does not move between
@@ -2174,16 +2176,16 @@ impl Service {
                 "binary": crate::embed::binary().map(|path| path.display().to_string()),
                 // A binary that did not answer its last call is not available,
                 // whatever is on disk: the ranking is lexical until it does.
-                "available": embed_enabled()
-                    && crate::embed::binary().is_some()
-                    && crate::embed::last_dense() != Some(false),
+                "available": embed_enabled() && answering_binary,
                 "answering": crate::embed::last_dense(),
             },
             // Off unless the host asked. The locomo cost lives in the README;
             // status only says whether this writer will spend it.
             "rerank": {
                 "enabled": crate::embed::wanted(),
-                "available": crate::embed::binary().is_some(),
+                // The reranker is the same binary: one that cannot load its
+                // runtime for the encoder cannot load it for the reranker.
+                "available": answering_binary,
                 "depth": crate::embed::RERANK_DEPTH,
             },
             // Which voters are running, because the panel is host
@@ -3300,6 +3302,39 @@ mod tests {
         if std::env::var_os("PACKSET_RERANK").is_none() {
             assert_eq!(status["rerank"]["enabled"], json!(false));
         }
+    }
+
+    /// A binary that cannot load its runtime is neither an encoder nor a
+    /// reranker, and status says so for both once it has failed a call.
+    #[test]
+    fn a_dead_encoder_is_no_reranker_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::embed::reset_for_test();
+        let stub = broken_reranker();
+        let old = std::env::var_os("PACKSET_EMBED");
+        // Safety: EMBED is held, so no other test mutates this variable.
+        unsafe { std::env::set_var("PACKSET_EMBED", &stub.path) };
+        let before = svc.status(None, &panel).unwrap();
+        let encoded = crate::embed::encode_query("a question");
+        let after = svc.status(None, &panel).unwrap();
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        drop(_guard);
+        assert!(encoded.is_none());
+        assert_eq!(before["rerank"]["available"], json!(true), "{before}");
+        assert_eq!(after["embedder"]["answering"], json!(false), "{after}");
+        assert_eq!(after["embedder"]["available"], json!(false), "{after}");
+        assert_eq!(after["rerank"]["available"], json!(false), "{after}");
     }
 
     /// The seat search path does not run the measured second stage unless
