@@ -1488,7 +1488,11 @@ impl Service {
 
         // The milli projection is live-now. A dated question over a closed
         // window would otherwise miss the atom the retrieve just found.
-        let projected = if as_of.is_some() {
+        // Without an encoder the projection is the only lexical voice besides
+        // BM25, and on LoCoMo through this writer it ranked worse than the
+        // pack's own scorer (hit@1 0.267 against 0.342) and searched slower.
+        // A seat with no encoder reads the pack unless it named the binary.
+        let projected = if as_of.is_some() || (ranked_meaning.is_none() && !crate::milli::named()) {
             None
         } else {
             crate::milli::search(corpus, query, first_limit, &dir, scope, kind)

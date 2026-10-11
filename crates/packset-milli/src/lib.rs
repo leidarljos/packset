@@ -14,7 +14,7 @@ use milli::heed::EnvOpenOptions;
 use milli::update::{
     ClearDocuments, DeleteDocuments, IndexDocuments, IndexDocumentsConfig, IndexerConfig, Settings,
 };
-use milli::{Index, Search, SearchResult};
+use milli::{Index, Search, SearchResult, TermsMatchingStrategy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -184,6 +184,10 @@ pub fn search(
     let rtxn = index.read_txn().map_err(|err| anyhow!(err.to_string()))?;
     let mut search = Search::new(&rtxn, &index);
     search.query(query);
+    // When no atom holds every word, drop the commonest word first. The
+    // default drops the last word first, which keeps `When did` and loses
+    // `support group`: a question's opening outranks its subject.
+    search.terms_matching_strategy(TermsMatchingStrategy::Frequency);
     search.limit(limit.max(1));
     search.authorize_typos(true);
     let mut clauses: Vec<String> = Vec::new();
@@ -294,4 +298,60 @@ pub fn parse_map_size(raw: Option<&str>) -> Result<usize> {
 
 fn filterable_set() -> HashSet<String> {
     FILTERABLE.iter().map(|s| (*s).to_owned()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A question shares its opening with many claims and its subject with
+    /// one. No claim holds every word, so milli drops words until one does;
+    /// the subject has to survive that, not the opening.
+    #[test]
+    fn a_question_keeps_its_subject_over_its_opening() {
+        let dir =
+            std::env::temp_dir().join(format!("packset-milli-subject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let size = 64 * 1024 * 1024;
+        let mut docs = vec![json!({
+            "id": "subject",
+            "kind": "lesson",
+            "workspace": "w",
+            "text": "Caroline: I went to the LGBTQ support group yesterday."
+        })];
+        for (i, rest) in [
+            "you get the new car",
+            "the plumber call back",
+            "your sister move out",
+            "the lease start",
+            "you see the doctor",
+        ]
+        .iter()
+        .enumerate()
+        {
+            docs.push(json!({
+                "id": format!("opening-{i}"),
+                "kind": "lesson",
+                "workspace": "w",
+                "text": format!("Melanie: When did {rest}?")
+            }));
+        }
+        index_documents(&dir, docs, true, size).unwrap();
+        let found = search(
+            &dir,
+            "When did Caroline go to the LGBTQ support group?",
+            Some("w"),
+            None,
+            3,
+            size,
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            found.hits.first().and_then(|h| h.id.as_deref()),
+            Some("subject"),
+            "{found:?}"
+        );
+    }
 }

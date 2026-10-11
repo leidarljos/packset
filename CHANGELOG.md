@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- With no encoder, packsetd searches with the pack's own scorers and leaves the milli projection out unless `PACKSET_MILLI` names the binary. Through packsetd on LoCoMo with no encoder, hit@1 was 0.019 with milli as shipped and 0.342 without it. Search through milli now drops the commonest word first when no claim holds every word, not the last one, which kept a question's opening and lost its subject (hit@1 0.267 with milli named).
 - A write (`POST /v1/atoms` and `/v1/atoms/update`) answers without the claim's embedding. The 384 floats were most of every reply and no client read them. The store still keeps them.
 - packsetd logs once when the encoder stops answering, and status then reports the reranker unavailable too. An encoder that could not load ONNX Runtime left search lexical with nothing in the log, while status said the reranker was available.
 - `packset migrate-home` refuses while any writer holds the old home, whatever port it listens on. It checked only the default port. An empty `~/.local/share/packset` no longer hides a full old home, and `packsetd --home DIR` no longer prints the notice about the old home.
