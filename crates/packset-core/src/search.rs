@@ -739,11 +739,44 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
     let mut hits: Vec<Value> = best
         .into_sorted()
         .into_iter()
-        .map(|c| atom_hit(atoms[c.ordinal].borrow(), c.score))
+        .map(|c| {
+            let atom: &Record = atoms[c.ordinal].borrow();
+            let mut hit = atom_hit(atom, c.score);
+            // The plain cosine, without the trust and recency added to the
+            // score: one scale a client can set a floor on.
+            if let Some(vector) = embedding_of(atom) {
+                hit["cosine"] = json!((cosine(query, &vector) * 10_000.0).round() / 10_000.0);
+            }
+            hit
+        })
         .collect();
     sort_hits(&mut hits);
     hits.truncate(limit);
     hits
+}
+
+/// Carry the dense ballot's rank (from 1) and cosine onto the fused hits
+/// it named. The fuse keeps the first ballot's copy of a hit, so without
+/// this a client cannot tell a hit the encoder ranked first from one it
+/// barely named. A client that admits a hit sharing no word with the
+/// question reads these two fields.
+pub fn mark_dense(fused: &mut [Value], dense: &[Value]) {
+    let ranks: std::collections::HashMap<String, (usize, Option<f64>)> = dense
+        .iter()
+        .enumerate()
+        .map(|(i, hit)| (hit_key_of(hit), (i + 1, hit["cosine"].as_f64())))
+        .collect();
+    for hit in fused.iter_mut() {
+        let Some((rank, cos)) = ranks.get(&hit_key_of(hit)).copied() else {
+            continue;
+        };
+        if let Some(object) = hit.as_object_mut() {
+            object.insert("dense_rank".into(), json!(rank));
+            if let Some(cos) = cos {
+                object.insert("cosine".into(), json!(cos));
+            }
+        }
+    }
 }
 
 /// Live atoms whose review is due; these lead the answer regardless of query.
@@ -846,6 +879,26 @@ pub fn front_due(due: Vec<Value>, ranked: Vec<Value>, limit: usize) -> Vec<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mark_dense_carries_the_encoders_rank_and_cosine() {
+        let mut fused = vec![
+            json!({"field": "atom", "id": "a", "score": 3.0}),
+            json!({"field": "atom", "id": "b", "score": 2.0}),
+            json!({"field": "atom", "id": "c", "score": 1.0}),
+        ];
+        let dense = vec![
+            json!({"field": "atom", "id": "c", "score": 0.9, "cosine": 0.71}),
+            json!({"field": "atom", "id": "a", "score": 0.5, "cosine": 0.32}),
+        ];
+        mark_dense(&mut fused, &dense);
+        assert_eq!(fused[0]["dense_rank"], json!(2));
+        assert_eq!(fused[0]["cosine"], json!(0.32));
+        assert!(fused[1].get("dense_rank").is_none());
+        assert!(fused[1].get("cosine").is_none());
+        assert_eq!(fused[2]["dense_rank"], json!(1));
+        assert_eq!(fused[2]["cosine"], json!(0.71));
+    }
 
     #[test]
     fn a_hit_carries_its_claims_source_when_it_has_one() {

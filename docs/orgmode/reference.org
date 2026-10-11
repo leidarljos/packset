@@ -50,7 +50,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | =POST /v1/atoms/update= | merge fields into one live claim |
 | =POST /v1/atoms/delete= | tombstone; =why= names the deed that withdrew it |
 | =POST /v1/grade= | =recalled= true or false; moves =due_at= |
-| =GET /v1/search?workspace=&q=&limit=&as_of=&rerank== | ranked hits, the engine, the stage |
+| =GET /v1/search?workspace=&q=&limit=&as_of=&rerank== | ranked hits, the engine, the stage; a hit the encoder named carries =dense_rank= and =cosine= |
 | =GET /v1/islands?workspace== | the link graph's communities, largest first |
 | =GET /v1/hubs?workspace=&limit== | the claims the link graph turns on, highest first, with their scores |
 | =GET /v1/activate?workspace=&q=&limit=&fire=&as== | the cluster a cue activates: top hits as seeds, two hops along the links, as =island=; =seeds=, =agreed_seeds= (two scorers agreed), =weak= (no seed both scorers agreed on), =fired= and =held= (the same cue fired within the hour, so nothing moved), =as=; =fire=1= wires the top eight; =as=NAME= reads and writes that persona's weights (=link_weights_by=), the shared ones untouched |
