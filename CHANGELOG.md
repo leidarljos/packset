@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.14.0 (2026-10-11)
 
 - With no encoder, packsetd searches with the pack's own scorers and leaves the milli projection out unless `PACKSET_MILLI` names the binary. Through packsetd on LoCoMo with no encoder, hit@1 was 0.019 with milli as shipped and 0.342 without it. Search through milli now drops the commonest word first when no claim holds every word, not the last one, which kept a question's opening and lost its subject (hit@1 0.267 with milli named).
 - A write (`POST /v1/atoms` and `/v1/atoms/update`) answers without the claim's embedding. The 384 floats were most of every reply and no client read them. The store still keeps them.
@@ -18,8 +18,6 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A source build of `packset-embed` with no ONNX Runtime in reach stops within the first minute and prints the recipe: build the runtime with `build-onnxruntime.sh`, then point `ORT_LIB_PATH` at it. Before, `cargo install packset-embed` compiled for minutes and failed at the linker with an error that never named the runtime. The check looks where `ort` does: either feature, `ORT_LIB_PATH` or `ORT_LIB_LOCATION`, or a `libonnxruntime` of 1.24 or newer that pkg-config sees. `PACKSET_EMBED_NO_ORT_CHECK=1` skips it.
 - packsetd answers its owner only. At start it keeps a random token in `{home}/token`, mode 0600, and answers 401 to any request but `GET /health` that does not send it as `Authorization: Bearer TOKEN`. Before, any local user could read the pack and write a preference the prompt hook would inject. `packset-client` reads the token from the same home (`PACKSET_TOKEN_FILE`, `PACKSET_HOME`, or the default home) or from `PACKSET_TOKEN`, and a 401 names the likely cause. `PACKSET_AUTH=off` drops the check for a client that cannot send the token. ljos up to 0.28 sends none, so it needs a release with this client.
 - The default pack home is now `$XDG_DATA_HOME/packset` (`~/.local/share/packset`). A seat that has `~/.grokinside/memory` and not the new path keeps using the old one, and packsetd says so at start. `packset migrate-home` moves the old home to the new path with the writer stopped and leaves a link at the old name, so a client that still looks there finds the token. A home named by `PACKSET_HOME` is never moved.
-
-## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.
 - Searches and writes that a worker has read but cannot yet run wait in a queue of at most `PACKSET_QUEUE`. One past that gets 503 without running.
