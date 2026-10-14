@@ -2,6 +2,12 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The readability grade reads a name as one unit.
+An acronym, a hyphenated or mixed-case token, and a piece of a path, variable, version or code span count at most six letters.
+"gvfsd reads XDG_DATA_HOME when it starts, so set the scratch folder before starting it." and lessons like it pass, and long plain words still count in full.
+
 ## 0.14.0 (2026-10-10)
 
 - The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.

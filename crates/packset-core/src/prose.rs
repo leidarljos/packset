@@ -178,6 +178,39 @@ fn syllables(word: &str) -> usize {
     count.max(1)
 }
 
+/// Longest a name counts toward the grade, in letters.
+const NAME_LETTERS: usize = 6;
+
+/// Letters a word adds to the grade. A name is read as one unit, not
+/// spelled out, so it counts at most [`NAME_LETTERS`]: an acronym
+/// (`XDG`), a hyphenated or mixed-case token (`packset-embed`, `macOS`),
+/// or a piece of a path, variable, version or code span (`XDG_DATA_HOME`,
+/// `~/.cache`, `v0.29`, a word in backticks). Ordinary long words still
+/// count in full, so plain prose is graded as before.
+fn scored_len(text: &str, word: &str) -> usize {
+    let len = word.len();
+    if len <= NAME_LETTERS {
+        return len;
+    }
+    let start = word.as_ptr() as usize - text.as_ptr() as usize;
+    let end = start + len;
+    let bytes = text.as_bytes();
+    let touches =
+        |b: u8| matches!(b, b'_' | b'/' | b'.' | b'`' | b'$' | b'=' | b':') || b.is_ascii_digit();
+    let before = start.checked_sub(1).map(|i| bytes[i]);
+    let after = bytes.get(end).copied();
+    let glued = before.is_some_and(touches)
+        || (after.is_some_and(touches)
+            && bytes.get(end + 1).is_some_and(|b| !b.is_ascii_whitespace()));
+    let upper = word.chars().filter(char::is_ascii_uppercase).count();
+    let mixed = upper > 1 || (upper == 1 && !word.starts_with(|c: char| c.is_ascii_uppercase()));
+    if glued || mixed || word.contains('-') {
+        NAME_LETTERS
+    } else {
+        len
+    }
+}
+
 fn is_adverb(word: &str) -> bool {
     let lower = word.to_ascii_lowercase();
     if FALSE_LY.contains(&lower.as_str()) {
@@ -209,7 +242,7 @@ pub fn assess(text: &str) -> Report {
     }
     let n_words = words.len();
     let n_sent = pieces.len().max(1);
-    let n_chars: usize = words.iter().map(|w| w.len()).sum();
+    let n_chars: usize = words.iter().map(|w| scored_len(text, w)).sum();
     let n_syl: usize = words.iter().map(|w| syllables(w)).sum();
 
     let adverbs = words.iter().filter(|w| is_adverb(w)).count();
@@ -467,6 +500,36 @@ mod tests {
         assert_eq!(report.words, 0);
         assert_eq!(report.sentences, 0);
         assert_eq!(report.adverb_ratio, 0.0);
+    }
+
+    /// A plain technical sentence passes: names are read as units.
+    #[test]
+    fn a_plain_technical_sentence_passes() {
+        for lesson in [
+            "gvfsd reads XDG_DATA_HOME when it starts, so set the scratch folder before starting it.",
+            "packset-embed links onnxruntime from ORT_LIB_LOCATION, so export it before cargo build.",
+            "systemd-tmpfiles cleans /var/tmp/packset-scratch nightly; keep long-running indexes under ~/.local/state/packset.",
+            "ljos-policyd refuses `rm -rf ~/.cache/huggingface` because the cache sits under the home directory.",
+        ] {
+            assert!(refuse(lesson, Role::Atom).is_ok(), "{lesson}: {:?}", refuse(lesson, Role::Atom));
+        }
+    }
+
+    /// Long ordinary words still count in full.
+    #[test]
+    fn long_plain_words_still_count() {
+        assert_eq!(
+            scored_len("internationalization", "internationalization"),
+            20
+        );
+        let t = "use XDG_DATA_HOME and packset-embed";
+        let w = words_of(t);
+        assert!(w.iter().all(|x| scored_len(t, x) <= NAME_LETTERS));
+        let hard = "Notwithstanding institutional considerations, comprehensive \
+                    interdepartmental standardization necessitates extraordinarily \
+                    meticulous documentation procedures throughout organizational \
+                    administrative infrastructure modernization.";
+        assert!(refuse(hard, Role::Atom).is_err());
     }
 
     #[test]
