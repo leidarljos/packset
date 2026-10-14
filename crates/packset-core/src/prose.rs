@@ -107,6 +107,66 @@ fn words_of(text: &str) -> Vec<&str> {
     out
 }
 
+/// Stands in for a full stop that does not end a sentence while splitting.
+const INNER_DOT: char = '\u{2024}';
+
+/// Abbreviations whose stops never end a sentence.
+const DOTTED_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "a.k.a."];
+
+/// `text` with every full stop that cannot end a sentence masked: one in a
+/// code span (`` `foo.rs. bar` ``), one followed at once by a letter, digit
+/// or `_` (`foo.rs`, `v0.29.1`, `.DS_Store`), and the stops of
+/// [`DOTTED_ABBREVIATIONS`].
+fn mask_inner_dots(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let mut in_code = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '`' {
+            in_code = !in_code;
+        }
+        let next = chars.get(i + 1).copied();
+        let inner = c == '.' && (in_code || next.is_some_and(|n| n.is_alphanumeric() || n == '_'));
+        out.push(if inner { INNER_DOT } else { c });
+    }
+    let mut masked: String = out.into_iter().collect();
+    for abbr in DOTTED_ABBREVIATIONS {
+        let lower = masked.to_lowercase();
+        let probe = abbr.replace('.', &INNER_DOT.to_string());
+        let mut from = 0;
+        let mut spans = Vec::new();
+        // Match after the inner stops were masked, on either spelling.
+        for needle in [abbr.to_string(), {
+            let mut p = probe.clone();
+            p.pop();
+            p.push('.');
+            p
+        }] {
+            while let Some(pos) = lower[from..].find(&needle) {
+                let at = from + pos;
+                let starts_word = at == 0
+                    || !lower[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_alphanumeric);
+                if starts_word {
+                    spans.push((at, at + needle.len()));
+                }
+                from = at + needle.len();
+            }
+            from = 0;
+        }
+        for (a, b) in spans.into_iter().rev() {
+            let piece: String = masked[a..b]
+                .chars()
+                .map(|c| if c == '.' { INNER_DOT } else { c })
+                .collect();
+            masked.replace_range(a..b, &piece);
+        }
+    }
+    masked
+}
+
 /// The text's sentences, by snapper's splitter with lowercase starts on, so
 /// `Restart it. packsetd reloads.` is two claims. A full stop inside a token
 /// (`0.9.3`, `127.0.0.1`, `Cargo.lock`), after an abbreviation or an
@@ -121,7 +181,7 @@ pub fn sentences(text: &str) -> Vec<String> {
     // sentence open between two of them, so `see a/b. Then c/d.` would come
     // back as one sentence. Look-alike characters stand in for them while
     // splitting.
-    let masked: String = text
+    let masked: String = mask_inner_dots(text)
         .chars()
         .map(|c| match c {
             '/' => '\u{2215}',
@@ -146,6 +206,7 @@ pub fn sentences(text: &str) -> Vec<String> {
                     '\u{2017}' => '_',
                     '\u{2217}' => '*',
                     '\u{FF0B}' => '+',
+                    INNER_DOT => '.',
                     other => other,
                 })
                 .collect::<String>()
@@ -492,6 +553,27 @@ mod tests {
         // In a card the length alone does not refuse; the grade decides.
         let report = assess(&very);
         assert_eq!(report.very_hard_sentences, 1);
+    }
+
+    #[test]
+    fn a_stop_inside_a_name_or_code_span_is_not_a_sentence_end() {
+        for text in [
+            "Delete `.DS_Store` before you commit. The hook refuses it otherwise.",
+            "Edit foo.rs and bar.rs, e.g. the parser, then rerun. v0.29.1 ships the fix.",
+            "Run `cargo test -p a. b. c.` first. Then push.",
+            "Read src/lib.rs i.e. the root module. Then edit it.",
+        ] {
+            assert_eq!(sentences(text).len(), 2, "{text}: {:?}", sentences(text));
+            assert!(
+                refuse(text, Role::Atom)
+                    .map_or_else(|e| !e.to_string().contains("sentences"), |_| true),
+                "{text}"
+            );
+        }
+        let back = sentences("Delete `.DS_Store` now. Then e.g. this.");
+        assert_eq!(back[0], "Delete `.DS_Store` now.", "{back:?}");
+        assert!(back[1].contains("e.g."), "{back:?}");
+        assert_eq!(sentences("One. Two. Three.").len(), 3);
     }
 
     #[test]

@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An `agent-derived` write and a hook write are live at once, keep their origin, and are reviewed and pruned afterwards. Before, the writer answered `held as proposal ID` and kept them out of search until an accept. `PACKSET_HOLD_AGENT_WRITES=1` holds them as proposals again. An accept still raises origin to `user-declared`, and an update cannot.
+- The sentence count reads a full stop inside a name or a code span as part of it. `.DS_Store`, `foo.rs`, `v0.29.1`, `e.g.`, `i.e.` and a stop between backticks no longer end a sentence, so "Delete `.DS_Store` before you commit. The hook refuses it otherwise." is two sentences, not four, and the pack keeps it.
 - The readability grade reads a name as one unit.
 An acronym, a hyphenated or mixed-case token, and a piece of a path, variable, version or code span count at most six letters.
 "gvfsd reads XDG_DATA_HOME when it starts, so set the scratch folder before starting it." and lessons like it pass, and long plain words still count in full.

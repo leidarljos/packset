@@ -69,6 +69,10 @@ pub struct Service {
     /// that crossed it, so a herd of seats writing into one pack cannot
     /// grow it without bound.
     live_cap: usize,
+    /// Whether agent and hook writes wait as proposals for an accept. Off
+    /// unless `PACKSET_HOLD_AGENT_WRITES` is set: an agent's memory is
+    /// live when written and reviewed afterwards.
+    hold_agent_writes: bool,
     /// The day each workspace was last swept for neglect, so a write sweeps
     /// at most once a day.
     swept: Mutex<HashMap<String, String>>,
@@ -314,6 +318,7 @@ impl Service {
             attach: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(()),
             live_cap: live_cap_from_env(),
+            hold_agent_writes: packset_core::atom::hold_agent_writes(),
             shapes: RwLock::new(HashMap::new()),
             postings: RwLock::new(HashMap::new()),
             shaped: Mutex::new(BTreeSet::new()),
@@ -571,6 +576,13 @@ impl Service {
             .collect()
     }
 
+    /// The same service, holding agent and hook writes as proposals or not.
+    #[must_use]
+    pub fn with_hold_agent_writes(mut self, hold: bool) -> Self {
+        self.hold_agent_writes = hold;
+        self
+    }
+
     /// The same service with another live cap; zero is none.
     #[must_use]
     pub fn with_live_cap(mut self, cap: usize) -> Self {
@@ -736,7 +748,11 @@ impl Service {
         mut atom: Record,
         mut trace: WriteTrace,
     ) -> anyhow::Result<Record> {
-        if packset_core::atom::needs_accept(record::origin_of(&atom), record::hook_of(&atom)) {
+        if packset_core::atom::needs_accept(
+            record::origin_of(&atom),
+            record::hook_of(&atom),
+            self.hold_agent_writes,
+        ) {
             let why = if record::hook_of(&atom) {
                 "hook"
             } else {
@@ -2255,6 +2271,29 @@ mod tests {
         (dir, svc)
     }
 
+    fn holding_service() -> (tempfile::TempDir, Service) {
+        let (dir, svc) = service();
+        (dir, svc.with_hold_agent_writes(true))
+    }
+
+    #[test]
+    fn an_agent_derived_lesson_is_live_at_once_with_its_origin_and_source() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        lesson.insert(
+            "source".into(),
+            json!({"via": "ljos", "harness": "codex", "seat": "codex", "session": "codex@abc", "at": "2026-10-14T10:00:00Z", "reason": "the user said so"}),
+        );
+        let stored = svc.add(lesson).unwrap();
+        assert_eq!(stored["origin"], json!("agent-derived"));
+        assert_eq!(stored["source"]["reason"], json!("the user said so"));
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+        assert!(crate::proposals::list_open(&svc.home, "w").is_empty());
+    }
+
     fn held_id(err: &anyhow::Error) -> String {
         let text = err.to_string();
         text.split_whitespace()
@@ -2620,7 +2659,7 @@ mod tests {
 
     #[test]
     fn an_agent_derived_lesson_cannot_reach_user_declared_without_accept() {
-        let (_dir, svc) = service();
+        let (_dir, svc) = holding_service();
         let mut lesson = atom("The fuse is CombMNZ.");
         lesson.insert("kind".into(), json!("lesson"));
         lesson.insert("origin".into(), json!("agent-derived"));
@@ -2657,7 +2696,7 @@ mod tests {
 
     #[test]
     fn accepting_a_held_lesson_keeps_its_body_and_a_retry_is_that_atom() {
-        let (_dir, svc) = service();
+        let (_dir, svc) = holding_service();
         let mut lesson = atom("The fuse is CombMNZ for this seat.");
         lesson.insert("kind".into(), json!("lesson"));
         lesson.insert("level".into(), json!("explicit"));
@@ -2704,7 +2743,7 @@ mod tests {
 
     #[test]
     fn a_hook_write_becomes_live_only_through_accept() {
-        let (_dir, svc) = service();
+        let (_dir, svc) = holding_service();
         let mut caught = atom("A correction the hook caught in the cue.");
         caught.insert("kind".into(), json!("preference"));
         caught.insert("hook".into(), json!(true));
@@ -2721,7 +2760,7 @@ mod tests {
 
     #[test]
     fn a_hook_write_is_held_and_an_echo_promotes_at_its_origin() {
-        let (_dir, svc) = service();
+        let (_dir, svc) = holding_service();
         let mut caught = atom("A correction the hook caught in the cue.");
         caught.insert("hook".into(), json!(true));
         let err = svc.add(caught).unwrap_err();
