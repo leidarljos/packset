@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.15.1 (2026-10-17)
 
 - A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims. A `lock.mdb` reader from another process, `mdb_stat` included, keeps the file at its present length until that process leaves.
 - An `agent-derived` write and a hook write are live at once, keep their origin, and are reviewed and pruned afterwards. Before, the writer answered `held as proposal ID` and kept them out of search until an accept. `PACKSET_HOLD_AGENT_WRITES=1` holds them as proposals again. An accept still raises origin to `user-declared`, and an update cannot.
