@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims.
 - An `agent-derived` write and a hook write are live at once, keep their origin, and are reviewed and pruned afterwards. Before, the writer answered `held as proposal ID` and kept them out of search until an accept. `PACKSET_HOLD_AGENT_WRITES=1` holds them as proposals again. An accept still raises origin to `user-declared`, and an update cannot.
 - The sentence count reads a full stop inside a name or a code span as part of it. `.DS_Store`, `foo.rs`, `v0.29.1`, `e.g.`, `i.e.` and a stop between backticks no longer end a sentence, so "Delete `.DS_Store` before you commit. The hook refuses it otherwise." is two sentences, not four, and the pack keeps it.
 - The readability grade reads a name as one unit.
