@@ -166,11 +166,23 @@ pub fn promotion_horizon(origin: &str, content: Option<&str>) -> &'static str {
     "standing"
 }
 
-/// Whether this write is a proposal. An agent-derived lesson and a write
-/// the correction hook detected do not become live atoms.
+/// Whether this write is held as a proposal instead of stored.
+///
+/// An agent writes its own memories: an `agent-derived` lesson and a hook
+/// write are live at once, keep their origin, and are reviewed and pruned
+/// afterwards. `hold` is the writer's opt-in (`PACKSET_HOLD_AGENT_WRITES=1`)
+/// to file them as proposals that wait for an accept instead.
 #[must_use]
-pub fn needs_accept(origin: &str, hook: bool) -> bool {
-    hook || origin == "agent-derived"
+pub fn needs_accept(origin: &str, hook: bool, hold: bool) -> bool {
+    hold && (hook || origin == "agent-derived")
+}
+
+/// Whether this writer holds agent and hook writes as proposals: only when
+/// `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`.
+#[must_use]
+pub fn hold_agent_writes() -> bool {
+    std::env::var("PACKSET_HOLD_AGENT_WRITES")
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
 /// Whether `to` would relabel an agent-derived lesson as the user's
@@ -340,13 +352,15 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_derived_write_needs_an_accept_to_become_user_declared() {
-        assert!(needs_accept("agent-derived", false));
-        assert!(needs_accept("user-declared", true));
-        assert!(!needs_accept("user-declared", false));
-        assert!(!needs_accept("peer", false));
-        assert!(!needs_accept("tool-echo", false));
-        assert!(!needs_accept("external", false));
+    fn an_agent_derived_write_is_live_unless_the_writer_holds() {
+        assert!(!needs_accept("agent-derived", false, false));
+        assert!(!needs_accept("user-declared", true, false));
+        assert!(needs_accept("agent-derived", false, true));
+        assert!(needs_accept("user-declared", true, true));
+        assert!(!needs_accept("user-declared", false, true));
+        assert!(!needs_accept("peer", false, true));
+        assert!(!needs_accept("tool-echo", false, true));
+        assert!(!needs_accept("external", false, true));
         assert!(launders("agent-derived", USER_DECLARED));
         assert!(!launders("tool-echo", USER_DECLARED));
         assert!(!launders("peer", USER_DECLARED));
