@@ -9,13 +9,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use heed::types::Bytes;
-use heed::{Database, Env, EnvFlags, EnvOpenOptions};
+use heed::{Database, Env, EnvOpenOptions};
 use packset_core::bm25::Index;
 use packset_core::record::{self, AtomError};
 use serde_json::{Map, Value};
 
-/// The map size the environment opens with. Growing it is compatible;
+/// The map the environment can grow into. Growing it is compatible;
 /// shrinking it below what is stored is not.
+///
+/// The data file holds the pages in use and extends as writes need new
+/// pages, up to this map. It is not extended to the map at open: doing
+/// that reserved a gibibyte per seat, and a file extended that far came
+/// back fully allocated. `ls -ls` reported 1048580 blocks for a store
+/// holding one or two claims.
 pub const MAP_SIZE: usize = 1024 * 1024 * 1024;
 
 /// One atom record.
@@ -134,17 +140,22 @@ impl Store {
         let db_path = root.join("memory.lmdb");
         fs::create_dir_all(&db_path)?;
         // SAFETY: LMDB maps the file; the contract is that no other process
-        // writes it, which the lock above is what enforces.
+        // writes it, which the lock above is what enforces. The map is
+        // [`MAP_SIZE`]; the file grows with the pages written.
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(MAP_SIZE)
                 .max_dbs(1)
-                .flags(EnvFlags::WRITE_MAP)
                 .open(&db_path)?
         };
         let mut wtxn = env.write_txn()?;
         let db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, None)?;
         wtxn.commit()?;
+        // A store created while the file was extended to the map still has
+        // that tail. The pages at and below the last used page are the
+        // database; the rest can go back to the filesystem. A later write
+        // extends the file from the last page.
+        trim_to_used_pages(&env, db, &db_path)?;
         Ok(Self {
             env,
             db,
@@ -797,6 +808,33 @@ fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
     }
 }
 
+/// Cut `data.mdb` back to the last page in use.
+///
+/// Pages at and below the last used page hold the database, free pages
+/// included. Bytes past that page are the unused tail of a map-sized file.
+/// Dropping them returns the disk space; the next write extends the file
+/// again, up to [`MAP_SIZE`].
+fn trim_to_used_pages(env: &Env, db: Database<Bytes, Bytes>, dir: &Path) -> anyhow::Result<()> {
+    let info = env.info();
+    let page = {
+        let rtxn = env.read_txn()?;
+        db.stat(&rtxn)?.page_size as u64
+    };
+    if page == 0 {
+        return Ok(());
+    }
+    let used = (info.last_page_number as u64)
+        .saturating_add(1)
+        .saturating_mul(page);
+    let path = dir.join("data.mdb");
+    let file = fs::OpenOptions::new().write(true).open(&path)?;
+    let len = file.metadata()?.len();
+    if len > used {
+        file.set_len(used)?;
+    }
+    Ok(())
+}
+
 /// Create the home, or narrow an existing one, so only its owner can enter
 /// it. The atoms, the cards and the search index sit under it in the clear;
 /// the owner token guards the port, and this guards the disk.
@@ -880,6 +918,92 @@ mod tests {
         fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
         drop(Store::open(&old).unwrap());
         assert_eq!(mode(&old), 0o700, "a home made before this was narrowed");
+    }
+
+    #[cfg(unix)]
+    fn allocated_bytes(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).unwrap().blocks() * 512
+    }
+
+    /// A fresh store with a few atoms stays a handful of pages. The map is
+    /// still [`MAP_SIZE`], so this is the allocated size, `st_blocks * 512`.
+    #[cfg(unix)]
+    #[test]
+    fn a_few_atoms_allocate_far_less_than_the_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for (id, text) in [
+            ("one", "A claim."),
+            ("two", "Another claim."),
+            ("three", "A third, so the file has room to grow."),
+        ] {
+            store
+                .upsert(&record(json!({"id": id, "workspace": "w", "text": text})))
+                .unwrap();
+        }
+        assert_eq!(
+            store.get("w", "three").unwrap().unwrap()["text"],
+            json!("A third, so the file has room to grow.")
+        );
+        drop(store);
+        let path = dir.path().join("memory.lmdb/data.mdb");
+        let allocated = allocated_bytes(&path);
+        assert!(
+            allocated < 64 * 1024 * 1024,
+            "three claims allocated {allocated} bytes"
+        );
+    }
+
+    /// A store whose file already fills the map still opens, keeps its
+    /// claims, accepts another write, and gives the unused tail back.
+    #[cfg(unix)]
+    #[test]
+    fn a_fully_allocated_map_still_opens() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.lmdb/data.mdb");
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .upsert(&record(
+                    json!({"id": "one", "workspace": "w", "text": "kept"}),
+                ))
+                .unwrap();
+        }
+        {
+            let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            // SAFETY: `file` is a writable descriptor for this test's data
+            // file, and the length is the map the old writer extended to.
+            let rc = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, MAP_SIZE as libc::off_t) };
+            assert_eq!(rc, 0, "could not allocate the old map");
+        }
+        let before = allocated_bytes(&path);
+        assert!(
+            before > 64 * 1024 * 1024,
+            "the fixture did not allocate the map ({before} bytes)"
+        );
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            store.get("w", "one").unwrap().unwrap()["text"],
+            json!("kept")
+        );
+        store
+            .upsert(&record(
+                json!({"id": "two", "workspace": "w", "text": "added"}),
+            ))
+            .unwrap();
+        assert_eq!(
+            store.get("w", "two").unwrap().unwrap()["text"],
+            json!("added"),
+            "the map still grows"
+        );
+        drop(store);
+        let after = allocated_bytes(&path);
+        assert!(
+            after < 64 * 1024 * 1024,
+            "opened store still holds {after} bytes (was {before})"
+        );
     }
 
     #[test]

@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims.
+
 ## 0.15.0 (2026-10-13)
 
 - A search hit the encoder named carries `dense_rank`, its place on the dense ballot from 1, and `cosine`, its plain cosine with the question. The fuse keeps the first ballot's copy of a hit, so a client could not tell a hit the encoder ranked first from one it barely named. On a 20-memory set, the ljos prompt hook dropped 5 paraphrased prompts whose memory shared no word with them, though the encoder ranked 3 of those memories first. The cosine leaves out the trust and recency the score adds, so a client can set one floor on it. A hit the encoder did not name, or any hit from a seat with no encoder, carries neither field.
