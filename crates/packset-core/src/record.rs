@@ -498,7 +498,7 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
             // A person's own words are kept as written: the gate is for
             // what an agent proposes. The answer carries the reason the
             // gate gave, so the client can say it once.
-            Err(why) if !crate::atom::needs_accept(origin_of(atom), hook_of(atom)) => {
+            Err(why) if !crate::atom::needs_accept(origin_of(atom), hook_of(atom), true) => {
                 let mut prose = prose_value(&prose::assess(&text));
                 if let Value::Object(fields) = &mut prose {
                     fields.insert("warning".into(), Value::String(why.0));
