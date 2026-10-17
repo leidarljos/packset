@@ -4,7 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
-- A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims.
+- A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims. A `lock.mdb` reader from another process, `mdb_stat` included, keeps the file at its present length until that process leaves.
 
 ## 0.15.0 (2026-10-13)
 

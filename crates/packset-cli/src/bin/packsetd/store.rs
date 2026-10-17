@@ -814,7 +814,16 @@ fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
 /// included. Bytes past that page are the unused tail of a map-sized file.
 /// Dropping them returns the disk space; the next write extends the file
 /// again, up to [`MAP_SIZE`].
+///
+/// A `lock.mdb` slot owned by another process that is still running keeps
+/// the tail. `mdb_stat` maps the file for the length of its read, and
+/// shrinking it then faults that process. A slot left by a process that
+/// has exited is not a reader: the table keeps it until a later check,
+/// and that process is not mapping the file.
 fn trim_to_used_pages(env: &Env, db: Database<Bytes, Bytes>, dir: &Path) -> anyhow::Result<()> {
+    if another_process_is_reading(dir) {
+        return Ok(());
+    }
     let info = env.info();
     let page = {
         let rtxn = env.read_txn()?;
@@ -833,6 +842,98 @@ fn trim_to_used_pages(env: &Env, db: Database<Bytes, Bytes>, dir: &Path) -> anyh
         file.set_len(used)?;
     }
     Ok(())
+}
+
+/// `true` when `lock.mdb` lists a reader in a process other than this one.
+///
+/// The table is the one LMDB writes for its POSIX-mutex build, which is
+/// how `lmdb-master-sys` is built here: a 64-byte header, a 64-byte writer
+/// lock, then one 64-byte slot per reader. The process id sits 8 bytes
+/// into the slot. A missing lock file means no reader. A lock file this
+/// build cannot read keeps the tail, rather than shrinking under a reader
+/// the table failed to name.
+fn another_process_is_reading(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        match fs::read(dir.join("lock.mdb")) {
+            Ok(bytes) => lock_lists_other_live_reader(&bytes, std::process::id()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// Magic at the start of an LMDB lock file (`MDB_MAGIC`).
+#[cfg(unix)]
+const LOCK_MAGIC: u32 = 0xBEEF_C0DE;
+/// Reader slots begin after the header and the writer lock, one cache line each.
+#[cfg(unix)]
+const LOCK_READERS_AT: usize = 128;
+#[cfg(unix)]
+const LOCK_SLOT: usize = 64;
+/// `mrb_pid` follows the 8-byte transaction id in the slot.
+#[cfg(unix)]
+const LOCK_PID_AT: usize = 8;
+/// `mtb_numreaders`, the high-water mark of slots, not the live count.
+#[cfg(unix)]
+const LOCK_COUNT_AT: usize = 16;
+
+#[cfg(unix)]
+fn lock_lists_other_live_reader(bytes: &[u8], self_pid: u32) -> bool {
+    let Some(magic) = ne_u32(bytes, 0) else {
+        return true;
+    };
+    if magic != LOCK_MAGIC {
+        return true;
+    }
+    let Some(count) = ne_u32(bytes, LOCK_COUNT_AT) else {
+        return true;
+    };
+    let slots = bytes.len().saturating_sub(LOCK_READERS_AT) / LOCK_SLOT;
+    let count = (count as usize).min(slots);
+    for i in 0..count {
+        let at = LOCK_READERS_AT + i * LOCK_SLOT + LOCK_PID_AT;
+        let Some(pid) = ne_i32(bytes, at) else {
+            break;
+        };
+        if pid > 0 && pid as u32 != self_pid && process_alive(pid) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn ne_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    let raw: [u8; 4] = bytes.get(at..end)?.try_into().ok()?;
+    Some(u32::from_ne_bytes(raw))
+}
+
+#[cfg(unix)]
+fn ne_i32(bytes: &[u8], at: usize) -> Option<i32> {
+    ne_u32(bytes, at).map(|n| n as i32)
+}
+
+#[cfg(unix)]
+fn process_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 delivers nothing. It reports whether `pid` names a
+    // process this one is allowed to signal.
+    let rc = unsafe { kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(EPERM)
+}
+
+#[cfg(unix)]
+const EPERM: i32 = 1;
+
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 /// Create the home, or narrow an existing one, so only its owner can enter
@@ -1004,6 +1105,116 @@ mod tests {
             after < 64 * 1024 * 1024,
             "opened store still holds {after} bytes (was {before})"
         );
+    }
+
+    /// A second process in `lock.mdb`, the way `mdb_stat` sits there, keeps
+    /// the allocated tail. Once that process leaves, the next open cuts it.
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_reader_keeps_the_tail() {
+        if let Ok(home) = std::env::var("PACKSET_FOREIGN_READER") {
+            hold_reader(Path::new(&home));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.lmdb/data.mdb");
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .upsert(&record(
+                    json!({"id": "one", "workspace": "w", "text": "kept"}),
+                ))
+                .unwrap();
+        }
+        {
+            use std::os::fd::AsRawFd;
+            let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            // SAFETY: `file` is this test's data file, and the length is the
+            // map an older writer extended to.
+            let rc = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, MAP_SIZE as libc::off_t) };
+            assert_eq!(rc, 0, "could not allocate the old map");
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "store::tests::a_foreign_reader_keeps_the_tail"])
+            .env("PACKSET_FOREIGN_READER", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let ready = dir.path().join("reader-ready");
+        let started = std::time::Instant::now();
+        while !ready.exists() {
+            if started.elapsed() > std::time::Duration::from_secs(15) {
+                let _ = child.kill();
+                panic!("reader did not take a slot: {:?}", child.wait());
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("reader exited before its slot was published: {status}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // A fresh thread: this thread already opened and closed the env, and
+        // LMDB's thread-local reader slot still points at that lock table.
+        // With another process in the table the slot cannot be reused here.
+        // A process that is starting, which is when this trim runs, has none.
+        let home = dir.path().to_path_buf();
+        let data = path.clone();
+        let during = std::thread::spawn(move || {
+            let store = Store::open(&home).unwrap();
+            let text = store.get("w", "one").unwrap().unwrap()["text"].clone();
+            drop(store);
+            (text, allocated_bytes(&data))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(during.0, json!("kept"));
+        assert!(
+            during.1 > 64 * 1024 * 1024,
+            "trimmed under a foreign reader ({} bytes)",
+            during.1
+        );
+        drop(child.stdin.take());
+        let status = child.wait().unwrap();
+        assert!(status.success(), "reader did not leave cleanly: {status}");
+        let home = dir.path().to_path_buf();
+        let data = path.clone();
+        let after = std::thread::spawn(move || {
+            let store = Store::open(&home).unwrap();
+            let text = store.get("w", "one").unwrap().unwrap()["text"].clone();
+            drop(store);
+            assert_eq!(text, json!("kept"));
+            allocated_bytes(&data)
+        })
+        .join()
+        .unwrap();
+        assert!(
+            after < 64 * 1024 * 1024,
+            "tail stayed allocated after the reader left ({after} bytes)"
+        );
+    }
+
+    #[cfg(unix)]
+    fn hold_reader(home: &Path) {
+        use std::io::Read;
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(MAP_SIZE)
+                .max_dbs(1)
+                .open(home.join("memory.lmdb"))
+                .expect("reader env")
+        };
+        let rtxn = env.read_txn().expect("reader txn");
+        let db = env
+            .open_database::<Bytes, Bytes>(&rtxn, None)
+            .expect("reader db")
+            .expect("unnamed db");
+        let _ = db.stat(&rtxn).expect("reader stat");
+        fs::write(home.join("reader-ready"), b"1").unwrap();
+        let mut buf = [0u8; 1];
+        let _ = std::io::stdin().read(&mut buf);
+        drop(rtxn);
+        drop(env);
     }
 
     #[test]
