@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="packset. A pack of written claims with a review clock, not a transcript.">
+  <rect width="1200" height="630" fill="#0B0B0A"/>
+  <g opacity="0.14" transform="translate(820 40) scale(2.4)">
+    <rect width="200" height="200" rx="36" fill="#0B0B0A"/>
+    <circle cx="70" cy="118" r="22" fill="#E6A23C"/>
+    <circle cx="130" cy="118" r="22" fill="#E6A23C"/>
+    <circle cx="100" cy="68" r="22" fill="#F4F0E6"/>
+    <path d="M82 102 L92 86" stroke="#E6A23C" stroke-width="6" stroke-linecap="round"/>
+    <path d="M118 102 L108 86" stroke="#E6A23C" stroke-width="6" stroke-linecap="round"/>
+    <path d="M92 118 H108" stroke="#0B0B0A" stroke-width="6" stroke-linecap="round"/>
+  </g>
+  <text x="72" y="168" font-family="Georgia, 'Iowan Old Style', serif" font-size="28" fill="#E6A23C" letter-spacing="6">LEIÐARLJÓS</text>
+  <text x="72" y="300" font-family="Georgia, 'Iowan Old Style', serif" font-size="72" font-weight="600" fill="#F4F0E6">packset</text>
+  <line x1="72" y1="336" x2="520" y2="336" stroke="#E6A23C" stroke-width="2"/>
+  <text x="72" y="400" font-family="Georgia, 'Iowan Old Style', serif" font-size="32" fill="#E8E2D4">A pack of written claims with a review clock, not a transcript</text>
+</svg>

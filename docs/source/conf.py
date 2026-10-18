@@ -37,7 +37,7 @@ html_baseurl = "https://leidarljos.github.io/packset/"
 html_copy_source = True
 html_show_sourcelink = True
 
-# 1200x630 PNG from docs/scripts/og_image.py. Social cards need a PNG.
+# 1200x630 PNG from docs/scripts/render-og-png.sh. Social cards need a PNG.
 _OG_IMAGE = "https://leidarljos.github.io/packset/_static/og.png"
 _PAGE_DESCRIPTION = {
     "search": "Search the packset documentation.",
