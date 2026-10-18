@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The README and the reference say that `packset-daemon` has been unpublished since 0.10.0 and that crates.io stops at 0.9.21; `cargo binstall packset` installs `packsetd`. The architecture page put the writer's source in `packset-daemon`; it is in `packset-cli`, and `packset-daemon` only builds it as a library for the examples.
+
 ## 0.15.2 (2026-10-18)
 
 - A new atom kind, `note`, keeps a line from an issue's logbook so recall on that issue finds it. A note must name its `issue`. The one-claim rules (at most two sentences, no sentence of 30 words or more) do not apply to it, and a readability grade or adverb ratio past the ceiling is a `prose.warning` on the answer instead of a refusal. `ljos note` wrote a `summary` atom, and the pack refused three-sentence notes and one 38-word note, so those tickets had no memory copy. Every other kind keeps the gate it had.

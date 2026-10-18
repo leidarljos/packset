@@ -19,7 +19,7 @@ Split
 ================== =============================================================================
 Crate              Role
 ================== =============================================================================
-``packsetd``       writer (Rust, source in ``packset-daemon``, shipped by the ``packset`` crate)
+``packsetd``       writer (Rust, source in ``packset-cli``, shipped by the ``packset`` crate)
 ``packset-core``   named fuse/diversify/decay panel
 ``packset-client`` HTTP
 ``packset-embed``  optional dense encoder

@@ -200,7 +200,7 @@ Crates
 Crate              Carries
 ================== ===========================================================================================================================================================================
 ``packset-core``   the atom, the prose limit, BM25+, the scan, the panel, decay, review clock
-``packset-daemon`` ``packsetd``: the Lightning Memory-Mapped Database (LMDB) store, HTTP, projections, the encoder child; a library in the workspace whose binary the ``packset`` crate builds
+``packset-daemon`` ``packsetd``: the Lightning Memory-Mapped Database (LMDB) store, HTTP, projections, the encoder child; a library in the workspace whose binary the ``packset`` crate builds, unpublished since 0.10.0 (crates.io stops at 0.9.21)
 ``packset-client`` the HTTP client every tool uses
 ``packset-cli``    the ``packset`` crate on crates.io: ``packset``, ``packsetd``, ``packset-mcp``
 ``packset-mcp``    the read-only Model Context Protocol (MCP) surface, built by ``packset`` from its source tree

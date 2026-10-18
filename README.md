@@ -26,7 +26,8 @@ $ packset ensure
 ```
 
 That installs `packset`, the writer `packsetd` and the read-only MCP
-surface `packset-mcp`. `packset-embed`, the optional dense encoder, is its
+surface `packset-mcp`. The `packset-daemon` crate on crates.io stops at
+0.9.21, from before `packset` carried `packsetd`; do not install it. `packset-embed`, the optional dense encoder, is its
 own crate and links a source-built or system Open Neural Network Exchange
 (ONNX) Runtime. The prebuilt
 runtime from cdn.pyke.io is the `download-binaries` feature. The pack
@@ -73,7 +74,7 @@ The numbers, their jobs and how to regenerate them are on the [explanation page]
 | Crate | Carries |
 |---|---|
 | `packset-core` | the atom, the prose limit, BM25+, the panel, decay, islands, the review clock |
-| `packset-daemon` | `packsetd`: LMDB store, HTTP, the encoder child; a library in the workspace, its binary ships in `packset` |
+| `packset-daemon` | `packsetd`: LMDB store, HTTP, the encoder child; a library in the workspace, its binary ships in `packset`. Unpublished since 0.10.0, so crates.io stops at 0.9.21 |
 | `packset-client` | the HTTP client every tool uses |
 | `packset-cli` | the `packset` crate: `packset`, `packsetd`, `packset-mcp` |
 | `packset-mcp` | the read-only MCP surface, built by `packset` from its source tree |
