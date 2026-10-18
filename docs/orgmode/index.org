@@ -63,20 +63,6 @@ binary, =packset-embed=, built against Open Neural Network Exchange (ONNX)
 Runtime compiled from source.
 The pack answers without it, and a sitting's recall stays lexical.
 
-* First minute
-
-#+begin_src console
-$ packset ensure
-$ packset remember --workspace demo "BM25+ is the default lexical scorer. It beat BM25 by two points."
-3f9c...	lesson	due 2026-09-13T08:54:37.394Z
-$ packset search --workspace demo lexical scorer
-9.1000	lesson	3f9c...	BM25+ is the default lexical scorer. It beat BM25 by two points.
-#+end_src
-
-The [[file:getting-started.org][tutorial]] is this crate's CLI. The seat
-walks the same pack through =ljos remember= and =ljos search=:
-[[https://leidarljos.github.io/docs/start/][first write]].
-
 * Measured
 
 LongMemEval_S, 470 answerable questions, session-level retrieval.
