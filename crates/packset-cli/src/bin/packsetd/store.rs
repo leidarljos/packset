@@ -999,6 +999,28 @@ mod tests {
         value.as_object().unwrap().clone()
     }
 
+    /// Open a home this test closed a moment ago. A test running beside
+    /// this one can fork a child (`git`, `cat`, the reader in
+    /// `a_foreign_reader_keeps_the_tail`) while the earlier store is open.
+    /// Until that child execs, it holds a copy of the lock file's open
+    /// description, and with it the `flock`, so the lock is right to
+    /// refuse. The reopen waits for the child to exec, up to five seconds.
+    fn reopen(home: &Path) -> Store {
+        let started = std::time::Instant::now();
+        loop {
+            match Store::open(home) {
+                Ok(store) => return store,
+                Err(err)
+                    if err.to_string() == "store home is already open"
+                        && started.elapsed() < std::time::Duration::from_secs(5) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => panic!("reopen {}: {err}", home.display()),
+            }
+        }
+    }
+
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -1084,7 +1106,7 @@ mod tests {
             before > 64 * 1024 * 1024,
             "the fixture did not allocate the map ({before} bytes)"
         );
-        let store = Store::open(dir.path()).unwrap();
+        let store = reopen(dir.path());
         assert_eq!(
             store.get("w", "one").unwrap().unwrap()["text"],
             json!("kept")
@@ -1161,7 +1183,7 @@ mod tests {
         let home = dir.path().to_path_buf();
         let data = path.clone();
         let during = std::thread::spawn(move || {
-            let store = Store::open(&home).unwrap();
+            let store = reopen(&home);
             let text = store.get("w", "one").unwrap().unwrap()["text"].clone();
             drop(store);
             (text, allocated_bytes(&data))
@@ -1180,7 +1202,7 @@ mod tests {
         let home = dir.path().to_path_buf();
         let data = path.clone();
         let after = std::thread::spawn(move || {
-            let store = Store::open(&home).unwrap();
+            let store = reopen(&home);
             let text = store.get("w", "one").unwrap().unwrap()["text"].clone();
             drop(store);
             assert_eq!(text, json!("kept"));
