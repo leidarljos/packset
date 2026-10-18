@@ -204,11 +204,17 @@ fn same_claim(existing: &Record, atom: &Record) -> bool {
     {
         return false;
     }
+    // The same words about another issue, agent or subject are another
+    // claim: four notes that read alike on four tickets stay four records,
+    // as `record::replaces_shaped` already keeps them apart.
     existing.get("text") == atom.get("text")
         && existing.get("kind") == atom.get("kind")
         && existing.get("set") == atom.get("set")
         && existing.get("pattern") == atom.get("pattern")
         && existing.get("verdict") == atom.get("verdict")
+        && record::IDENTITY_KEYS
+            .iter()
+            .all(|key| existing.get(*key) == atom.get(*key))
 }
 
 /// One change the search index has yet to see.
@@ -286,6 +292,7 @@ pub const FORGETTABLE_KINDS: &[&str] = &[
     "lesson",
     "conclusion",
     "summary",
+    "note",
     "card_line",
     "belief",
     "voice",
@@ -2933,6 +2940,28 @@ mod tests {
         let scoped = svc.add(scoped).unwrap();
         assert_ne!(plain["id"], scoped["id"]);
         assert_eq!(svc.store().current("w", None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_same_text_on_another_issue_is_another_claim() {
+        let (_dir, svc) = service();
+        let mut ids = Vec::new();
+        for issue in ["ljos-cjd8", "ljos-nr6q", "ljos-ensq", "ljos-wwbc"] {
+            let mut note = atom("Code is on the pull request. CI runs the tests.");
+            note.insert("issue".into(), json!(issue));
+            ids.push(svc.add(note).unwrap()["id"].clone());
+        }
+        ids.sort_by_key(|id| id.as_str().unwrap_or("").to_string());
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "{ids:?}");
+        assert_eq!(svc.store().current("w", None).unwrap().len(), 4);
+
+        // The same text on the same issue is still the record already held.
+        let mut again = atom("Code is on the pull request. CI runs the tests.");
+        again.insert("issue".into(), json!("ljos-cjd8"));
+        let again = svc.add(again).unwrap();
+        assert!(ids.contains(&again["id"]), "{again:?}");
+        assert_eq!(svc.store().current("w", None).unwrap().len(), 4);
     }
 
     #[test]

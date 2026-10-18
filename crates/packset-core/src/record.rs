@@ -41,6 +41,7 @@ pub const KINDS: &[&str] = &[
     "conclusion",
     "card_line",
     "summary",
+    "note",
     "correction",
     "belief",
     "trust",
@@ -56,6 +57,12 @@ pub const KINDS: &[&str] = &[
 /// Seat mail. Each atom is one letter, one read, or one membership change,
 /// and it is kept as written.
 pub const MAIL_KINDS: &[&str] = &["message", "receipt", "group"];
+
+/// A line from an issue's logbook, kept so recall on that issue finds it.
+/// It names its `issue`, and the one-claim rules do not apply: a logbook
+/// note is often three sentences or one long one. The readability report is
+/// kept, and a grade past the ceiling is a warning on the answer.
+pub const NOTE_KIND: &str = "note";
 
 /// Whether `kind` is seat mail.
 #[must_use]
@@ -399,6 +406,7 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     let rule = kind == "rule";
     let outcome = kind == "outcome";
     let mail = is_mail(kind);
+    let note = kind == NOTE_KIND;
     let level = atom
         .get("level")
         .and_then(Value::as_str)
@@ -485,11 +493,24 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     if outcome {
         check_outcome(atom)?;
     }
+    if note {
+        check_note(atom)?;
+    }
 
     // Mail carries a header of several lines. It is not one claim, so the
     // sentence cap does not apply. The character cap above is the bound.
     if mail {
         atom.insert("prose".into(), prose_value(&prose::assess(&text)));
+    } else if note {
+        // A logbook note is the ticket's record, not a claim: it is kept,
+        // and what the readability rules for a card say rides along.
+        let mut prose = prose_value(&prose::assess(&text));
+        if let Err(why) = prose::refuse(&text, prose::Role::File) {
+            if let Value::Object(fields) = &mut prose {
+                fields.insert("warning".into(), Value::String(why.0));
+            }
+        }
+        atom.insert("prose".into(), prose);
     } else {
         match prose::refuse(&text, prose::Role::Atom) {
             Ok(report) => {
@@ -509,6 +530,16 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
         }
     }
     Ok(())
+}
+
+/// A `note` atom names the issue whose logbook it copies.
+fn check_note(atom: &Map<String, Value>) -> Result<(), AtomError> {
+    match atom.get("issue").and_then(Value::as_str).map(str::trim) {
+        Some(v) if !v.is_empty() => Ok(()),
+        _ => Err(AtomError(
+            "note atom needs issue, the ticket whose logbook it copies".into(),
+        )),
+    }
 }
 
 /// A `prediction` atom is one voter's forecast on one issue: `issue`,
@@ -1567,6 +1598,44 @@ The build failed. Look at the log. It is the writer.";
             over.unwrap_err().0,
             format!("atom text exceeds soft cap {TEXT_SOFT_CAP}")
         );
+    }
+
+    /// A logbook note keeps three sentences and a long one, and names its
+    /// issue. The same text as an agent's summary or lesson is still refused.
+    #[test]
+    fn a_note_keeps_logbook_text_and_needs_its_issue() {
+        let three =
+            "Landed in f8929ba. A 38-word note exited 0. The pack refusal printed as a warning.";
+        let long = "Landed in f8929ba on develop and main and installed on the box, and a real release of the policy issue printed back to TODO while the orphan issue reads TODO again after the hook claimed it under the seat holder.";
+        assert!(prose::assess(three).sentences > prose::MAX_ATOM_SENTENCES);
+        assert!(prose::assess(long).very_hard_sentences > 0);
+        let write = |kind: &str, text: &str, issue: Option<&str>| {
+            let mut fields = json!({
+                "kind": kind,
+                "text": text,
+                "workspace": "seat",
+                "origin": "agent-derived",
+            });
+            if let Some(id) = issue {
+                fields["issue"] = json!(id);
+            }
+            let mut a = atom(fields);
+            validate(&mut a).map(|()| a)
+        };
+        for text in [three, long] {
+            let kept = write(NOTE_KIND, text, Some("ljos-ensq")).unwrap();
+            assert!(kept["prose"].is_object(), "{kept:?}");
+            for kind in ["summary", "lesson"] {
+                assert!(
+                    write(kind, text, Some("ljos-ensq")).is_err(),
+                    "{kind}: {text}"
+                );
+            }
+        }
+        let bare = write(NOTE_KIND, three, None).unwrap_err();
+        assert!(bare.0.contains("issue"), "{bare:?}");
+        let over = write(NOTE_KIND, &"x".repeat(TEXT_SOFT_CAP + 1), Some("ljos-ensq"));
+        assert!(over.is_err());
     }
 
     #[test]

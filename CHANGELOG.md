@@ -2,6 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.15.2 (2026-10-18)
+
+- A new atom kind, `note`, keeps a line from an issue's logbook so recall on that issue finds it. A note must name its `issue`. The one-claim rules (at most two sentences, no sentence of 30 words or more) do not apply to it, and a readability grade or adverb ratio past the ceiling is a `prose.warning` on the answer instead of a refusal. `ljos note` wrote a `summary` atom, and the pack refused three-sentence notes and one 38-word note, so those tickets had no memory copy. Every other kind keeps the gate it had.
+- A write whose text matches a live claim but names another `issue`, `agent`, `about`, `from`, `to` or `name` is stored as a new claim. Before, packsetd answered with the claim already held, so four `ljos note` calls on four tickets with the same words all printed one id and three tickets had no memory of their own. The same text with the same fields is still the claim already held.
+
 ## 0.15.1 (2026-10-17)
 
 - A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims. A `lock.mdb` reader from another process, `mdb_stat` included, keeps the file at its present length until that process leaves.
