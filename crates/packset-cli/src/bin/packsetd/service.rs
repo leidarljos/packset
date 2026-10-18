@@ -292,6 +292,7 @@ pub const FORGETTABLE_KINDS: &[&str] = &[
     "lesson",
     "conclusion",
     "summary",
+    "note",
     "card_line",
     "belief",
     "voice",
