@@ -2959,7 +2959,7 @@ mod tests {
         let mut again = atom("Code is on the pull request. CI runs the tests.");
         again.insert("issue".into(), json!("ljos-cjd8"));
         let again = svc.add(again).unwrap();
-        assert!(ids.contains(&again["id"]), "{again}");
+        assert!(ids.contains(&again["id"]), "{again:?}");
         assert_eq!(svc.store().current("w", None).unwrap().len(), 4);
     }
 
