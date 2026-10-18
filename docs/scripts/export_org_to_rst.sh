@@ -43,7 +43,7 @@ else
     # broken literal on the rendered page. The split point moves with the
     # pandoc version, so the same source built clean on one host and warned on
     # another.
-    pandoc -f org -t rst --wrap=preserve --columns=400 -o "$OUT_DIR/${base}.rst" "$org"
+    pandoc -f org -t rst --lua-filter docs/scripts/org-vert.lua --wrap=preserve --columns=400 -o "$OUT_DIR/${base}.rst" "$org"
     echo "  wrote $OUT_DIR/${base}.rst"
   done
 fi
