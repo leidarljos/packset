@@ -431,7 +431,6 @@ impl Service {
                 && changed.get("pinned").and_then(Value::as_bool) != Some(true)
             {
                 changed.insert("tombstone".into(), Value::Bool(true));
-                changed.insert("ts".into(), Value::String(now.clone()));
                 changed.insert("forgotten".into(), Value::String("neglect".into()));
                 forgotten.push(changed);
                 continue;
@@ -445,8 +444,8 @@ impl Service {
         let mut all = lapsed.clone();
         all.extend(forgotten.iter().cloned());
         if !all.is_empty() {
-            self.store.upsert_many(&all)?;
-            self.project_atoms(&all);
+            let stored = self.store.upsert_many(&all)?;
+            self.project_atoms(&stored);
         }
         if let Ok(mut swept) = self.swept.lock() {
             swept.insert(workspace.to_string(), now[..10].to_string());
@@ -650,7 +649,6 @@ impl Service {
             .take(over)
             .map(|(_, _, mut a)| {
                 a.insert("tombstone".into(), Value::Bool(true));
-                a.insert("ts".into(), Value::String(now.to_string()));
                 a.insert("forgotten".into(), Value::String("the live cap".into()));
                 a
             })
@@ -658,7 +656,7 @@ impl Service {
         if tombs.is_empty() {
             return Ok(0);
         }
-        self.store.upsert_many(&tombs)?;
+        let tombs = self.store.upsert_many(&tombs)?;
         self.project_atoms(&tombs);
         Ok(tombs.len())
     }
@@ -835,7 +833,6 @@ impl Service {
                 if record::replaces_shaped(&atom, &shape, existing, &theirs) {
                     let mut peer = existing.clone();
                     record::close_valid_to(&mut peer, &now);
-                    peer.insert("ts".into(), Value::String(clock::utcnow()));
                     if let Some(id) = peer.get("id").and_then(Value::as_str) {
                         closed.push(id.to_string());
                     }
@@ -868,10 +865,7 @@ impl Service {
             let narrowed = self.link_peers(&shape, &by_id, &closed);
             let rewritten =
                 record::apply_links_among(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
-            for mut peer in rewritten {
-                peer.insert("ts".into(), Value::String(clock::utcnow()));
-                batch.push(peer);
-            }
+            batch.extend(rewritten);
         } else if !atom.contains_key("links") {
             atom.insert("links".into(), Value::Array(Vec::new()));
         }
@@ -894,7 +888,10 @@ impl Service {
         // The snapshot is released first: a write patches the cached live
         // set in place only while nobody else holds it.
         drop(snapshot);
-        self.store.upsert_many(&all)?;
+        let all = self.store.upsert_many(&all)?;
+        if let Some(stored) = all.first() {
+            atom = stored.clone();
+        }
         self.shape_of(&atom);
         trace.mark("upsert");
         self.project_atoms(&all);
@@ -1013,7 +1010,6 @@ impl Service {
         }
         updated.insert("id".into(), Value::String(id.to_string()));
         updated.insert("workspace".into(), Value::String(workspace.to_string()));
-        updated.insert("ts".into(), Value::String(clock::utcnow()));
         updated.insert("tombstone".into(), Value::Bool(false));
         record::validate(&mut updated).map_err(anyhow::Error::new)?;
 
@@ -1023,18 +1019,15 @@ impl Service {
             let peers: Vec<&Record> = current.iter().map(AsRef::as_ref).collect();
             let rewritten =
                 record::apply_links_among(&mut updated, &peers, record::LINK_THRESHOLD, &now);
-            for mut peer in rewritten {
-                peer.insert("ts".into(), Value::String(clock::utcnow()));
-                batch.push(peer);
-            }
+            batch.extend(rewritten);
         } else if !updated.contains_key("links") {
             updated.insert("links".into(), Value::Array(Vec::new()));
         }
         let mut all = vec![updated.clone()];
         all.append(&mut batch);
-        self.store.upsert_many(&all)?;
+        let all = self.store.upsert_many(&all)?;
         self.project_atoms(&all);
-        Ok(updated)
+        Ok(all.into_iter().next().unwrap_or(updated))
     }
 
     /// Move one atom along the review clock.
@@ -1786,16 +1779,8 @@ impl Service {
             }
         }
         if !changed.is_empty() {
-            let now = clock::utcnow();
-            let batch: Vec<Record> = changed
-                .iter()
-                .map(|&i| {
-                    let mut atom = atoms[i].clone();
-                    atom.insert("ts".into(), Value::String(now.clone()));
-                    atom
-                })
-                .collect();
-            self.store.upsert_many(&batch)?;
+            let batch: Vec<Record> = changed.iter().map(|&i| atoms[i].clone()).collect();
+            let batch = self.store.upsert_many(&batch)?;
             self.project_atoms(&batch);
         }
         Ok(json!({"fired": fired.len(), "changed": changed.len(), "held": false}))
@@ -1909,15 +1894,8 @@ impl Service {
                 touched.insert(*i);
                 touched.insert(*j);
             }
-            let batch: Vec<Record> = touched
-                .into_iter()
-                .map(|k| {
-                    let mut atom = atoms[k].clone();
-                    atom.insert("ts".into(), Value::String(now.clone()));
-                    atom
-                })
-                .collect();
-            self.store.upsert_many(&batch)?;
+            let batch: Vec<Record> = touched.into_iter().map(|k| atoms[k].clone()).collect();
+            let batch = self.store.upsert_many(&batch)?;
             self.project_atoms(&batch);
         }
         Ok(json!({
@@ -2998,6 +2976,41 @@ mod tests {
             json!([two["id"].as_str().unwrap()]),
             "the peer was rewritten, not just the newcomer"
         );
+    }
+
+    #[test]
+    fn no_rewrite_moves_the_time_an_atom_was_written() {
+        let (_dir, svc) = service();
+        let written = "2026-01-01T00:00:00.000Z";
+        let mut one = atom("The Parser reads the Header.");
+        one.insert("entities".into(), json!(["Parser", "Header"]));
+        one.insert("ts".into(), json!(written));
+        let one = svc.add(one).unwrap();
+        let id = one["id"].as_str().unwrap().to_string();
+        let ts_of = || svc.store().get("w", &id).unwrap().unwrap()["ts"].clone();
+        assert_eq!(ts_of(), json!(written));
+
+        // The second write rewrites the first one's links.
+        let mut two = atom("The Header comes before the Parser body.");
+        two.insert("entities".into(), json!(["Parser", "Header"]));
+        svc.add(two).unwrap();
+        let linked = svc.store().get("w", &id).unwrap().unwrap();
+        assert_eq!(linked["links"].as_array().map(Vec::len), Some(1));
+        assert_eq!(linked["ts"], json!(written), "a link rewrite moved ts");
+        assert!(linked["updated"].as_str().unwrap() > written);
+
+        let graded = svc.grade("w", &id, true).unwrap();
+        assert_eq!(graded["ts"], json!(written), "a grade moved ts");
+
+        let mut fields = Map::new();
+        fields.insert("pinned".into(), json!(true));
+        fields.insert("ts".into(), json!("2026-10-18T00:00:00.000Z"));
+        let updated = svc.update("w", &id, &fields).unwrap();
+        assert_eq!(updated["ts"], json!(written), "an update moved ts");
+        assert_eq!(ts_of(), json!(written));
+
+        svc.delete_atom("w", &id, None).unwrap();
+        assert_eq!(ts_of(), json!(written), "a tombstone moved ts");
     }
 
     #[test]

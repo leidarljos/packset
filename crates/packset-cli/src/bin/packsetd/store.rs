@@ -43,7 +43,8 @@ type Searchable = (
     (Vec<(String, String)>, Arc<Index>, Arc<Vec<Vec<String>>>),
 );
 
-/// The id and stamp of each atom, the fingerprint an index is keyed on.
+/// The id and last write stamp of each atom, the fingerprint an index is
+/// keyed on.
 fn fingerprint(atoms: &[Arc<Record>]) -> Vec<(String, String)> {
     atoms
         .iter()
@@ -53,13 +54,110 @@ fn fingerprint(atoms: &[Arc<Record>]) -> Vec<(String, String)> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                a.get("ts")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                written_last(a).to_string(),
             )
         })
         .collect()
+}
+
+/// When a record was last written: `updated`, else `ts` on a record no
+/// write has stamped yet.
+fn written_last(atom: &Record) -> &str {
+    [UPDATED, "ts"]
+        .into_iter()
+        .filter_map(|key| atom.get(key).and_then(Value::as_str))
+        .find(|stamp| !stamp.is_empty())
+        .unwrap_or("")
+}
+
+/// The field each write stamps with its time. `ts` is when the atom was
+/// first written and no rewrite changes it.
+pub const UPDATED: &str = "updated";
+
+/// Keep the stored `ts` on a rewrite and stamp `updated`. A rewrite of
+/// links, a review clock or a closed window used to put the time of the
+/// rewrite in `ts`, so the time the atom was written was lost.
+fn stamp_write(payload: &mut Record, stored: Option<&Record>, now: &str) {
+    if let Some(created) = stored
+        .and_then(|old| old.get("ts"))
+        .and_then(Value::as_str)
+        .filter(|ts| !ts.is_empty())
+    {
+        payload.insert("ts".into(), Value::String(created.to_string()));
+    }
+    payload.insert(UPDATED.into(), Value::String(now.to_string()));
+}
+
+/// The time a record written before [`UPDATED`] existed was created, when
+/// a rewrite moved its `ts` and the time survives elsewhere on it. A write
+/// copies `ts` into `valid_from` when the writer gave none, and a client
+/// may name its own clock in `source.at`. Either one earlier than `ts` is
+/// the time the rewrite took; `source.at` counts whole seconds, so
+/// `valid_from` wins within the same second.
+fn created_before_rewrite(atom: &Record) -> Option<String> {
+    use packset_core::clock::{canonicalize, parse_millis};
+    let ts = atom.get("ts").and_then(Value::as_str)?;
+    let ts_ms = parse_millis(ts)?;
+    let stamp = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .and_then(|s| canonicalize(s).and_then(|c| parse_millis(&c).map(|ms| (c, ms))))
+    };
+    let from = stamp(atom.get("valid_from"));
+    let at = stamp(atom.get("source").and_then(|s| s.get("at")));
+    let chosen = match (at, from) {
+        (Some((at, at_ms)), Some((from, from_ms))) => {
+            if (from_ms - at_ms).abs() < 1000 {
+                Some((from, from_ms))
+            } else {
+                Some((at, at_ms))
+            }
+        }
+        (Some(at), None) => Some(at),
+        (None, from) => from,
+    }?;
+    (chosen.1 < ts_ms).then_some(chosen.0)
+}
+
+/// Stamp every record a write before [`UPDATED`] left: its `ts` becomes
+/// `updated`, and `ts` goes back to the time it was created where
+/// [`created_before_rewrite`] still finds it. A record that has `updated`
+/// is left alone, so a second open writes nothing.
+fn restore_created(env: &Env, db: Database<Bytes, Bytes>) -> anyhow::Result<usize> {
+    let mut fixed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    {
+        let rtxn = env.read_txn()?;
+        for item in db.iter(&rtxn)? {
+            let (key, raw) = item?;
+            let Ok(Value::Object(mut atom)) = serde_json::from_slice::<Value>(raw) else {
+                continue;
+            };
+            if atom.contains_key(UPDATED) {
+                continue;
+            }
+            let Some(last) = atom
+                .get("ts")
+                .and_then(Value::as_str)
+                .filter(|ts| !ts.is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if let Some(created) = created_before_rewrite(&atom) {
+                atom.insert("ts".into(), Value::String(created));
+            }
+            atom.insert(UPDATED.into(), Value::String(last));
+            fixed.push((key.to_vec(), serde_json::to_vec(&Value::Object(atom))?));
+        }
+    }
+    if fixed.is_empty() {
+        return Ok(0);
+    }
+    let mut wtxn = env.write_txn()?;
+    for (key, blob) in &fixed {
+        db.put(&mut wtxn, key, blob)?;
+    }
+    wtxn.commit()?;
+    Ok(fixed.len())
 }
 
 /// What a search runs over: the snapshot, the inverted index, and the tokens
@@ -151,6 +249,10 @@ impl Store {
         let mut wtxn = env.write_txn()?;
         let db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, None)?;
         wtxn.commit()?;
+        let restored = restore_created(&env, db)?;
+        if restored > 0 {
+            eprintln!("packsetd: stamped {restored} records written before `updated`");
+        }
         // A store created while the file was extended to the map still has
         // that tail. The pages at and below the last used page are the
         // database; the rest can go back to the filesystem. A later write
@@ -262,15 +364,20 @@ impl Store {
     ///
     /// Fails when the record has no workspace or id, or when the write does.
     pub fn upsert(&self, atom: &Record) -> anyhow::Result<()> {
-        self.upsert_many(std::slice::from_ref(atom))
+        self.upsert_many(std::slice::from_ref(atom)).map(|_| ())
     }
 
-    /// Write several records in one transaction, so a link rewrite lands whole.
+    /// Write several records in one transaction, so a link rewrite lands
+    /// whole, and hand back the records as stored. A record already in the
+    /// store keeps the `ts` it was stored with, and every record is stamped
+    /// with the write's time in `updated`.
     ///
     /// # Errors
     ///
     /// Fails when a record has no workspace or id, or when the write does.
-    pub fn upsert_many(&self, atoms: &[Record]) -> anyhow::Result<()> {
+    pub fn upsert_many(&self, atoms: &[Record]) -> anyhow::Result<Vec<Record>> {
+        let now = packset_core::clock::utcnow();
+        let mut written = Vec::with_capacity(atoms.len());
         let mut wtxn = self.env.write_txn()?;
         for atom in atoms {
             let mut payload = atom.clone();
@@ -286,15 +393,25 @@ impl Store {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("record has no id"))?;
             let key = atom_key(workspace, id);
+            let stored = self
+                .db
+                .get(&wtxn, &key)?
+                .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
+                .and_then(|v| match v {
+                    Value::Object(map) => Some(map),
+                    _ => None,
+                });
+            stamp_write(&mut payload, stored.as_ref(), &now);
             let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
             self.db.put(&mut wtxn, &key, &blob)?;
+            written.push(payload);
         }
         wtxn.commit()?;
         // After the commit, never before: a reader that scans between a bump
         // and its write would otherwise cache the older corpus as the newer.
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.patch_live(atoms, generation);
-        Ok(())
+        self.patch_live(&written, generation);
+        Ok(written)
     }
 
     /// Fold a committed write into the cached snapshot instead of dropping it.
@@ -373,10 +490,9 @@ impl Store {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
-            if let Some(ts) = rec.get("ts").and_then(Value::as_str) {
-                if ts > counts.last_write.as_str() {
-                    counts.last_write = ts.to_string();
-                }
+            let last = written_last(rec);
+            if last > counts.last_write.as_str() {
+                counts.last_write = last.to_string();
             }
             if rec
                 .get("tombstone")
@@ -483,9 +599,10 @@ impl Store {
             {
                 let idx = Arc::make_mut(&mut index);
                 let docs = Arc::make_mut(&mut documents);
-                for (ordinal, ((_, old_ts), new)) in old_atoms.iter().zip(atoms.iter()).enumerate()
+                for (ordinal, ((_, old_stamp), new)) in
+                    old_atoms.iter().zip(atoms.iter()).enumerate()
                 {
-                    if Some(old_ts.as_str()) != new.get("ts").and_then(Value::as_str) {
+                    if old_stamp.as_str() != written_last(new) {
                         let tokens = packset_core::search::atom_tokens(new);
                         idx.replace(ordinal, &docs[ordinal], &tokens);
                         docs[ordinal] = tokens;
@@ -611,12 +728,11 @@ impl Store {
             .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
         tomb.insert("tombstone".into(), Value::Bool(true));
-        tomb.insert("ts".into(), Value::String(packset_core::clock::utcnow()));
         if let Some(accession) = why {
             tomb.insert("retracted_by".into(), Value::String(accession.to_string()));
         }
-        self.upsert(&tomb)?;
-        Ok(tomb)
+        let mut stored = self.upsert_many(std::slice::from_ref(&tomb))?;
+        Ok(stored.pop().unwrap_or(tomb))
     }
 
     /// Drop every record in one workspace, scratch cleanup rather than
@@ -1260,6 +1376,86 @@ mod tests {
         assert_eq!(back["text"], json!("A claim."));
         assert_eq!(back["links"], json!(["two"]));
         assert_eq!(back["unmodelled"], json!({"x": 1}), "fields survive");
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_time_the_atom_was_written() {
+        let (_dir, store) = store();
+        let written = "2026-10-01T09:00:00.000Z";
+        store
+            .upsert(&record(json!({
+                "id": "a", "workspace": "w", "text": "alpha", "ts": written,
+                "valid_from": written
+            })))
+            .unwrap();
+        let first = store.get("w", "a").unwrap().unwrap();
+        assert_eq!(first["ts"], json!(written));
+        let stamped = first[UPDATED].as_str().unwrap().to_string();
+        // A rewrite carrying a later ts, as the link and review paths did.
+        store
+            .upsert(&record(json!({
+                "id": "a", "workspace": "w", "text": "alpha beta",
+                "ts": "2026-10-18T19:31:19.444Z", "valid_from": written
+            })))
+            .unwrap();
+        let back = store.get("w", "a").unwrap().unwrap();
+        assert_eq!(back["ts"], json!(written), "a rewrite moved ts");
+        assert_eq!(back["text"], json!("alpha beta"));
+        assert!(back[UPDATED].as_str().unwrap() >= stamped.as_str());
+        let tomb = store.delete("w", "a", None).unwrap();
+        assert_eq!(tomb["ts"], json!(written), "a tombstone moved ts");
+        assert_eq!(store.get("w", "a").unwrap().unwrap()["ts"], json!(written));
+    }
+
+    #[test]
+    fn a_record_from_before_updated_gets_its_written_time_back_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let rewritten = "2026-10-18T19:31:19.444Z";
+        let rows = [
+            // Restamped by a link rewrite; valid_from kept the write.
+            json!({"id": "moved", "workspace": "w", "text": "a",
+                   "ts": rewritten, "valid_from": "2026-10-16T10:07:21.644Z",
+                   "source": {"at": "2026-10-16T10:07:21Z"}}),
+            // Never rewritten: ts and valid_from agree.
+            json!({"id": "kept", "workspace": "w", "text": "b",
+                   "ts": "2026-10-12T08:00:00.000Z",
+                   "valid_from": "2026-10-12T08:00:00.000Z"}),
+            // A writer dated the window back; source.at is its write.
+            json!({"id": "dated", "workspace": "w", "text": "c",
+                   "ts": rewritten, "valid_from": "2020-01-01T00:00:00.000Z",
+                   "source": {"at": "2026-10-14T14:15:41Z"}}),
+            // No stamp to go back to.
+            json!({"id": "bare", "workspace": "w", "text": "d", "ts": rewritten}),
+        ];
+        {
+            let store = Store::open(dir.path()).unwrap();
+            let mut wtxn = store.env.write_txn().unwrap();
+            for row in &rows {
+                let key = atom_key("w", row["id"].as_str().unwrap());
+                store
+                    .db
+                    .put(&mut wtxn, &key, &serde_json::to_vec(row).unwrap())
+                    .unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+        let store = reopen(dir.path());
+        let got = |id: &str| store.get("w", id).unwrap().unwrap();
+        assert_eq!(got("moved")["ts"], json!("2026-10-16T10:07:21.644Z"));
+        assert_eq!(got("moved")[UPDATED], json!(rewritten));
+        assert_eq!(got("kept")["ts"], json!("2026-10-12T08:00:00.000Z"));
+        assert_eq!(got("kept")[UPDATED], json!("2026-10-12T08:00:00.000Z"));
+        assert_eq!(got("dated")["ts"], json!("2026-10-14T14:15:41.000Z"));
+        assert_eq!(got("bare")["ts"], json!(rewritten));
+        assert_eq!(got("bare")[UPDATED], json!(rewritten));
+        let before: Vec<Record> = store.scan(Some("w")).unwrap();
+        drop(store);
+        let again = reopen(dir.path());
+        assert_eq!(
+            again.scan(Some("w")).unwrap(),
+            before,
+            "a second open rewrote"
+        );
     }
 
     #[test]
