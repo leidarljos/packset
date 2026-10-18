@@ -90,32 +90,19 @@ fn stamp_write(payload: &mut Record, stored: Option<&Record>, now: &str) {
 
 /// The time a record written before [`UPDATED`] existed was created, when
 /// a rewrite moved its `ts` and the time survives elsewhere on it. A write
-/// copies `ts` into `valid_from` when the writer gave none, and a client
-/// may name its own clock in `source.at`. Either one earlier than `ts` is
-/// the time the rewrite took; `source.at` counts whole seconds, so
-/// `valid_from` wins within the same second.
+/// copies `ts` into `valid_from` when the writer gave none, so a
+/// `valid_from` earlier than `ts` is the time the rewrite took. A record
+/// with no such `valid_from` falls back to the writer's own clock in
+/// `source.at`, when that is earlier than `ts`.
 fn created_before_rewrite(atom: &Record) -> Option<String> {
     use packset_core::clock::{canonicalize, parse_millis};
-    let ts = atom.get("ts").and_then(Value::as_str)?;
-    let ts_ms = parse_millis(ts)?;
-    let stamp = |v: Option<&Value>| {
-        v.and_then(Value::as_str)
-            .and_then(|s| canonicalize(s).and_then(|c| parse_millis(&c).map(|ms| (c, ms))))
+    let ts = parse_millis(atom.get("ts").and_then(Value::as_str)?)?;
+    let earlier = |v: Option<&Value>| {
+        let stamp = canonicalize(v.and_then(Value::as_str)?)?;
+        (parse_millis(&stamp)? < ts).then_some(stamp)
     };
-    let from = stamp(atom.get("valid_from"));
-    let at = stamp(atom.get("source").and_then(|s| s.get("at")));
-    let chosen = match (at, from) {
-        (Some((at, at_ms)), Some((from, from_ms))) => {
-            if (from_ms - at_ms).abs() < 1000 {
-                Some((from, from_ms))
-            } else {
-                Some((at, at_ms))
-            }
-        }
-        (Some(at), None) => Some(at),
-        (None, from) => from,
-    }?;
-    (chosen.1 < ts_ms).then_some(chosen.0)
+    earlier(atom.get("valid_from"))
+        .or_else(|| earlier(atom.get("source").and_then(|s| s.get("at"))))
 }
 
 /// Stamp every record a write before [`UPDATED`] left: its `ts` becomes
@@ -1420,10 +1407,13 @@ mod tests {
             json!({"id": "kept", "workspace": "w", "text": "b",
                    "ts": "2026-10-12T08:00:00.000Z",
                    "valid_from": "2026-10-12T08:00:00.000Z"}),
-            // A writer dated the window back; source.at is its write.
+            // No valid_from; source.at is the writer's clock.
             json!({"id": "dated", "workspace": "w", "text": "c",
-                   "ts": rewritten, "valid_from": "2020-01-01T00:00:00.000Z",
-                   "source": {"at": "2026-10-14T14:15:41Z"}}),
+                   "ts": rewritten, "source": {"at": "2026-10-14T14:15:41Z"}}),
+            // A source.at past ts is not the write; valid_from is.
+            json!({"id": "ahead", "workspace": "w", "text": "e",
+                   "ts": rewritten, "valid_from": "2026-10-18T19:00:00.000Z",
+                   "source": {"at": "2026-10-19T00:00:00Z"}}),
             // No stamp to go back to.
             json!({"id": "bare", "workspace": "w", "text": "d", "ts": rewritten}),
         ];
@@ -1446,6 +1436,7 @@ mod tests {
         assert_eq!(got("kept")["ts"], json!("2026-10-12T08:00:00.000Z"));
         assert_eq!(got("kept")[UPDATED], json!("2026-10-12T08:00:00.000Z"));
         assert_eq!(got("dated")["ts"], json!("2026-10-14T14:15:41.000Z"));
+        assert_eq!(got("ahead")["ts"], json!("2026-10-18T19:00:00.000Z"));
         assert_eq!(got("bare")["ts"], json!(rewritten));
         assert_eq!(got("bare")[UPDATED], json!(rewritten));
         let before: Vec<Record> = store.scan(Some("w")).unwrap();
