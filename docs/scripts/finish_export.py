@@ -35,6 +35,45 @@ TOCTREE = """
 """ + "".join(f"   {page}\n" for page in PAGES)
 
 _FOOTNOTE_DEF = re.compile(r"^\[\d+\]")
+_ORG_TITLE = re.compile(r"^#\+title:\s*(.*)$", re.IGNORECASE)
+_ORG_DESC = re.compile(r"^#\+description:\s*(.*)$", re.IGNORECASE)
+
+
+def org_fields(path: Path) -> tuple[str, str]:
+    title = ""
+    description = ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if match := _ORG_TITLE.match(line):
+            title = match.group(1).strip()
+        elif match := _ORG_DESC.match(line):
+            description = match.group(1).strip()
+    return title, description
+
+
+def stamp_page(rst: Path, org: Path) -> None:
+    """Put the org title and description where Sphinx reads them.
+
+    Pandoc keeps ``#+title`` and ``#+description`` as metadata and does not
+    write them into the body, so the first section becomes the page title.
+    """
+    title, description = org_fields(org)
+    missing = []
+    if not title:
+        missing.append("#+title")
+    if not description:
+        missing.append("#+description")
+    if missing:
+        print(f"{org}: missing {', '.join(missing)}", file=sys.stderr)
+        raise SystemExit(1)
+    text = rst.read_text(encoding="utf-8")
+    if text.startswith(".. title::"):
+        print(f"{rst.name}: title already stamped")
+        return
+    # A field list here becomes docinfo. Sphinx lifts it into page
+    # metadata and does not render it.
+    block = f".. title:: {title}\n\n:description: {description}\n\n"
+    rst.write_text(block + text, encoding="utf-8")
+    print(f"{rst.name}: title and description stamped")
 
 
 def restore_toctree(index: Path) -> None:
@@ -66,6 +105,9 @@ def main() -> int:
     if missing:
         print(f"missing exported pages: {', '.join(missing)}", file=sys.stderr)
         return 1
+    stamp_page(index, _ORG / "index.org")
+    for page in PAGES:
+        stamp_page(source / f"{page}.rst", _ORG / f"{page}.org")
 
     failed = False
     for org in sorted(Path("docs/orgmode").glob("*.org")):

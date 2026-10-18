@@ -1,4 +1,5 @@
 #+title: Explanation
+#+description: Why a pack stores written claims, and how search, decay, islands, and the one writer behave.
 #+options: toc:nil num:nil
 
 * A pack is not a transcript

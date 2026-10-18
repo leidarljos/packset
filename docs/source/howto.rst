@@ -1,3 +1,7 @@
+.. title:: How-to
+
+:description: One task at a time: name a workspace, pin a set, read a date, retire a claim, and turn the dense scorer on.
+
 Each section is one task. Every command finds the writer on
 ``127.0.0.1:8761`` with nothing set; ``PACKSET_URL`` points it elsewhere and
 ``packset ensure`` prints the address it started.
@@ -34,14 +38,17 @@ The binary prints a JSON object with ``workspace``, ``set``, and ``instructions`
 Ask what was live on a date
 ===========================
 
-Search answers live-now. A dated question reads the store, where a closed
-claim still sits:
+A closed claim keeps its window. ``packset atoms --as-of TS`` lists every
+claim live at ``TS``; ``packset search --as-of TS QUERY`` ranks those same
+claims. Live-now search drops the closed window.
 
 .. code:: console
 
    $ packset atoms --as-of 2026-08-01T00:00:00Z seat
+   $ packset search --as-of 2026-08-01T00:00:00Z --workspace seat fusion
 
-``GET /v1/search`` with ``as_of`` runs the same window over a ranked answer.
+``GET /v1/search`` with ``as_of`` is the same window. A stamp the pack will
+not parse is refused.
 
 Retire a claim
 ==============
@@ -124,8 +131,8 @@ Network Exchange (ONNX) Runtime that you compiled, or a distro
 ``pkg-config`` can see. The runtime this ``ort`` publishes as a prebuilt is
 1.28.0, and that is the version to compile. The prebuilt download from
 cdn.pyke.io is ``--features download-binaries``, off unless named.
-``ORT_SKIP_DOWNLOAD=1``, ``ORT_OFFLINE=1`` or ``CARGO_NET_OFFLINE=1`` refuse
-that download even with the feature on.
+``ORT_SKIP_DOWNLOAD=1``, ``ORT_OFFLINE=1`` or ``CARGO_NET_OFFLINE=1`` refuse that
+download even with the feature on.
 
 .. code:: console
 
@@ -186,12 +193,16 @@ Run the second stage on one question
 ====================================
 
 The cross-encoder rerank is measured and off by default. Ask for it per
-query, or set ``PACKSET_RERANK=1`` on the writer. A lone hit reports
-``settled``: one candidate cannot be reordered, so no model call is
-made:
+query with ``packset search --rerank``, ``GET /v1/search?rerank=1``, or set
+``PACKSET_RERANK=1`` on the writer. The stage is a forward pass over the
+top 20. An absent or broken ``packset-embed`` leaves the first-stage
+order and reports ``rerank: absent``. A lone hit reports ``rerank:
+settled``: one candidate cannot be reordered, so the stage answers
+without a model call.
 
 .. code:: console
 
+   $ packset search --rerank --workspace seat fusion
    $ curl -s "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rerank=1" | jq '.rerank'
 
 Export for a handover, import from one
@@ -212,11 +223,11 @@ One writer serves every client on the seat. The worker pool is the balance:
 at a time so two identical claims arriving together are stored once. A burst
 waits in a queue of ``PACKSET_QUEUE`` connections (default 128) rather than
 becoming threads. Past that a request is answered 503 with ``Retry-After: 1``.
-Searches and writes that a worker has read but cannot yet run are bounded the
-same way. ``packset-client`` asks a busy writer again after 50, 150 and 450
-ms. Health, status, the workspace list and the listing without vectors that a
-status line reads keep one worker, so a search does not hold the last one.
-``/health`` still answers. Reads share one parsed snapshot per write. The
+Searches and writes that a worker has read but cannot yet run are bounded
+the same way. ``packset-client`` asks a busy writer again after 50, 150 and
+450 ms. Health, status, the workspace list and the listing without vectors
+that a status line reads keep one worker, so a search does not hold the last
+one. ``/health`` still answers. Reads share one parsed snapshot per write. The
 encoder runs before the write lock and is warmed at start.
 
 .. code:: console

@@ -12,10 +12,10 @@ REQ="$ROOT/docs/requirements.txt"
 SRC="$ROOT/docs/source"
 BUILD="$ROOT/docs/build"
 
-echo "==> 1/3 export org → rst"
+echo "==> 1/4 export org → rst"
 bash "$ROOT/docs/scripts/export_org_to_rst.sh"
 
-echo "==> 2/3 ensure Python doc deps in $VENV"
+echo "==> 2/4 ensure Python doc deps in $VENV"
 if [[ ! -d "$VENV" ]]; then
   python3 -m venv "$VENV"
 fi
@@ -24,7 +24,10 @@ source "$VENV/bin/activate"
 python -m pip install -q --upgrade pip
 python -m pip install -q -r "$REQ"
 
-echo "==> 3/3 sphinx-build (Shibuya) → $BUILD"
+echo "==> 3/4 Open Graph image from the mark"
+python3 "$ROOT/docs/scripts/og_image.py"
+
+echo "==> 4/4 sphinx-build (Shibuya) → $BUILD"
 rm -rf "$BUILD"
 sphinx-build -b html -n "$SRC" "$BUILD" 2>&1
 # -W can be harsh on unknown roles; if too strict use without -W

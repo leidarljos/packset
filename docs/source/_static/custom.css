@@ -136,7 +136,39 @@ body,
   text-wrap: balance;
 }
 .yue h1 { font-size: clamp(2.2rem, 5vw, 3.2rem); line-height: 1.08; }
-.yue h2 { font-size: clamp(1.45rem, 2.6vw, 1.9rem); line-height: 1.2; }
+/* Sections render as h2 under the page title. Keep the size and the gap
+   they had when each section was an h1. */
+.yue h2 {
+  font-size: clamp(2.2rem, 5vw, 3.2rem);
+  line-height: 1.08;
+  margin-top: 0;
+  margin-bottom: 0.888889em;
+}
+/* The copy control reserves this on the first heading of each top section.
+   Those headings are h2 now; the clearance stays. */
+@media (min-width: 64rem) {
+  .copy-page-wrapper + .yue > section > h2:first-of-type {
+    padding-right: 180px;
+  }
+}
+.yue h2 + p { margin-top: 1rem; }
+.yue h2 + ul,
+.yue h2 + ol { margin-top: 1.25em; }
+.yue h2 + dl { margin-top: 1.5rem; }
+.yue h2 + blockquote { margin-top: 1.2rem; }
+.yue h2 + table { margin-top: 2em; }
+.yue h2 + figure { margin-top: 2em; }
+.ll-clip {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .yue h3 { font-size: 1.2rem; line-height: 1.25; letter-spacing: -0.01em; }
 .yue h4 { font-size: 1.05rem; line-height: 1.3; letter-spacing: 0; }
 

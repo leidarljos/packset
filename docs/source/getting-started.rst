@@ -1,6 +1,19 @@
+.. title:: Getting started
+
+:description: Remember two claims in a scratch workspace, rank them, review them, and export the pack.
+
 Everything below runs against a scratch workspace and touches nothing else.
 By the end you will have a pack that remembers two claims and ranks them.
 It will tell you when to review them, and export them for another seat.
+
+Install the writer. The encoder is a separate binary. Without it search
+stays lexical, and a sitting still opens on those ballots.
+:doc:`How-to <howto>` covers building the encoder from source against
+an Open Neural Network Exchange (ONNX) Runtime you compile.
+
+.. code:: console
+
+   $ cargo binstall --locked packset
 
 1. Start the writer
 ===================

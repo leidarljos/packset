@@ -1,4 +1,5 @@
 #+title: In the seat
+#+description: How packset sits beside the other leiðarljós crates.
 #+options: toc:nil num:nil
 
 * In the seat

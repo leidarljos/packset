@@ -1,4 +1,5 @@
 #+title: How-to
+#+description: One task at a time: name a workspace, pin a set, read a date, retire a claim, and turn the dense scorer on.
 #+options: toc:nil num:nil
 
 Each section is one task. Every command finds the writer on

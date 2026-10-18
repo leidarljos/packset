@@ -1,4 +1,5 @@
 #+title: packset
+#+description: A pack of written claims with a review clock, not a transcript with an index.
 #+options: toc:nil num:nil
 
 #+begin_export rst

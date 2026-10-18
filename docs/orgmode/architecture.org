@@ -1,4 +1,5 @@
 #+title: packset architecture
+#+description: One writer on loopback. Cards are files. Atoms are LMDB. Every agent is an HTTP client.
 #+options: toc:nil num:nil
 
 One writer on loopback. Cards are files. Atoms are LMDB.

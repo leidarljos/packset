@@ -1,0 +1,6 @@
+{%- if page_source_suffix -%}
+{%- set editurl = "https://github.com/leidarljos/packset/blob/main/docs/orgmode/" ~ pagename ~ ".org" -%}
+<div class="edit-this-page">
+  <a href="{{ editurl }}">{{ _("Edit this page") }}</a>
+</div>
+{%- endif -%}

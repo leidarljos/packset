@@ -1,3 +1,7 @@
+.. title:: packset
+
+:description: A pack of written claims with a review clock, not a transcript with an index.
+
 .. raw:: html
 
    <div class="vi-hero">
@@ -35,11 +39,31 @@ Install
    $ cargo binstall --locked packset          # packset, packsetd and packset-mcp
    $ packset ensure
 
+First minute
+============
+
+.. code:: console
+
+   $ packset remember --workspace demo "The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25."
+   ee17d2a07cbf1569e54e0d80496fdecf    lesson  due 2026-09-28T16:52:09.119Z
+   $ packset prefer --workspace demo "CombMNZ over RRF for fusing two ballots."
+   63df91bbea2b5e4e146866db0a85b4c6    preference  due 2026-09-28T16:52:09.149Z
+   $ packset search --workspace demo which fusion
+   packset: workspace demo
+   2.0000  preference  63df91bbea2b5e4e146866db0a85b4c6    CombMNZ over RRF for fusing two ballots.
+   1.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf    The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
+
+Two claims, written on purpose, each with a review date a day out. A search
+lists the standing choice first, then the lesson. The :doc:`tutorial <getting-started>`
+goes on from these two claims to review and handover.
+
 ``packset ensure`` starts the writer when it is down. With nothing set, every
 client uses that writer on the default port. The dense scorer is a separate
 binary, ``packset-embed``, built against Open Neural Network Exchange (ONNX)
 Runtime compiled from source.
 The pack answers without it, and a sitting's recall stays lexical.
+
+.. _first-minute-1:
 
 First minute
 ============

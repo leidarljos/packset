@@ -1,3 +1,7 @@
+.. title:: Explanation
+
+:description: Why a pack stores written claims, and how search, decay, islands, and the one writer behave.
+
 A pack is not a transcript
 ==========================
 
@@ -211,7 +215,8 @@ memory, MemoryBank or Generative Agents.
 Forgetting is a feature
 =======================
 
-|image1|
+.. image:: _static/memory.svg
+   :width: 100.0%
 
 A claim that is never used should not weigh as much as one that is. The
 pack gives every claim a review clock modelled on spaced repetition: a
@@ -240,13 +245,15 @@ first thirty days and recalled whenever its clock came due, three
 paraphrases of it written after day 150 and never reviewed, the topic
 asked on day 180. The paraphrases share every word with the kept claim.
 
-================================= ================ ===========================
-decay slot                        kept claim first mean rank of the kept claim
-================================= ================ ===========================
-off, lexical only                 0.230            2.49
-on, fourteen-day half-life on age 0.270            3.74
-fsrs, retrievability              0.947            1.05
-================================= ================ ===========================
+=============================================== ================ ===========================
+ordering                                        kept claim first mean rank of the kept claim
+=============================================== ================ ===========================
+off, lexical only                               0.230            2.49
+on, fourteen-day half-life on age               0.270            3.74
+fsrs, retrievability                            0.947            1.05
+LRU, newest hit first                           0.000            8.26
+keep-testing, the recall path's due-first order 0.000            10.00
+=============================================== ================ ===========================
 
 Lexical scoring cannot tell the four apart, so it lands at chance. Recency
 prefers the paraphrase written last week. Retrievability prefers the claim
@@ -254,6 +261,27 @@ the seat kept using, and loses only where a paraphrase written in the last
 day or two carries more retrievability than a kept claim thirty days past
 its last review. The recency half-life slot stays off. Retrievability (``fsrs``) is the
 default a seat gets; ``PACKSET_DECAY=off`` turns scaling off.
+
+A claim nobody grades still forgets. A review left due past twice its
+interval is a review the seat missed, and the writer treats it as one: on
+the first write of a day it sweeps the workspace, lapses each such claim
+(stability halved, the miss counted) and reschedules it; a lesson never
+once recalled and missed three times is tombstoned, ``forgotten:
+neglect``. Preferences, rules, readings, goals, trust rows and personas
+lapse but stay. ``packset sweep`` runs the same pass now. This is what
+keeps a pack a herd writes into from holding three hundred claims due
+with nobody to grade them.
+
+Two orderings the clock competes with sit below the table. LRU, the
+newest hit first, is what a cache keeps; it never finds the kept claim.
+Keep-testing is the recall path's own order, the due queue ahead of the
+cue's neighbourhood; the three unreviewed paraphrases of every topic are
+due, so they lead and the kept claim is never returned. That order is a
+review order, and ``due`` is where it belongs; for retrieval the clock's
+value is the retrievability slot above. Recall now bounds the due queue
+to a quarter of the budget and to claims that touch the cue, matches a
+hint on half its tokens, and ranks a tier by retrievability before
+recency, so a herd's hundreds of due claims cannot bury a cue.
 
 Islands
 =======
@@ -360,6 +388,3 @@ A claim may cite a deed accession. The deed store owns the bytes and the
 proof; the tracker cites the same accession on a node. ``accessions`` and
 ``citers`` are the two directions of that join, and neither store opens the
 other. The seat, ``ljos``, composes them.
-
-.. |image1| image:: _static/memory.svg
-   :width: 100.0%
