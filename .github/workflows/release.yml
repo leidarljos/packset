@@ -14,6 +14,10 @@ on:
 
 permissions:
   contents: write
+  # The build attestations: a signed statement that this workflow built
+  # each archive, which `gh attestation verify` and the ljos installer check.
+  id-token: write
+  attestations: write
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
@@ -131,6 +135,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # A signed statement that this workflow built each archive, which
+      # `gh attestation verify` and the ljos installer check.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
       - name: Release notes from the changelog
         run: |
           awk -v v="${TAG#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md

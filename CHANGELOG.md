@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- Each release archive gets a GitHub build attestation from the release workflow, so `gh attestation verify` and the ljos installer can check that this repository built it. Releases before this one have none, and the installer counts them as not published.
+
 ## 0.15.3 (2026-10-18)
 
 - The README and the reference say that `packset-daemon` has been unpublished since 0.10.0 and that crates.io stops at 0.9.21; `cargo binstall packset` installs `packsetd`. The architecture page put the writer's source in `packset-daemon`; it is in `packset-cli`, and `packset-daemon` only builds it as a library for the examples.
