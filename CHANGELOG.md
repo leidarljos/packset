@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.16.1 (2026-10-22)
 
 - The cached-vector RSS check measures a child process. It reads
   anonymous memory for the whole test process, so a neighbour running
