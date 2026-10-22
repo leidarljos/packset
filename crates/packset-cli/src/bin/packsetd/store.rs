@@ -767,9 +767,11 @@ impl Store {
     }
 
     fn release_pages(&self) {
-        // Linux only. The same advice is not applied on macOS: there
-        // `MADV_DONTNEED` can discard dirty pages. Everywhere else this
-        // function is a no-op and the mapped file stays resident.
+        // Linux only. The map is read-only: LMDB writes with `write`,
+        // not `WRITEMAP`, so there are no dirty pages to discard. This
+        // advice is not applied on macOS, where clean file-backed pages
+        // are already outside the footprint. Everywhere else the mapped
+        // file stays resident.
         #[cfg(target_os = "linux")]
         {
             // Open a write transaction and drop it at once, so a commit
@@ -1663,21 +1665,22 @@ extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
-/// Ask glibc to return free arenas to the kernel. A burst allocates the
-/// high-water mark into per-thread arenas and, without this, holds it
-/// until the process ends. musl has no `malloc_trim`. macOS can relieve
-/// a zone, but that call is not exercised here, so on musl and on macOS
-/// this is a no-op and the high-water mark stays until the process ends.
-#[cfg(target_env = "gnu")]
+/// Ask glibc on Linux to return free arenas to the kernel. A burst
+/// leaves that high-water mark in per-thread arenas until asked.
+/// musl and the macOS allocator return large freed regions on their
+/// own; what stays is fragmentation from small allocations.
+/// `malloc_trim` is not linked elsewhere: windows-gnu shares
+/// `target_env = "gnu"` and does not provide this symbol.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn release_heap() {
     // SAFETY: trim does not move live allocations.
     let _ = unsafe { malloc_trim(0) };
 }
 
-#[cfg(not(target_env = "gnu"))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn release_heap() {}
 
-#[cfg(target_env = "gnu")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 extern "C" {
     fn malloc_trim(pad: usize) -> i32;
 }

@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Idle page advice stays Linux-only because the database map is
+  read-only, not because macOS would discard dirty pages. Clean
+  file-backed pages are already outside that footprint. Heap return
+  calls `malloc_trim` only for glibc on Linux. musl and macOS return
+  large freed regions on their own; small-allocation fragmentation
+  is what remains. windows-gnu is not given the symbol.
+
 - The constant-corpus soak rewrites one set of claims and gives each
   window a new vector. The field soak grows the corpus and returns one
   constant, so a cache that still stores the JSON arrays passed it.
