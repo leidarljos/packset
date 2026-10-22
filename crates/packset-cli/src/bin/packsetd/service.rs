@@ -755,7 +755,7 @@ impl Service {
 
     /// Shape every live claim of a workspace the first time this process
     /// writes to it, so the postings cover the pack; afterwards each write
-    /// shapes what it wrote.
+    /// shapes what it wrote. `live` is the workspace, not one set of it.
     fn shape_workspace_once(&self, workspace: &str, live: &[&Record]) {
         let first = self
             .shaped
@@ -1080,6 +1080,10 @@ impl Service {
         let snapshot = self.store.live(&workspace)?;
         let snapshot_len = snapshot.len();
         trace.mark("snapshot");
+        // Dedupe and replacement stay inside the set the new claim names.
+        // Shape maintenance does not: a write in one set used to hand
+        // reconcile only that set's ids, and every other set's tokens were
+        // dropped and never rebuilt.
         let live: Vec<&Record> = match named.as_deref() {
             Some(name) => snapshot
                 .iter()
@@ -1093,14 +1097,13 @@ impl Service {
                 .collect(),
         };
         let shape = record::Shape::of(&atom);
-        // One id map per write serves the duplicate, replacement and linking
-        // rules; the candidates are the claims that could satisfy any of them.
-        let live_ids: HashSet<&str> = live
+        let workspace_live: Vec<&Record> = snapshot.iter().map(AsRef::as_ref).collect();
+        let workspace_ids: HashSet<&str> = workspace_live
             .iter()
             .filter_map(|peer| peer.get("id").and_then(Value::as_str))
             .collect();
-        self.reconcile_shapes(&workspace, &live_ids);
-        self.shape_workspace_once(&workspace, &live);
+        self.reconcile_shapes(&workspace, &workspace_ids);
+        self.shape_workspace_once(&workspace, &workspace_live);
         let by_id: HashMap<&str, &Record> = live
             .iter()
             .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, *p)))
@@ -2694,6 +2697,33 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    /// Text T in set s, then an unrelated claim with no set, then T in s
+    /// again: one claim. Reconciling shapes from the set being written
+    /// dropped every other set's tokens, and the second T was stored again.
+    #[test]
+    fn a_repeated_claim_in_a_set_stays_one_after_another_set_is_written() {
+        let (_dir, svc) = service();
+        let mut claim = atom("The token T is the claim that must stay one.");
+        claim.insert("set".into(), json!("s"));
+        let stored = svc.add(claim.clone()).unwrap();
+        let id = stored["id"].as_str().unwrap().to_string();
+        svc.add(atom("An unrelated claim sits in no set at all."))
+            .unwrap();
+        let again = svc.add(claim).unwrap();
+        assert_eq!(again["id"].as_str().unwrap(), id, "{again:?}");
+        let copies = svc
+            .store
+            .live("w")
+            .unwrap()
+            .iter()
+            .filter(|peer| {
+                peer.get("text").and_then(Value::as_str)
+                    == Some("The token T is the claim that must stay one.")
+            })
+            .count();
+        assert_eq!(copies, 1, "the second write stored another copy of T");
     }
 
     /// A deleted claim leaves no shape, and a third workspace does not keep

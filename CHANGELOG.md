@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A write in one set no longer drops the tokens of the workspace's other
+  sets. Duplicate detection reads those tokens, so the same text stored
+  again in the first set came back as a second claim. Shapes are
+  reconciled from the whole live workspace, and the first write in a
+  process shapes that whole workspace.
+
 - Idle release advises the database mapping. Advising the file leaves
   pages that are still mapped, so a quiet writer kept the database
   resident. The mapping stays open and the next read faults the pages
