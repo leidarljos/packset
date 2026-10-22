@@ -107,6 +107,12 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =pattern=, =verdict= | a =rule=: a glob over a command line and =deny= or =ask=; the text is the reason |
 | =issue=, =choice= | an =outcome=: the option an issue closed on; read beside the issue's ballots, it says which voters were right, so a settle can discount voters who err together |
 
+The =origin= and =source.basis= of a new post are what the client said.
+The writer checks their shape and keeps them from rising afterwards; it
+does not know who the client is. A client can create an atom as
+=user-declared= with a =person= basis, and the pack stores it so. Who may
+write as the person is the seat's decision (ljos), not the pack's.
+
 A =message= is one letter, a =receipt= is one read, and a =group= atom is one
 membership change. A later mail atom does not close an earlier one, and a
 repeat is kept. Search and recall leave mail out unless =kind= names it.
