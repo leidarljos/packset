@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The constant-corpus soak rewrites one set of claims and gives each
+  window a new vector. The field soak grows the corpus and returns one
+  constant, so a cache that still stores the JSON arrays passed it.
+  This one fails when that set costs more anonymous memory than the
+  float cache does.
+
 - An answer returns a client-supplied vector as it was stored. Scoring
   still uses f32. Rebuilding the JSON from those floats turned 0.1 into
   its approximation and an out-of-range value into null.
