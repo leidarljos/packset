@@ -900,6 +900,52 @@ mod tests {
         assert_eq!(fused[2]["cosine"], json!(0.71));
     }
 
+    /// A client reads `dense_rank` as the encoder's order. Weeks of age
+    /// must not put a weaker cosine ahead of a closer one: one day of the
+    /// fourteen-day half-life is about the gap between the first cosine
+    /// and the fifth.
+    #[test]
+    fn an_older_closer_atom_leads_the_dense_rank() {
+        let query = [1.0f32, 0.0];
+        // Four weeks before NOW. The closer vector is nearly the query.
+        // The fresh one is a weaker cosine, close enough that recency
+        // 0.25 against 1.0 reverses them when age is added to the score.
+        let weaker = atom(json!({
+            "id": "weaker",
+            "kind": "lesson",
+            "text": "the newer claim",
+            "ts": NOW,
+            "trust": 1.0,
+            "embedding": [0.94, 0.341],
+        }));
+        let closer = atom(json!({
+            "id": "closer",
+            "kind": "lesson",
+            "text": "the older claim",
+            "ts": "2025-12-04T00:00:00.000Z",
+            "trust": 1.0,
+            "embedding": [1.0, 0.08],
+        }));
+        let atoms = [weaker, closer];
+        let hits = search_dense(&ask("", "", &atoms, "", 10, None), &query);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(
+            hits[0]["cosine"].as_f64().unwrap() > hits[1]["cosine"].as_f64().unwrap(),
+            "the first dense hit is the closer cosine: {hits:?}"
+        );
+        assert_eq!(hits[0]["id"], "closer", "{hits:?}");
+        assert_eq!(hits[0]["ts"], "2025-12-04T00:00:00.000Z");
+        assert_eq!(hits[1]["id"], "weaker");
+        // Trust stays in the score. Age does not: the score is the cosine
+        // plus a tenth of trust, not that plus a half-life.
+        let score = hits[0]["score"].as_f64().unwrap();
+        let cos = hits[0]["cosine"].as_f64().unwrap();
+        assert!(
+            (score - (cos + 0.1)).abs() < 1e-3,
+            "dense score {score} is cosine {cos} plus trust, without age"
+        );
+    }
+
     #[test]
     fn a_hit_carries_its_claims_source_when_it_has_one() {
         let with = json!({"id": "a", "kind": "lesson", "text": "t",
