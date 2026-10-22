@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The reference's `origin` row says an `agent-derived` write and a
+  hook write are live at once, and are held as proposals only when
+  `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`. It said they
+  were always proposals until an accept.
+
 - `POST /v1/proposals/accept`, `POST /v1/atoms/delete` and
   `POST /v1/grade` answer a record with no origin as `unknown`, like
   the other writes. They returned the stored row as it was, so the
