@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Parsed workspaces stay bounded. `PACKSET_WORKSPACE_CACHE` (default 8,
+  `off` for no cap) is how many keep a live snapshot, an inverted index
+  and status counts. A seat that opens another checkout used to keep
+  every one of those until the process ended, and the cold ones sat in
+  swap. A workspace that falls out is read from the database again.
+
 - The reference's `origin` row says an `agent-derived` write and a
   hook write are live at once, and are held as proposals only when
   `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`. It said they
