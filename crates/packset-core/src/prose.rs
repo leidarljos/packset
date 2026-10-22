@@ -113,6 +113,18 @@ const INNER_DOT: char = '\u{2024}';
 /// Abbreviations whose stops never end a sentence.
 const DOTTED_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "a.k.a."];
 
+/// Largest index at or before `index` that begins a character.
+///
+/// `str::floor_char_boundary` is not in the 1.88 MSRV. A character is at
+/// most four bytes, so the walk is short.
+fn floor_char(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 /// `text` with every full stop that cannot end a sentence masked: one in a
 /// code span (`` `foo.rs. bar` ``), one followed at once by a letter, digit
 /// or `_` (`foo.rs`, `v0.29.1`, `.DS_Store`), and the stops of
@@ -157,11 +169,19 @@ fn mask_inner_dots(text: &str) -> String {
             from = 0;
         }
         for (a, b) in spans.into_iter().rev() {
-            let piece: String = masked[a..b]
+            // The index came from the lowercased note. A stop rewritten
+            // to U+2024 is three bytes, so the next span can name a byte
+            // inside that character. Floor back to a boundary.
+            let end = floor_char(&masked, b);
+            let start = floor_char(&masked, a.min(end));
+            if start >= end {
+                continue;
+            }
+            let piece: String = masked[start..end]
                 .chars()
                 .map(|c| if c == '.' { INNER_DOT } else { c })
                 .collect();
-            masked.replace_range(a..b, &piece);
+            masked.replace_range(start..end, &piece);
         }
     }
     masked
