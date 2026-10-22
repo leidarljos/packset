@@ -715,7 +715,7 @@ impl Service {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         let mut trace = WriteTrace::begin();
         trace.add("prepare", prepared);
-        self.add_prepared_traced(atom, trace)
+        self.add_prepared_traced(atom, trace, false)
     }
 
     /// Check a claim and fill the fields that depend on nothing stored.
@@ -767,22 +767,25 @@ impl Service {
         Ok(atom)
     }
 
-    /// Store a prepared claim, or return the live one that already says it.
+    /// Store an accepted claim, or return the live one that already says it.
+    /// This is the one write that may raise the provenance of a record it
+    /// replaces.
     fn add_prepared(&self, atom: Record) -> anyhow::Result<Record> {
-        self.add_prepared_traced(atom, WriteTrace::begin())
+        self.add_prepared_traced(atom, WriteTrace::begin(), true)
     }
 
-    /// Refuse a post whose id a tombstone in this workspace still holds.
+    /// Refuse a post whose id a tombstone in this workspace still holds,
+    /// else return the record the post would write over.
     ///
     /// The key is workspace and id together, so the same id in another
     /// workspace is a different atom. A scratch workspace that was
     /// forgotten has no tombstone, and its ids may be posted again.
-    fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<()> {
+    fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<Option<Record>> {
         if workspace.is_empty() || id.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(existing) = self.store.get(workspace, id)? else {
-            return Ok(());
+            return Ok(None);
         };
         if existing
             .get("tombstone")
@@ -793,7 +796,7 @@ impl Service {
                 "{id} is retired; a deleted atom does not come back under its old id"
             ))));
         }
-        Ok(())
+        Ok(Some(existing))
     }
 
     /// [`Self::add_prepared`] with the stage clock a write's trace reads.
@@ -801,12 +804,13 @@ impl Service {
         &self,
         mut atom: Record,
         mut trace: WriteTrace,
+        accepted: bool,
     ) -> anyhow::Result<Record> {
         // Before a proposal is filed, and before a duplicate is answered:
         // the id is retired even when the text matches what was deleted.
         let workspace = atom.get("workspace").and_then(Value::as_str).unwrap_or("");
         let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
-        self.refuse_retired(workspace, id)?;
+        let over = self.refuse_retired(workspace, id)?;
         if packset_core::atom::needs_accept(
             record::origin_of(&atom),
             record::hook_of(&atom),
@@ -875,6 +879,10 @@ impl Service {
         };
         if let Some(existing) = same_text {
             return Ok(existing.clone());
+        }
+        if let Some(stored) = over.as_ref().filter(|_| !accepted) {
+            record::hold_provenance(stored, &mut atom, "a post over an existing id")
+                .map_err(anyhow::Error::new)?;
         }
 
         trace.mark("dedup");
@@ -3077,6 +3085,54 @@ mod tests {
         let graded = svc.grade("w", id, true).unwrap();
         assert_eq!(graded["origin"], json!("agent-derived"));
         assert_eq!(graded[record::PROVENANCE_FLOOR], floor);
+    }
+
+    /// A post that names a live id writes over that record, so it takes
+    /// the update's rule: down or sideways, never up, and the floor stays.
+    #[test]
+    fn a_post_over_a_live_id_cannot_raise_its_provenance() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000006";
+        let post = |text: &str, origin: &str, basis: &str| {
+            let mut lesson = atom(text);
+            lesson.insert("id".into(), json!(id));
+            lesson.insert("kind".into(), json!("lesson"));
+            lesson.insert("origin".into(), json!(origin));
+            lesson.insert("source".into(), json!({"basis": basis, "via": "ljos"}));
+            lesson.insert(
+                record::PROVENANCE_FLOOR.into(),
+                json!({"origin": "user-declared", "basis": "person"}),
+            );
+            svc.add(lesson)
+        };
+        post(
+            "Prefer ripgrep when the tree is large.",
+            "user-declared",
+            "person",
+        )
+        .unwrap();
+        let down = post(
+            "The fuse is CombMNZ for this seat.",
+            "agent-derived",
+            "agent",
+        )
+        .unwrap();
+        let floor = json!({"origin": "agent-derived", "basis": "agent"});
+        assert_eq!(down[record::PROVENANCE_FLOOR], floor);
+
+        for (origin, basis, key) in [
+            ("user-declared", "agent", "origin"),
+            ("agent-derived", "person", "basis"),
+        ] {
+            let err = post("Reviews open with a check.", origin, basis).unwrap_err();
+            assert!(err.to_string().contains(key), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["text"], json!("The fuse is CombMNZ for this seat."));
+        }
+        let aside = post("Deploys wait for the green build.", "tool-echo", "agent").unwrap();
+        assert_eq!(aside["origin"], json!("tool-echo"));
+        assert_eq!(aside[record::PROVENANCE_FLOOR], floor);
     }
 
     /// ljos's agent write on a holding writer: the post is held, accept

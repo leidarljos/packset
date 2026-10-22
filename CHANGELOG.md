@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `POST /v1/atoms` with the id of a live record takes the update's
+  rule. The post writes over that record, so it was a second way to
+  relabel a lesson the person's: send the same id with
+  `user-declared` or a `person` basis and the record was replaced.
+  Such a post may lower the origin or basis, or keep them, and
+  carries `provenance_floor`; a rise is refused. Accept is still the
+  one way up.
+
 - A record keeps the lowest origin and basis it has held, as
   `provenance_floor`, and an update is checked against that as well
   as the pair it carries now. The writer sets it on the first update

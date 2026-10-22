@@ -53,7 +53,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | =GET /health= | =packsetd= |
 | =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave), and =search.ranks= (the top-k cuts this writer honours; an older writer omits =search=) |
 | =GET /v1/workspaces= | names with live counts |
-| =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate |
+| =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate; a post that names a live id writes over it and, like an update, cannot raise its =origin= or =source.basis= |
 | =GET /v1/atoms?workspace=&as_of== | live claims, or those live at =as_of= |
 | =GET /v1/atoms/<id>?workspace== | one record, whatever its state |
 | =POST /v1/atoms/update= | merge fields into one live claim |
@@ -88,7 +88,7 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =kind= | one of =voice=, =habit=, =cache-pointer=, =preference=, =lesson=, =goal=, =conclusion=, =card_line=, =summary=, =note=, =correction=, =belief=, =trust=, =persona=, =prediction=, =rule=, =outcome=, =message=, =receipt=, =group= |
 | =level= | =explicit= for a claim a person or seat wrote |
 | =origin= | =user-declared=, =agent-derived=, =tool-echo=, =external= or =peer=; a record with none reads as =user-declared= and stays unwritten. An =agent-derived= write and a hook write are proposals until an accept. Accept of a held write stores that atom and raises its origin to =user-declared=. An update may lower an origin or move it among the other four; only an accept makes one =user-declared=, and an update gives no origin to a record with none. A =source.basis= of =person= ranks above every other basis and above none, and an update does not stamp it. The same text held again is the open proposal already on file. Content typed =authoritative= on a tool echo or an external atom ranks and promotes at that origin |
-| =provenance_floor= | the writer's: the lowest =origin= and =source.basis= the record has held, set by the first update that lowers either; an update cannot rise above it, and a post or an update cannot set or clear it |
+| =provenance_floor= | the writer's: the lowest =origin= and =source.basis= the record has held, set by the first update, or post over its id, that lowers either; neither can rise above it, and a client cannot set or clear it |
 | =text= | the claim: at most two sentences of at most twenty-five words for an agent's proposal or a hook's write; a person's write past that is stored, with the reason in =prose.warning=; mail may be longer, up to 500 characters |
 | =workspace= | required |
 | =set= | optional; a checked name |
