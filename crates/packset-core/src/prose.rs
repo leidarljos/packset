@@ -621,4 +621,39 @@ mod tests {
         assert_eq!(syllables("reproducibility"), 7);
         assert_eq!(syllables(""), 1);
     }
+
+    /// `vs.` is rewritten so the stop is U+2024, three bytes. A note with
+    /// that abbreviation near char 160 then asks for byte 161, inside
+    /// the new character.
+    #[test]
+    fn a_vs_abbreviation_near_char_160_stays_one_sentence() {
+        let note = format!("{} vs. lease {}", "n".repeat(157), "m".repeat(98));
+        assert_eq!(note.chars().count(), 266);
+        assert_eq!(note.find("vs."), Some(158));
+        let got = sentences(&note);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("vs. lease"), "{got:?}");
+    }
+
+    /// é, an emoji and a CJK ideograph on the byte the cut asks for.
+    /// `İ` lowercases to a longer string, so the index of `vs.` falls
+    /// inside the following character instead of on a boundary.
+    #[test]
+    fn a_multibyte_char_on_the_cut_stays_whole() {
+        let cases = [
+            (format!("{} vs. é lease", "İ".repeat(2)), 'é', true),
+            (format!("{} vs. 😀 lease", "İ".repeat(4)), '😀', true),
+            (format!("{} vs. 字 lease", "İ".repeat(2)), '字', false),
+        ];
+        for (note, mark, one_sentence) in cases {
+            let got = sentences(&note);
+            let flat = got.join(" ");
+            assert!(flat.contains(mark), "{mark}: {got:?}");
+            assert!(flat.contains("vs."), "{mark}: {got:?}");
+            assert!(!flat.contains('\u{2024}'), "{mark}: {got:?}");
+            if one_sentence {
+                assert_eq!(got.len(), 1, "{mark}: {got:?}");
+            }
+        }
+    }
 }
