@@ -49,8 +49,8 @@ pub type Record = Map<String, Value>;
 
 /// One workspace's live set at a write count. `stored` is what a write
 /// folds into. `shown` is that set with links narrowed to ids present.
-/// `vectors` is the one copy of each atom's embedding; the records here
-/// keep `embedding: null` in its place.
+/// `vectors` is the one copy of each atom's embedding. The records here
+/// omit the key, so a null a client sent still means clear.
 struct Snapshot {
     generation: u64,
     stored: Vec<Record>,
@@ -493,9 +493,9 @@ impl Store {
                     _ => None,
                 });
             stamp_write(&mut payload, stored.as_ref(), now);
-            // A fire or a grade rewrites the record from the cache, and the
-            // cache does not carry the vector. Keep the array already stored
-            // so the file stays the row that was written.
+            // A fire or a grade rewrites the record from the cache, which
+            // does not carry the vector. A null or an empty array is a
+            // clear. A write that leaves the key off keeps what is stored.
             keep_stored_embedding(&mut payload, stored.as_ref());
             let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
             self.db.put(&mut wtxn, &key, &blob)?;
@@ -963,7 +963,7 @@ impl Store {
     /// the workspace is not parsed. A caller that also has the records
     /// wants [`Self::live_versioned`]: this is a second read, and the
     /// workspace may have left the cache since the records were taken.
-    /// The records from [`Self::live`] carry `embedding: null` in their place.
+    /// The records from [`Self::live`] omit `embedding` where a vector was lifted.
     pub fn vectors(&self, workspace: &str) -> Arc<HashMap<String, Arc<[f32]>>> {
         self.live
             .read()
@@ -1366,16 +1366,15 @@ struct Parked {
 }
 
 /// Lift `embedding` out of a clone of `record`. An array of numbers becomes
-/// floats and the clone keeps null. Anything else stays on the clone.
+/// floats and the key leaves the clone. A null on the clone would be the
+/// clear a client sends, and a fire copies this record back on a rewrite.
+/// Anything that is not a vector stays on the clone.
 fn park(record: &Record) -> Parked {
     let mut lean = record.clone();
     let named = lean.contains_key("embedding");
     let vector = match lean.remove("embedding") {
         Some(Value::Array(items)) if !items.is_empty() => match floats_of(&items) {
-            Some(parsed) => {
-                lean.insert("embedding".into(), Value::Null);
-                Some(Arc::from(parsed))
-            }
+            Some(parsed) => Some(Arc::from(parsed)),
             None => {
                 lean.insert("embedding".into(), Value::Array(items));
                 None
@@ -1424,15 +1423,11 @@ pub(crate) fn restore_embedding(atom: &mut Record, vectors: &HashMap<String, Arc
     atom.insert("embedding".into(), embedding_json(vector));
 }
 
-/// A rewrite that did not bring a vector keeps the array already stored.
-/// The cache hands back null, and dropping that null would erase the vector
-/// from the file.
+/// A rewrite that did not name `embedding` keeps the array already stored.
+/// Null and `[]` are a clear. Restoring over those made a vector impossible
+/// to drop, and an update of the text then kept the old meaning.
 fn keep_stored_embedding(payload: &mut Record, stored: Option<&Record>) {
-    if payload
-        .get("embedding")
-        .and_then(Value::as_array)
-        .is_some_and(|items| !items.is_empty())
-    {
+    if payload.contains_key("embedding") {
         return;
     }
     let Some(existing) = stored.and_then(|row| row.get("embedding")) else {
@@ -2219,7 +2214,7 @@ mod tests {
             .unwrap();
         let live = store.live("w").unwrap();
         assert!(
-            live[0].get("embedding").unwrap().is_null(),
+            live[0].get("embedding").is_none(),
             "the cache kept the JSON array"
         );
         let cached = store.vectors("w");
@@ -2239,12 +2234,47 @@ mod tests {
         assert_eq!(disk["text"], json!("a lesson about vectors revised"));
         assert_eq!(disk["embedding"].as_array().unwrap().len(), 384);
         assert_eq!(store.vectors("w").get("a").unwrap().len(), 384);
-        assert!(store.live("w").unwrap()[0]
-            .get("embedding")
-            .unwrap()
-            .is_null());
+        assert!(store.live("w").unwrap()[0].get("embedding").is_none());
         // The second write reused the float buffer when the numbers matched.
         assert!(Arc::ptr_eq(got, store.vectors("w").get("a").unwrap()));
+    }
+
+    /// Null and an empty array are a clear. Omitting the key is not.
+    #[test]
+    fn a_null_or_empty_embedding_clears_the_stored_vector() {
+        let (_dir, store) = store();
+        let write = |embedding: Value| {
+            store
+                .upsert(&record(json!({
+                    "id": "a",
+                    "workspace": "w",
+                    "text": "a lesson about vectors",
+                    "embedding": embedding,
+                })))
+                .unwrap();
+        };
+        write(json!([0.2, 0.4, 0.6]));
+        let snap = store.live_versioned("w").unwrap();
+        assert_eq!(snap.vectors.get("a").map(|v| v.len()), Some(3));
+        write(Value::Null);
+        let disk = store.get("w", "a").unwrap().unwrap();
+        assert!(disk["embedding"].is_null(), "{disk:?}");
+        assert!(store
+            .live_versioned("w")
+            .unwrap()
+            .vectors
+            .get("a")
+            .is_none());
+        write(json!([0.2, 0.4, 0.6]));
+        write(json!([]));
+        let disk = store.get("w", "a").unwrap().unwrap();
+        assert_eq!(disk["embedding"], json!([]));
+        assert!(store
+            .live_versioned("w")
+            .unwrap()
+            .vectors
+            .get("a")
+            .is_none());
     }
 
     /// Advising the database cold and trimming the heap leaves a claim readable.
@@ -2338,7 +2368,7 @@ mod tests {
             .live("w")
             .unwrap()
             .iter()
-            .all(|atom| atom.get("embedding").is_some_and(Value::is_null)));
+            .all(|atom| atom.get("embedding").is_none()));
         assert!(grown < 2048, "anon grew {grown} KiB for 64 cached vectors");
     }
 

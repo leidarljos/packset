@@ -1385,9 +1385,18 @@ impl Service {
             } else {
                 Some(stored.get("origin").cloned())
             };
+        let text_changed = fields
+            .get("text")
+            .is_some_and(|next| stored.get("text") != Some(next));
         let mut updated = Record::clone(stored);
         for (key, value) in fields {
             updated.insert(key.clone(), value.clone());
+        }
+        // The cached record has no embedding key. A new sentence without a
+        // new vector would otherwise keep the old one, and dense search
+        // would score the new text with the old meaning.
+        if text_changed && !fields.contains_key("embedding") {
+            updated.insert("embedding".into(), Value::Null);
         }
         updated.insert("id".into(), Value::String(id.to_string()));
         updated.insert("workspace".into(), Value::String(workspace.to_string()));
@@ -2856,10 +2865,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(svc.store.live("w").unwrap()[0]
-            .get("embedding")
-            .unwrap()
-            .is_null());
+        assert!(svc.store.live("w").unwrap()[0].get("embedding").is_none());
         svc.fire("w", &["a".into(), "b".into()]).unwrap();
         for id in ["a", "b"] {
             let disk = svc.store.get("w", id).unwrap().unwrap();
@@ -2870,6 +2876,57 @@ mod tests {
             );
         }
         assert_eq!(svc.store.vectors("w").len(), 2);
+    }
+
+    /// A new sentence drops the old vector. A new vector sent with it is
+    /// kept, and a field that is not the text leaves the vector alone.
+    /// Null clears without a text change.
+    #[test]
+    fn an_update_that_changes_the_text_drops_the_old_vector() {
+        let (_dir, svc) = service();
+        svc.store
+            .upsert(
+                json!({
+                    "id": "a",
+                    "workspace": "w",
+                    "text": "the old sentence about the river",
+                    "kind": "lesson",
+                    "origin": "user-declared",
+                    "embedding": [0.2, 0.4, 0.6],
+                    "tombstone": false,
+                })
+                .as_object()
+                .unwrap(),
+            )
+            .unwrap();
+        let mut fields = Map::new();
+        fields.insert("text".into(), json!("the new sentence about the mountain"));
+        svc.update("w", "a", &fields).unwrap();
+        let disk = svc.store.get("w", "a").unwrap().unwrap();
+        assert!(disk["embedding"].is_null(), "old vector kept: {disk:?}");
+        assert!(svc.store.vectors("w").get("a").is_none());
+
+        fields.insert("embedding".into(), json!([0.1, 0.2, 0.3]));
+        fields.insert(
+            "text".into(),
+            json!("the newer sentence about the mountain"),
+        );
+        svc.update("w", "a", &fields).unwrap();
+        let disk = svc.store.get("w", "a").unwrap().unwrap();
+        assert_eq!(disk["embedding"], json!([0.1, 0.2, 0.3]));
+
+        let mut quiet = Map::new();
+        quiet.insert("level".into(), json!("explicit"));
+        svc.update("w", "a", &quiet).unwrap();
+        let disk = svc.store.get("w", "a").unwrap().unwrap();
+        assert_eq!(disk["embedding"], json!([0.1, 0.2, 0.3]));
+
+        let mut clear = Map::new();
+        clear.insert("embedding".into(), Value::Null);
+        svc.update("w", "a", &clear).unwrap();
+        let disk = svc.store.get("w", "a").unwrap().unwrap();
+        assert!(disk["embedding"].is_null(), "{disk:?}");
+        assert!(svc.store.vectors("w").get("a").is_none());
     }
 
     /// A deleted claim leaves no shape, and a third workspace does not keep

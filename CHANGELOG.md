@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A write that sends `embedding: null` or `[]` clears the stored vector,
+  and an update that changes the text drops the old vector unless it
+  sends a new one. A rewrite that does not name the field, such as a
+  fire, still keeps the array. The cache omits the key where it holds
+  a vector, so that null is not mistaken for a clear.
+
 - A listing, a recall, a pack and a search read an atom's record and its
   vector from one snapshot. They used to be two cache lookups, so a
   workspace that left the cache between them, or a scan a write raced,
