@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A rewrite in the same millisecond as a record's previous write
+  updates the search index. The index compared write stamps, and a
+  stamp is only a millisecond, so a second write in that millisecond
+  kept the first write's tokens. The index now follows a hash of the
+  text and entities it indexes.
+
 - `POST /v1/forget` (and `packset forget`) keeps a workspace's
   tombstones. It removed every key, so after a forget a deleted id
   could be posted again, and a lesson a person had withdrawn came

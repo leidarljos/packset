@@ -34,30 +34,64 @@ type Snapshot = (u64, Vec<Record>, Live, HashSet<String>);
 /// A workspace's live set, one `Arc` per record.
 pub type Live = Arc<Vec<Arc<Record>>>;
 
-/// A workspace's index at one generation: the id and stamp of each atom
-/// the index was built over, in order, beside the index and its tokens.
-/// The atoms themselves are not held here, so the live set stays unshared
-/// between writes and a write edits it in place rather than copying it.
+/// A workspace's index at one generation: the id and content hash of
+/// each atom the index was built over, in order, beside the index and
+/// its tokens. The atoms themselves are not held here, so the live set
+/// stays unshared between writes and a write edits it in place rather
+/// than copying it.
 type Searchable = (
     u64,
     (Vec<(String, String)>, Arc<Index>, Arc<Vec<Vec<String>>>),
 );
 
-/// The id and last write stamp of each atom, the fingerprint an index is
-/// keyed on.
+/// The id and a hash of the indexed fields of each atom, the fingerprint
+/// an index is keyed on.
+///
+/// The write stamp is not the fingerprint. It has millisecond resolution,
+/// so a rewrite in the same millisecond as the previous write compared
+/// equal and the index kept the old tokens.
 fn fingerprint(atoms: &[Arc<Record>]) -> Vec<(String, String)> {
     atoms
         .iter()
-        .map(|a| {
+        .map(|atom| {
             (
-                a.get("id")
+                atom.get("id")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                written_last(a).to_string(),
+                indexed_hash(atom),
             )
         })
         .collect()
+}
+
+/// Hash of the text and entities [`packset_core::search::atom_tokens`]
+/// reads. Either changing is a different document. The clock is not an
+/// input: two writes in one millisecond still compare unequal when the
+/// text does.
+fn indexed_hash(atom: &Record) -> String {
+    // FNV-1a, 128 bits. A collision would leave a stale document, which
+    // is the failure this comparison exists to prevent, so 64 bits is
+    // too narrow for a pack that keeps growing.
+    let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58du128;
+    let mut mix = |text: &str| {
+        let bytes = text.as_bytes();
+        let len = (bytes.len() as u64).to_le_bytes();
+        for byte in len.into_iter().chain(bytes.iter().copied()) {
+            hash ^= u128::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_0000_0000_0000_013b);
+        }
+    };
+    mix(atom.get("text").and_then(Value::as_str).unwrap_or(""));
+    if let Some(Value::Array(items)) = atom.get("entities") {
+        for item in items {
+            match item.as_str() {
+                Some(name) => mix(name),
+                None => mix(&item.to_string()),
+            }
+        }
+    }
+    format!("{hash:032x}")
 }
 
 /// When a record was last written: `updated`, else `ts` on a record no
@@ -363,7 +397,14 @@ impl Store {
     ///
     /// Fails when a record has no workspace or id, or when the write does.
     pub fn upsert_many(&self, atoms: &[Record]) -> anyhow::Result<Vec<Record>> {
-        let now = packset_core::clock::utcnow();
+        self.upsert_many_at(atoms, &packset_core::clock::utcnow())
+    }
+
+    /// Write `atoms` stamped with `now`.
+    ///
+    /// The clock is an argument so a test can place two writes in one
+    /// millisecond. The index follows the text either way.
+    fn upsert_many_at(&self, atoms: &[Record], now: &str) -> anyhow::Result<Vec<Record>> {
         let mut written = Vec::with_capacity(atoms.len());
         let mut wtxn = self.env.write_txn()?;
         for atom in atoms {
@@ -388,7 +429,7 @@ impl Store {
                     Value::Object(map) => Some(map),
                     _ => None,
                 });
-            stamp_write(&mut payload, stored.as_ref(), &now);
+            stamp_write(&mut payload, stored.as_ref(), now);
             let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
             self.db.put(&mut wtxn, &key, &blob)?;
             written.push(payload);
@@ -553,8 +594,10 @@ impl Store {
     /// A write patches the live set in place, so the cached set is usually
     /// the new one with records rewritten at their positions and appended at
     /// the end. The index follows the same way: a rewritten record is
-    /// re-indexed under its ordinal, an appended one is pushed, and only a
-    /// set whose order moved is rebuilt from scratch.
+    /// re-indexed under its ordinal when its text or entities change, an
+    /// appended one is pushed, and only a set whose order moved is rebuilt
+    /// from scratch. The change is a hash of those fields. The write stamp
+    /// is a millisecond, so it cannot say that a rewrite happened.
     ///
     /// # Errors
     ///
@@ -586,10 +629,10 @@ impl Store {
             {
                 let idx = Arc::make_mut(&mut index);
                 let docs = Arc::make_mut(&mut documents);
-                for (ordinal, ((_, old_stamp), new)) in
+                for (ordinal, ((_, old_hash), new)) in
                     old_atoms.iter().zip(atoms.iter()).enumerate()
                 {
-                    if old_stamp.as_str() != written_last(new) {
+                    if old_hash.as_str() != indexed_hash(new) {
                         let tokens = packset_core::search::atom_tokens(new);
                         idx.replace(ordinal, &docs[ordinal], &tokens);
                         docs[ordinal] = tokens;
@@ -1852,6 +1895,59 @@ mod snapshot_tests {
                 json!({"id": "d", "workspace": "w", "text": "delta eta"}),
             ))
             .unwrap();
+        assert_index_matches_a_fresh_build(&store, "w");
+    }
+
+    #[test]
+    fn a_rewrite_in_the_same_millisecond_updates_the_index() {
+        let (_dir, store) = store();
+        // Both writes are stamped with one instant. A clock that has
+        // moved on would hide the bug this guards.
+        let now = "2026-10-22T00:00:00.000Z";
+        store
+            .upsert_many_at(
+                &[record(json!({
+                    "id": "a", "workspace": "w", "text": "alpha beta"
+                }))],
+                now,
+            )
+            .unwrap();
+        store
+            .upsert_many_at(
+                &[record(json!({
+                    "id": "b", "workspace": "w", "text": "beta gamma"
+                }))],
+                now,
+            )
+            .unwrap();
+        assert_index_matches_a_fresh_build(&store, "w");
+        store
+            .upsert_many_at(
+                &[record(json!({
+                    "id": "b", "workspace": "w", "text": "epsilon zeta"
+                }))],
+                now,
+            )
+            .unwrap();
+        let rewritten = store.get("w", "b").unwrap().unwrap();
+        assert_eq!(
+            rewritten[UPDATED],
+            json!(now),
+            "the rewrite stayed in that millisecond"
+        );
+        assert_index_matches_a_fresh_build(&store, "w");
+        // Entities are part of the document. The stamp is still `now`.
+        store
+            .upsert_many_at(
+                &[record(json!({
+                    "id": "b", "workspace": "w", "text": "epsilon zeta",
+                    "entities": ["deed-index-flake"]
+                }))],
+                now,
+            )
+            .unwrap();
+        let with_entity = store.get("w", "b").unwrap().unwrap();
+        assert_eq!(with_entity[UPDATED], json!(now));
         assert_index_matches_a_fresh_build(&store, "w");
     }
 
