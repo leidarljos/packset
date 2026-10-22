@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## 0.16.0 (2026-10-22)
+## Unreleased
 
 - The cached-vector RSS check measures a child process. It reads
   anonymous memory for the whole test process, so a neighbour running
@@ -35,6 +35,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   vector from one snapshot. They used to be two cache lookups, so a
   workspace that left the cache between them, or a scan a write raced,
   answered `embedding: null` and dropped the dense ballot.
+
+## 0.16.0 (2026-10-22)
 
 - The field soak drives several clients at once, a fake 384-d encoder,
   more workspaces than the cache holds, set-scoped writes and
