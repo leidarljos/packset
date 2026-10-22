@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.16.0 (2026-10-22)
 
 - The field soak drives several clients at once, a fake 384-d encoder,
   more workspaces than the cache holds, set-scoped writes and
