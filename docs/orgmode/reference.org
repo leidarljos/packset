@@ -145,6 +145,7 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 | =PACKSET_SHAPE_CAP= | writer | claims whose tokens are kept for the replacement rule; default 65536, =off= for no cap; a claim that leaves the live set drops its tokens, and a workspace that falls out is shaped again on its next write |
 | =PACKSET_FIRE_CAP= | writer | recent fires and activation cues kept for the hour; default 4096, =off= for no cap; past it the oldest are dropped |
 | =PACKSET_BACKFILL_CAP= | writer | set names remembered as already uploaded into the search index; default 1024, =off= for no cap; a set that falls out is uploaded once more on its next scoped search |
+| =PACKSET_IDLE_TRIM= | =packsetd= | seconds of quiet before free heap is returned and cached database pages are dropped; default 60, =off= to keep them; the next request faults the pages it needs |
 | =PACKSET_TRACE_WRITES= | writer | a file that receives one line per write with the time each stage took |
 | =PACKSET_EMBED_QUERY_WORKERS= | writer | query encoders kept side by side, default 1; each loads one model into memory; a waiter takes whichever slot frees first; a batch spreads over the free slots; writes yield a slot to a waiting query |
 | =PACKSET_STEM= | writer | =off= turns lexical stemming off |

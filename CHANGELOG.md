@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- After a quiet minute the writer returns free heap to the kernel and
+  drops cached pages of the database. `PACKSET_IDLE_TRIM` is that
+  wait in seconds (default 60, `off` to keep the pages). glibc holds
+  the high-water mark of a burst in per-thread arenas, and the mapped
+  database stays resident, so a laptop that had been idle still had
+  the whole working set in swap. The next request faults the pages it
+  needs. The mapping itself stays open.
+
 - The set-backfill memory stays bounded. `PACKSET_BACKFILL_CAP`
   (default 1024, `off` for no cap) is how many set names one process
   remembers having uploaded into the search index. A set that falls

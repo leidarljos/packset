@@ -252,6 +252,8 @@ pub struct Store {
     cache_clock: AtomicU64,
     /// The tick of each workspace last read or written.
     cache_used: Mutex<HashMap<String, u64>>,
+    /// `memory.lmdb`, so an idle release can advise its pages.
+    db_dir: std::path::PathBuf,
     #[cfg(test)]
     counted: AtomicU64,
     #[cfg(test)]
@@ -320,6 +322,7 @@ impl Store {
             workspace_cache: AtomicUsize::new(workspace_cache_from_env()),
             cache_clock: AtomicU64::new(1),
             cache_used: Mutex::new(HashMap::new()),
+            db_dir: db_path,
             #[cfg(test)]
             counted: AtomicU64::new(0),
             #[cfg(test)]
@@ -631,6 +634,30 @@ impl Store {
     #[cfg(test)]
     pub fn cached_workspaces(&self) -> usize {
         self.live.read().map(|cache| cache.len()).unwrap_or(0)
+    }
+
+    /// Return free heap to the kernel and drop the database's cached pages.
+    /// The mapping stays; the next read faults the pages it needs. Called
+    /// after a quiet stretch, when the high-water mark of a burst would
+    /// otherwise sit in swap until the process ends.
+    pub fn release_idle(&self) {
+        self.release_pages();
+        release_heap();
+    }
+
+    fn release_pages(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let path = self.db_dir.join("data.mdb");
+            let Ok(file) = File::open(&path) else {
+                return;
+            };
+            // SAFETY: the advice names a file this process has open. Dropping
+            // cached pages does not change the bytes. The next read faults
+            // them back in.
+            let _ = unsafe { posix_fadvise(file.as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED) };
+        }
     }
 
     /// The live and due records in one workspace, parsed once per write and
@@ -1312,6 +1339,32 @@ extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
+/// Ask glibc to return free arenas to the kernel. A burst allocates the
+/// high-water mark into per-thread arenas and, without this, holds it
+/// until the process ends.
+#[cfg(target_env = "gnu")]
+fn release_heap() {
+    // SAFETY: trim does not move live allocations.
+    let _ = unsafe { malloc_trim(0) };
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn release_heap() {}
+
+#[cfg(target_env = "gnu")]
+extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// `POSIX_FADV_DONTNEED`.
+#[cfg(target_os = "linux")]
+const POSIX_FADV_DONTNEED: i32 = 4;
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1854,6 +1907,19 @@ mod tests {
             }
         });
         assert_eq!(store.counted.load(Ordering::SeqCst) - before, 1);
+    }
+
+    /// Advising the database cold and trimming the heap leaves a claim readable.
+    #[test]
+    fn releasing_idle_memory_leaves_the_claim_readable() {
+        let (_dir, store) = store();
+        store
+            .upsert(&record(
+                json!({"id": "a", "workspace": "w", "text": "a", "kind": "lesson"}),
+            ))
+            .unwrap();
+        store.release_idle();
+        assert_eq!(store.get("w", "a").unwrap().unwrap()["text"], json!("a"));
     }
 
     /// A cap of two keeps the workspaces just read and drops the cold one.
