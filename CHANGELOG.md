@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An update is checked on the record it would leave. A record written
+  before `origin` existed ranks below every origin, so an update
+  cannot name one for it; an update of its other fields still leaves
+  the field unset. Before, the missing field was read as
+  `user-declared` for the check, and any origin could be written
+  over it.
+
 - An update cannot raise an origin or a basis by a detour. Origins
   now sit in one order with `user-declared` above the rest, so a
   lesson moved to `tool-echo`, `peer` or `external` is not relabelled

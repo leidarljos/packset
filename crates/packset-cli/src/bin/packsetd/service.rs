@@ -326,9 +326,6 @@ fn live_cap_from_env() -> usize {
     }
 }
 
-/// Why an update cannot raise an origin.
-const LAUNDERED_ORIGIN: &str = "an origin reaches user-declared only through accept";
-
 /// Whether `origin` is missing, null, or an empty string.
 fn origin_is_blank(value: Option<&Value>) -> bool {
     match value {
@@ -336,52 +333,6 @@ fn origin_is_blank(value: Option<&Value>) -> bool {
         Some(Value::String(text)) if text.is_empty() => true,
         _ => false,
     }
-}
-
-/// The text a refusal shows for an origin `validate` will not keep.
-fn origin_shown(value: &Value) -> String {
-    match value {
-        Value::Null => "None".into(),
-        Value::String(text) if text.is_empty() => "None".into(),
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// Refuse an origin update that would raise the origin without accept.
-///
-/// Null and `""` are the values `validate` would default to `user-declared`,
-/// which is a rise from any other origin, so an update may not send them.
-fn refuse_origin_update(current: &Record, raw: &Value) -> Result<(), AtomError> {
-    if let Value::String(to) = raw {
-        if packset_core::atom::known_origin(to) {
-            if packset_core::atom::launders(record::origin_of(current), to) {
-                return Err(AtomError(LAUNDERED_ORIGIN.into()));
-            }
-            return Ok(());
-        }
-    }
-    let shown = origin_shown(raw);
-    Err(AtomError(format!("unknown atom origin: {shown}")))
-}
-
-/// `source.basis`, trimmed and without case, when `source` is an object.
-fn basis_name(value: Option<&Value>) -> Option<String> {
-    let raw = value?.as_object()?.get("basis")?.as_str()?.trim();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_ascii_lowercase())
-    }
-}
-
-/// Whether this update would raise `source.basis` to person.
-fn basis_rises(stored: Option<&Value>, incoming: Option<&Value>) -> bool {
-    let Some(incoming) = incoming else {
-        return false;
-    };
-    packset_core::atom::basis_rank(basis_name(Some(incoming)).as_deref())
-        > packset_core::atom::basis_rank(basis_name(stored).as_deref())
 }
 
 impl Service {
@@ -1095,28 +1046,30 @@ impl Service {
         fields: &Map<String, Value>,
     ) -> anyhow::Result<Record> {
         let current = self.store.live(workspace)?;
-        let mut updated = current
+        let stored = current
             .iter()
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-            .map(|a| Record::clone(a))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
+        // Null and "" are what validate defaults to user-declared, which
+        // is a rise from any other origin.
+        if fields
+            .get("origin")
+            .is_some_and(|raw| origin_is_blank(Some(raw)))
+        {
+            return Err(anyhow::Error::new(AtomError(
+                "unknown atom origin: None".into(),
+            )));
+        }
         // An update that does not name origin must not gain the default.
         // Validate writes user-declared for a missing field, which is right
         // for a new post and wrong for a record that never had one.
         let blank_origin =
-            if fields.contains_key("origin") || !origin_is_blank(updated.get("origin")) {
+            if fields.contains_key("origin") || !origin_is_blank(stored.get("origin")) {
                 None
             } else {
-                Some(updated.get("origin").cloned())
+                Some(stored.get("origin").cloned())
             };
-        if let Some(raw) = fields.get("origin") {
-            refuse_origin_update(&updated, raw).map_err(anyhow::Error::new)?;
-        }
-        if basis_rises(updated.get("source"), fields.get("source")) {
-            return Err(anyhow::Error::new(AtomError(
-                "an update cannot raise source.basis to person".into(),
-            )));
-        }
+        let mut updated = Record::clone(stored);
         for (key, value) in fields {
             updated.insert(key.clone(), value.clone());
         }
@@ -1134,6 +1087,7 @@ impl Service {
                 }
             }
         }
+        record::hold_provenance(stored, &updated, "an update").map_err(anyhow::Error::new)?;
 
         let now = clock::utcnow();
         let mut batch = Vec::new();
@@ -3115,6 +3069,21 @@ mod tests {
             .unwrap()
             .get("origin")
             .is_none());
+
+        // No origin is the bottom of the order. Naming one is a rise.
+        for named in ["user-declared", "agent-derived"] {
+            let mut fields = Map::new();
+            fields.insert("origin".into(), json!(named));
+            let err = svc.update("w", &id, &fields).unwrap_err();
+            assert!(err.to_string().contains("origin"), "{err}");
+            assert!(svc
+                .store
+                .get("w", &id)
+                .unwrap()
+                .unwrap()
+                .get("origin")
+                .is_none());
+        }
     }
 
     #[test]

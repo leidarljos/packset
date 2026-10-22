@@ -708,6 +708,85 @@ pub fn is_live_at(atom: &Map<String, Value>, at: &str) -> bool {
     )
 }
 
+/// The origin and `source.basis` a record stands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    /// A known origin, else [`crate::atom::UNKNOWN_ORIGIN`].
+    pub origin: String,
+    /// The basis, trimmed and lower case, when there is one.
+    pub basis: Option<String>,
+}
+
+impl Provenance {
+    fn read(origin: Option<&Value>, basis: Option<&Value>) -> Self {
+        let origin = origin
+            .and_then(Value::as_str)
+            .filter(|name| crate::atom::known_origin(name))
+            .unwrap_or(crate::atom::UNKNOWN_ORIGIN);
+        let basis = basis
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_ascii_lowercase);
+        Self {
+            origin: origin.to_string(),
+            basis,
+        }
+    }
+
+    /// What `atom` stands on now. A basis counts only as a string under
+    /// an object `source`.
+    #[must_use]
+    pub fn of(atom: &Map<String, Value>) -> Self {
+        let basis = atom
+            .get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("basis"));
+        Self::read(atom.get("origin"), basis)
+    }
+
+    fn ranks(&self) -> (u8, u8) {
+        (
+            crate::atom::origin_rank(&self.origin),
+            crate::atom::basis_rank(self.basis.as_deref()),
+        )
+    }
+}
+
+/// Refuse a write over `stored` that would leave `after` with a higher
+/// origin or basis than `stored` stands on.
+///
+/// `what` names the write in the refusal. Accept is the one rise, and it
+/// does not come through here.
+///
+/// # Errors
+///
+/// [`AtomError`] when either part would rise.
+pub fn hold_provenance(
+    stored: &Map<String, Value>,
+    after: &Map<String, Value>,
+    what: &str,
+) -> Result<(), AtomError> {
+    let floor = Provenance::of(stored);
+    let next = Provenance::of(after);
+    let (floor_origin, floor_basis) = floor.ranks();
+    let (next_origin, next_basis) = next.ranks();
+    if next_origin > floor_origin {
+        return Err(AtomError(format!(
+            "{what} cannot raise origin from {} to {}; only accept raises an origin",
+            floor.origin, next.origin
+        )));
+    }
+    if next_basis > floor_basis {
+        return Err(AtomError(format!(
+            "{what} cannot raise source.basis from {} to {}",
+            floor.basis.as_deref().unwrap_or("none"),
+            crate::atom::PERSON_BASIS
+        )));
+    }
+    Ok(())
+}
+
 /// The origin on a record. A missing or empty field reads as
 /// [`crate::atom::USER_DECLARED`] and the map is not written.
 #[must_use]
