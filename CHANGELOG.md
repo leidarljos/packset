@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The set-backfill memory stays bounded. `PACKSET_BACKFILL_CAP`
+  (default 1024, `off` for no cap) is how many set names one process
+  remembers having uploaded into the search index. A set that falls
+  out is uploaded once more on its next scoped search. A writer that
+  minted a new set per run used to keep every name until it exited.
+
 - The fire-hold map stays bounded. `PACKSET_FIRE_CAP` (default 4096,
   `off` for no cap) is how many recent fires and cues are remembered
   for the hour. A cue used to be inserted without dropping the expired
