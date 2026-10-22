@@ -708,6 +708,9 @@ pub fn is_live_at(atom: &Map<String, Value>, at: &str) -> bool {
     )
 }
 
+/// Where the writer keeps the lowest origin and basis a record has held.
+pub const PROVENANCE_FLOOR: &str = "provenance_floor";
+
 /// The origin and `source.basis` a record stands on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
@@ -745,16 +748,51 @@ impl Provenance {
         Self::read(atom.get("origin"), basis)
     }
 
+    /// The lowest `atom` has held: its [`PROVENANCE_FLOOR`] and what it
+    /// stands on now, whichever ranks lower in each part.
+    #[must_use]
+    pub fn floor(atom: &Map<String, Value>) -> Self {
+        let now = Self::of(atom);
+        match atom.get(PROVENANCE_FLOOR).and_then(Value::as_object) {
+            Some(kept) => Self::read(kept.get("origin"), kept.get("basis")).lower(&now),
+            None => now,
+        }
+    }
+
+    /// Each part from whichever side ranks lower. A tie keeps `self`.
+    #[must_use]
+    pub fn lower(&self, other: &Self) -> Self {
+        let origin =
+            if crate::atom::origin_rank(&other.origin) < crate::atom::origin_rank(&self.origin) {
+                other.origin.clone()
+            } else {
+                self.origin.clone()
+            };
+        let basis = if crate::atom::basis_rank(other.basis.as_deref())
+            < crate::atom::basis_rank(self.basis.as_deref())
+        {
+            other.basis.clone()
+        } else {
+            self.basis.clone()
+        };
+        Self { origin, basis }
+    }
+
     fn ranks(&self) -> (u8, u8) {
         (
             crate::atom::origin_rank(&self.origin),
             crate::atom::basis_rank(self.basis.as_deref()),
         )
     }
+
+    fn to_value(&self) -> Value {
+        serde_json::json!({"origin": self.origin, "basis": self.basis})
+    }
 }
 
 /// Refuse a write over `stored` that would leave `after` with a higher
-/// origin or basis than `stored` stands on.
+/// origin or basis than the lowest `stored` has held, and carry that
+/// lowest onto `after` as [`PROVENANCE_FLOOR`].
 ///
 /// `what` names the write in the refusal. Accept is the one rise, and it
 /// does not come through here.
@@ -764,10 +802,10 @@ impl Provenance {
 /// [`AtomError`] when either part would rise.
 pub fn hold_provenance(
     stored: &Map<String, Value>,
-    after: &Map<String, Value>,
+    after: &mut Map<String, Value>,
     what: &str,
 ) -> Result<(), AtomError> {
-    let floor = Provenance::of(stored);
+    let floor = Provenance::floor(stored);
     let next = Provenance::of(after);
     let (floor_origin, floor_basis) = floor.ranks();
     let (next_origin, next_basis) = next.ranks();
@@ -783,6 +821,11 @@ pub fn hold_provenance(
             floor.basis.as_deref().unwrap_or("none"),
             crate::atom::PERSON_BASIS
         )));
+    }
+    if stored.contains_key(PROVENANCE_FLOOR) || next.ranks() != Provenance::of(stored).ranks() {
+        after.insert(PROVENANCE_FLOOR.into(), floor.lower(&next).to_value());
+    } else {
+        after.remove(PROVENANCE_FLOOR);
     }
     Ok(())
 }

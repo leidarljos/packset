@@ -729,6 +729,7 @@ impl Service {
             anyhow::bail!(AtomError("tool dump is attach, not an atom".into()));
         }
         record::validate(&mut atom).map_err(anyhow::Error::new)?;
+        atom.remove(record::PROVENANCE_FLOOR);
 
         if atom
             .get("id")
@@ -1087,7 +1088,7 @@ impl Service {
                 }
             }
         }
-        record::hold_provenance(stored, &updated, "an update").map_err(anyhow::Error::new)?;
+        record::hold_provenance(stored, &mut updated, "an update").map_err(anyhow::Error::new)?;
 
         let now = clock::utcnow();
         let mut batch = Vec::new();
@@ -3026,6 +3027,81 @@ mod tests {
             let got = svc.store.get("w", id).unwrap().unwrap();
             assert_eq!(got["source"], hidden, "{got:?}");
         }
+    }
+
+    /// What went down stays down. The record keeps the lowest origin and
+    /// basis it has held, and the floor is the writer's: a post cannot
+    /// forge it and an update can neither clear nor raise it.
+    #[test]
+    fn provenance_that_went_down_does_not_come_back() {
+        let (_dir, svc) = service();
+        let id = "prefid00000000000000000000000001";
+        let mut pref = atom("Prefer ripgrep when the tree is large.");
+        pref.insert("id".into(), json!(id));
+        pref.insert("kind".into(), json!("preference"));
+        pref.insert("origin".into(), json!("user-declared"));
+        pref.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+        pref.insert(
+            record::PROVENANCE_FLOOR.into(),
+            json!({"origin": "tool-echo", "basis": null}),
+        );
+        let stored = svc.add(pref).unwrap();
+        assert!(stored.get(record::PROVENANCE_FLOOR).is_none(), "{stored:?}");
+
+        let mut down = Map::new();
+        down.insert("origin".into(), json!("agent-derived"));
+        down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        let lowered = svc.update("w", id, &down).unwrap();
+        let floor = json!({"origin": "agent-derived", "basis": "agent"});
+        assert_eq!(lowered[record::PROVENANCE_FLOOR], floor);
+
+        for (key, up) in [
+            ("origin", json!("user-declared")),
+            ("source", json!({"basis": "person", "via": "ljos"})),
+        ] {
+            let mut fields = Map::new();
+            fields.insert(key.into(), up);
+            fields.insert(
+                record::PROVENANCE_FLOOR.into(),
+                json!({"origin": "user-declared", "basis": "person"}),
+            );
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains(key), "{err}");
+        }
+        let mut clear = Map::new();
+        clear.insert(record::PROVENANCE_FLOOR.into(), Value::Null);
+        clear.insert("pinned".into(), json!(true));
+        let kept = svc.update("w", id, &clear).unwrap();
+        assert_eq!(kept[record::PROVENANCE_FLOOR], floor);
+        assert_eq!(kept["pinned"], json!(true));
+        let graded = svc.grade("w", id, true).unwrap();
+        assert_eq!(graded["origin"], json!("agent-derived"));
+        assert_eq!(graded[record::PROVENANCE_FLOOR], floor);
+    }
+
+    /// ljos's agent write on a holding writer: the post is held, accept
+    /// stores it as user-declared, and the client puts the origin back to
+    /// agent-derived. That update goes down, and the next cannot rise.
+    #[test]
+    fn an_accepted_lesson_put_back_to_agent_derived_stays_there() {
+        let (_dir, svc) = holding_service();
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        let err = svc.add(lesson).unwrap_err();
+        let accepted = svc.accept("w", &held_id(&err)).unwrap();
+        assert_eq!(accepted["origin"], json!("user-declared"));
+        let id = accepted["id"].as_str().unwrap();
+
+        let mut back = Map::new();
+        back.insert("origin".into(), json!("agent-derived"));
+        let relabelled = svc.update("w", id, &back).unwrap();
+        assert_eq!(relabelled["origin"], json!("agent-derived"));
+        let mut up = Map::new();
+        up.insert("origin".into(), json!("user-declared"));
+        let err = svc.update("w", id, &up).unwrap_err();
+        assert!(err.to_string().contains("accept"), "{err}");
     }
 
     /// A record written before origin existed stays without the field.

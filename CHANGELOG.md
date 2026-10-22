@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A record keeps the lowest origin and basis it has held, as
+  `provenance_floor`, and an update is checked against that as well
+  as the pair it carries now. The writer sets it on the first update
+  that lowers either. A post's value is dropped, and an update cannot
+  clear or raise it.
+
 - An update is checked on the record it would leave. A record written
   before `origin` existed ranks below every origin, so an update
   cannot name one for it; an update of its other fields still leaves
