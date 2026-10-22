@@ -326,6 +326,72 @@ fn live_cap_from_env() -> usize {
     }
 }
 
+/// Why an agent-derived lesson cannot be relabelled by an update.
+const LAUNDERED_ORIGIN: &str = "an agent-derived lesson reaches user-declared only through accept";
+
+/// Whether `origin` is missing, null, or an empty string.
+fn origin_is_blank(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) if text.is_empty() => true,
+        _ => false,
+    }
+}
+
+/// The text a refusal shows for an origin `validate` will not keep.
+fn origin_shown(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::String(text) if text.is_empty() => "None".into(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Refuse an origin update that would store `user-declared` without accept.
+///
+/// Null, `""` and any non-string are the values `validate` would default to
+/// `user-declared`. That default is the launder, so they take the same check
+/// as the string. A blank origin is not written as `user-declared` either.
+fn refuse_origin_update(current: &Record, raw: &Value) -> Result<(), AtomError> {
+    let from = record::origin_of(current);
+    if let Value::String(to) = raw {
+        if packset_core::atom::known_origin(to) {
+            if packset_core::atom::launders(from, to) {
+                return Err(AtomError(LAUNDERED_ORIGIN.into()));
+            }
+            return Ok(());
+        }
+        if !to.is_empty() {
+            return Err(AtomError(format!("unknown atom origin: {to}")));
+        }
+    }
+    if packset_core::atom::launders(from, packset_core::atom::USER_DECLARED) {
+        return Err(AtomError(LAUNDERED_ORIGIN.into()));
+    }
+    let shown = origin_shown(raw);
+    Err(AtomError(format!("unknown atom origin: {shown}")))
+}
+
+/// `source.basis`, trimmed and without case, when `source` is an object.
+fn basis_name(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_object()?.get("basis")?.as_str()?.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_ascii_lowercase())
+    }
+}
+
+/// Whether this update would raise `source.basis` from agent to person.
+fn basis_rises(stored: Option<&Value>, incoming: Option<&Value>) -> bool {
+    let Some(incoming) = incoming else {
+        return false;
+    };
+    basis_name(stored).as_deref() == Some("agent")
+        && basis_name(Some(incoming)).as_deref() == Some("person")
+}
+
 impl Service {
     /// Open the pack at `home`.
     ///
@@ -1042,12 +1108,22 @@ impl Service {
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
             .map(|a| Record::clone(a))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
-        if let Some(to) = fields.get("origin").and_then(Value::as_str) {
-            if packset_core::atom::launders(record::origin_of(&updated), to) {
-                return Err(anyhow::Error::new(AtomError(
-                    "an agent-derived lesson reaches user-declared only through accept".into(),
-                )));
-            }
+        // An update that does not name origin must not gain the default.
+        // Validate writes user-declared for a missing field, which is right
+        // for a new post and wrong for a record that never had one.
+        let blank_origin =
+            if fields.contains_key("origin") || !origin_is_blank(updated.get("origin")) {
+                None
+            } else {
+                Some(updated.get("origin").cloned())
+            };
+        if let Some(raw) = fields.get("origin") {
+            refuse_origin_update(&updated, raw).map_err(anyhow::Error::new)?;
+        }
+        if basis_rises(updated.get("source"), fields.get("source")) {
+            return Err(anyhow::Error::new(AtomError(
+                "an update cannot raise source.basis from agent to person".into(),
+            )));
         }
         for (key, value) in fields {
             updated.insert(key.clone(), value.clone());
@@ -1056,6 +1132,16 @@ impl Service {
         updated.insert("workspace".into(), Value::String(workspace.to_string()));
         updated.insert("tombstone".into(), Value::Bool(false));
         record::validate(&mut updated).map_err(anyhow::Error::new)?;
+        if let Some(previous) = blank_origin {
+            match previous {
+                None => {
+                    updated.remove("origin");
+                }
+                Some(value) => {
+                    updated.insert("origin".into(), value);
+                }
+            }
+        }
 
         let now = clock::utcnow();
         let mut batch = Vec::new();
@@ -2823,6 +2909,157 @@ mod tests {
             .unwrap()
             .iter()
             .any(|a| a.get("id") == stored.get("id")));
+    }
+
+    /// Null, `""` and a non-string are the origin validate would default.
+    /// That default is user-declared, which an agent lesson reaches only
+    /// through accept. The stored origin and basis stay where they were.
+    #[test]
+    fn a_blank_origin_cannot_launder_an_agent_lesson() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid0000000000000000000002";
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        svc.add(lesson).unwrap();
+
+        for origin in [
+            Value::Null,
+            json!(""),
+            json!(1),
+            json!(false),
+            json!({"to": "user-declared"}),
+        ] {
+            let mut fields = Map::new();
+            fields.insert("origin".into(), origin);
+            fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains("accept"), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["origin"], json!("agent-derived"), "{got:?}");
+            assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
+        }
+
+        let mut fields = Map::new();
+        fields.insert("origin".into(), json!("user-declared"));
+        let err = svc.update("w", id, &fields).unwrap_err();
+        assert!(err.to_string().contains("accept"), "{err}");
+
+        let mut fields = Map::new();
+        fields.insert("origin".into(), json!("tool-echo"));
+        let stored = svc.update("w", id, &fields).unwrap();
+        assert_eq!(stored["origin"], json!("tool-echo"));
+        let mut fields = Map::new();
+        fields.insert("origin".into(), Value::Null);
+        let err = svc.update("w", id, &fields).unwrap_err();
+        assert!(err.to_string().contains("unknown atom origin"), "{err}");
+        assert_eq!(
+            svc.store.get("w", id).unwrap().unwrap()["origin"],
+            json!("tool-echo")
+        );
+    }
+
+    /// Basis `person` on top of `agent` is the same rise as the origin.
+    /// A record that never had a basis can still be stamped, which is how
+    /// a person's old preference is marked, and a downgrade is kept.
+    #[test]
+    fn an_update_cannot_raise_basis_from_agent_to_person() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000003";
+        let text = "The fuse is CombMNZ for this seat.";
+        let mut lesson = atom(text);
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("user-declared"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        svc.add(lesson).unwrap();
+
+        let mut fields = Map::new();
+        fields.insert("source".into(), json!({"basis": " Person ", "via": "ljos"}));
+        fields.insert("text".into(), json!("The fuse is CombMNZ on this seat."));
+        let err = svc.update("w", id, &fields).unwrap_err();
+        assert!(err.to_string().contains("basis"), "{err}");
+        let got = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
+        assert_eq!(got["text"], json!(text));
+        assert_eq!(got["origin"], json!("user-declared"));
+
+        let mut legacy = atom("Prefer ripgrep when the tree is large.");
+        legacy.insert("kind".into(), json!("preference"));
+        legacy.insert("origin".into(), json!("user-declared"));
+        legacy.insert(
+            "source".into(),
+            json!({"via": "ljos", "seat": "seat", "session": "seat", "harness": "seat"}),
+        );
+        let legacy = svc.add(legacy).unwrap();
+        let legacy_id = legacy["id"].as_str().unwrap();
+        let mut fields = Map::new();
+        fields.insert(
+            "source".into(),
+            json!({
+                "via": "ljos",
+                "seat": "seat",
+                "session": "seat",
+                "harness": "seat",
+                "basis": "person"
+            }),
+        );
+        let stamped = svc.update("w", legacy_id, &fields).unwrap();
+        assert_eq!(stamped["source"]["basis"], json!("person"));
+        assert_eq!(stamped["origin"], json!("user-declared"));
+        assert_eq!(stamped["source"]["via"], json!("ljos"));
+
+        let mut down = Map::new();
+        down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        let dropped = svc.update("w", legacy_id, &down).unwrap();
+        assert_eq!(dropped["source"]["basis"], json!("agent"));
+    }
+
+    /// A record written before origin existed stays without the field.
+    /// An update of another field must not stamp user-declared on it.
+    #[test]
+    fn an_update_leaves_a_missing_origin_unset() {
+        let (_dir, svc) = service();
+        let id = "a".repeat(32);
+        let mut row = atom("Reviews open with a check.");
+        row.insert("id".into(), json!(id));
+        row.insert("tombstone".into(), json!(false));
+        svc.store.upsert(&row).unwrap();
+        let mut fields = Map::new();
+        fields.insert("pinned".into(), json!(true));
+        let updated = svc.update("w", &id, &fields).unwrap();
+        assert!(updated.get("origin").is_none(), "{updated:?}");
+        let got = svc.store.get("w", &id).unwrap().unwrap();
+        assert!(got.get("origin").is_none(), "{got:?}");
+        assert_eq!(got["pinned"], json!(true));
+        assert_eq!(record::origin_of(&got), "user-declared");
+
+        let mut fields = Map::new();
+        fields.insert("origin".into(), Value::Null);
+        let err = svc.update("w", &id, &fields).unwrap_err();
+        assert!(err.to_string().contains("unknown atom origin"), "{err}");
+        assert!(svc
+            .store
+            .get("w", &id)
+            .unwrap()
+            .unwrap()
+            .get("origin")
+            .is_none());
+        let mut fields = Map::new();
+        fields.insert("origin".into(), json!(""));
+        let err = svc.update("w", &id, &fields).unwrap_err();
+        assert!(err.to_string().contains("unknown atom origin"), "{err}");
+        assert!(svc
+            .store
+            .get("w", &id)
+            .unwrap()
+            .unwrap()
+            .get("origin")
+            .is_none());
     }
 
     #[test]

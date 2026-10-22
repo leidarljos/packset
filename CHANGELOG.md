@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An update cannot turn an agent-derived lesson into the person's by
+  sending `origin` null, `""` or a non-string. Those values skipped
+  the check and validate stored `user-declared`, which only an accept
+  may do. A blank origin is refused, and an update that does not
+  name origin leaves a missing one unset. `source.basis` cannot rise
+  from agent to person on an update either. A claim that never had a
+  basis can still be stamped `person`.
+
 - A client-chosen id that was deleted stays retired. `POST /v1/atoms`
   with that id in the same workspace answers 409, and the tombstone
   keeps its text and its origin. Before, the post wrote a new live
