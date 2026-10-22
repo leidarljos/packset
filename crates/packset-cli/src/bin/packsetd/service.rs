@@ -116,6 +116,8 @@ pub struct Service {
     /// seats or personas closing sittings on one issue tighten its links
     /// once, not once each.
     fired_recently: Mutex<HashMap<String, std::time::Instant>>,
+    /// Most fire and cue keys kept. Zero is no cap.
+    fire_cap: AtomicUsize,
     /// Projection writes waiting for the search index, in arrival order. A
     /// write queues its documents and returns; one batch reaches the index
     /// binary a moment later, or before the next read of it. Projecting
@@ -333,6 +335,23 @@ struct Shaped {
 /// one workspace's claims stay shaped and a second checkout still fits.
 pub const DEFAULT_SHAPE_CAP: usize = 65_536;
 
+/// Fire and cue keys kept when `PACKSET_FIRE_CAP` is unset. An hour of
+/// distinct prompts fits. The cue path used to insert without dropping
+/// expired keys, so every prompt of the week stayed until some later
+/// fire happened to clean the map.
+pub const DEFAULT_FIRE_CAP: usize = 4_096;
+
+fn fire_cap_from_env() -> usize {
+    match std::env::var("PACKSET_FIRE_CAP") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_FIRE_CAP,
+            "off" | "none" => 0,
+            n => n.parse().unwrap_or(DEFAULT_FIRE_CAP),
+        },
+        Err(_) => DEFAULT_FIRE_CAP,
+    }
+}
+
 fn shape_cap_from_env() -> usize {
     match std::env::var("PACKSET_SHAPE_CAP") {
         Ok(raw) => match raw.trim() {
@@ -386,6 +405,7 @@ impl Service {
             shaped: Mutex::new(BTreeSet::new()),
             swept: Mutex::new(HashMap::new()),
             fired_recently: Mutex::new(HashMap::new()),
+            fire_cap: AtomicUsize::new(fire_cap_from_env()),
             projection: Arc::new(Mutex::new(Vec::new())),
             projecting: Arc::new(Mutex::new(())),
             flush_scheduled: Arc::new(AtomicBool::new(false)),
@@ -684,6 +704,47 @@ impl Service {
     /// The cap, for a test that wants a smaller one than the process default.
     pub fn set_shape_cap(&self, cap: usize) {
         self.shape_cap.store(cap, Ordering::Relaxed);
+    }
+
+    /// `true` when `key` already fired inside the window. Otherwise it is
+    /// recorded, expired keys are dropped, and the oldest keys past the cap
+    /// go too. Both a fire and a cue come through here, so neither map can
+    /// grow for the life of the process.
+    fn fire_held(&self, key: String) -> bool {
+        let Ok(mut recent) = self.fired_recently.lock() else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        if recent
+            .get(&key)
+            .is_some_and(|at| now.duration_since(*at) < FIRE_WINDOW)
+        {
+            return true;
+        }
+        recent.retain(|_, at| now.duration_since(*at) < FIRE_WINDOW);
+        recent.insert(key, now);
+        let cap = self.fire_cap.load(Ordering::Relaxed);
+        if cap > 0 && recent.len() > cap {
+            let mut oldest: Vec<(String, std::time::Instant)> =
+                recent.iter().map(|(k, at)| (k.clone(), *at)).collect();
+            oldest.sort_by_key(|(_, at)| *at);
+            let extra = recent.len() - cap;
+            for (gone, _) in oldest.into_iter().take(extra) {
+                recent.remove(&gone);
+            }
+        }
+        false
+    }
+
+    /// The cap, for a test that wants a smaller one than the process default.
+    pub fn set_fire_cap(&self, cap: usize) {
+        self.fire_cap.store(cap, Ordering::Relaxed);
+    }
+
+    /// How many fire and cue keys are held right now.
+    #[cfg(test)]
+    fn fired_len(&self) -> usize {
+        self.fired_recently.lock().map(|map| map.len()).unwrap_or(0)
     }
 
     /// How many shapes are kept right now.
@@ -2082,16 +2143,8 @@ impl Service {
             lens.unwrap_or(""),
             key.join("\u{0}")
         );
-        if let Ok(mut recent) = self.fired_recently.lock() {
-            let now = std::time::Instant::now();
-            if recent
-                .get(&key)
-                .is_some_and(|at| now.duration_since(*at) < FIRE_WINDOW)
-            {
-                return Ok(json!({"fired": 0, "changed": 0, "held": true}));
-            }
-            recent.retain(|_, at| now.duration_since(*at) < FIRE_WINDOW);
-            recent.insert(key, now);
+        if self.fire_held(key) {
+            return Ok(json!({"fired": 0, "changed": 0, "held": true}));
         }
         let live = self.store.live(workspace)?;
         let mut atoms: Vec<Record> = live.iter().map(|a| Record::clone(a)).collect();
@@ -2352,18 +2405,7 @@ impl Service {
                 lens.unwrap_or(""),
                 query.trim().to_lowercase()
             );
-            let cue_held = self.fired_recently.lock().is_ok_and(|mut recent| {
-                let now = std::time::Instant::now();
-                if recent
-                    .get(&cue_key)
-                    .is_some_and(|at| now.duration_since(*at) < FIRE_WINDOW)
-                {
-                    true
-                } else {
-                    recent.insert(cue_key, now);
-                    false
-                }
-            });
+            let cue_held = self.fire_held(cue_key);
             if cue_held {
                 (0, true)
             } else {
@@ -2686,6 +2728,21 @@ mod tests {
             "shapes grew to {}",
             svc.shape_count()
         );
+    }
+
+    /// Five distinct fires into a cap of two keep the two newest, and the
+    /// newest is held when it is asked again.
+    #[test]
+    fn the_fire_hold_drops_the_oldest_past_the_cap() {
+        let (_dir, svc) = service();
+        svc.set_fire_cap(2);
+        for n in 0..5 {
+            let fired = svc.fire("w", &[format!("id-{n}")]).unwrap();
+            assert_eq!(fired["held"], json!(false), "{fired:?}");
+        }
+        assert!(svc.fired_len() <= 2, "fires grew to {}", svc.fired_len());
+        let again = svc.fire("w", &["id-4".to_string()]).unwrap();
+        assert_eq!(again["held"], json!(true), "{again:?}");
     }
 
     #[test]

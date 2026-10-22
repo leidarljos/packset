@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The fire-hold map stays bounded. `PACKSET_FIRE_CAP` (default 4096,
+  `off` for no cap) is how many recent fires and cues are remembered
+  for the hour. A cue used to be inserted without dropping the expired
+  ones, so every distinct prompt stayed until some later fire cleaned
+  the map.
+
 - Shapes and the posting lists built from them stay bounded.
   `PACKSET_SHAPE_CAP` (default 65536, `off` for no cap) is how many
   claims keep their tokens in the process. A claim that is deleted,
