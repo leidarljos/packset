@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A soak of the writer fails when resident memory keeps climbing after
+  the workspace cache is full. It drives a real packsetd across more
+  checkouts than the cache holds, waits out the idle release, and
+  compares anonymous RSS. `scripts/soak-rss.py` is the same mix, run
+  longer, and prints the sample a field report can be set beside.
+
 - After a quiet minute the writer returns free heap to the kernel and
   drops cached pages of the database. `PACKSET_IDLE_TRIM` is that
   wait in seconds (default 60, `off` to keep the pages). glibc holds
