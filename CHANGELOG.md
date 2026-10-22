@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `measurements/forgetting.txt` records the stdout of
+  `cargo run --release -p packset-daemon --example forgetting`. The
+  explanation page cites those retrieval rates, and the example
+  reproduces them, but the run was not in the tree.
+
 - Each release archive gets a GitHub build attestation from the release workflow, so `gh attestation verify` and the ljos installer can check that this repository built it. Releases before this one have none, and the installer counts them as not published.
 
 ## 0.15.3 (2026-10-18)
