@@ -63,6 +63,19 @@ pub fn fold(token: &str) -> String {
 }
 
 pub fn tokens(text: &str) -> Vec<String> {
+    split_tokens(text, true)
+}
+
+/// Tokens as written, stopwords dropped, not stemmed.
+///
+/// The dense expansion appends these to a question. A stem is not a word
+/// the encoder was trained on, so the lexical stem is the wrong shape here.
+#[must_use]
+pub fn surface_tokens(text: &str) -> Vec<String> {
+    split_tokens(text, false)
+}
+
+fn split_tokens(text: &str, fold_words: bool) -> Vec<String> {
     let lower = text.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let mut out = Vec::new();
@@ -80,7 +93,11 @@ pub fn tokens(text: &str) -> Vec<String> {
             // Stopwords are dropped before folding, because the list is of
             // words as written and a stemmer would not leave them matching it.
             if !STOP.contains(&token) {
-                out.push(fold(token));
+                out.push(if fold_words {
+                    fold(token)
+                } else {
+                    token.to_string()
+                });
             }
         } else {
             i += 1;
@@ -779,6 +796,187 @@ pub fn mark_dense(fused: &mut [Value], dense: &[Value]) {
     }
 }
 
+/// The cosine a client treats as sure when a hit shares no word with the
+/// question. Set where that client set it: on a 20-memory paraphrase set
+/// the encoder's first hit cleared 0.66 for the paraphrases it was sure
+/// of, and the first hit on an unrelated prompt topped out at 0.653.
+pub const DENSE_LINE: f64 = 0.66;
+
+/// A leader under the line is clear when the shortfall is at most this
+/// fraction of the gap to the next hit. A fifth leaves the unrelated first
+/// hit at 0.653 (gap 0.025; the shortfall is more than a fifth of that gap)
+/// and the one at 0.644 (gap 0.070; too far under the line) unexpanded, and
+/// takes a first hit at 0.654 whose gap is 0.065.
+const CLEAR_FRACTION: f64 = 0.2;
+
+/// How far under the line a neighbourhood may sit. Four hundredths, inside
+/// the five hundredths a client already reads as one cluster.
+const NEIGHBOUR_BELOW: f64 = 0.04;
+
+/// Hits within this of the leader belong to its neighbourhood.
+const NEIGHBOUR_GAP: f64 = 0.05;
+
+/// The neighbourhood the expansion reads, the leader included.
+const NEIGHBOUR_CAP: usize = 4;
+
+/// Cosine rank, from 0, that a promoted hit must have held. The runner-up
+/// is what mixing a cluster's words restates. A hit that was third or
+/// further and still comes first is the one those words named.
+const PROMOTED_MIN_RANK: usize = 2;
+
+/// Terms the relevance model may add. Fewer than the lexical expansion,
+/// because they are appended to the question the encoder reads.
+const DENSE_EXPANSION_TERMS: usize = 8;
+
+/// How much of the expanded weight stays on the words asked for. The same
+/// balance as the lexical expansion.
+const DENSE_EXPANSION_ALPHA: f64 = 0.5;
+
+/// Which accept rule a second dense pass has to meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NearKind {
+    /// Kept when this leader is still first and clears [`DENSE_LINE`].
+    Leader,
+    /// Kept when a hit that was third or further comes first, is one of
+    /// the feedback ids, and clears [`DENSE_LINE`].
+    Neighbourhood,
+}
+
+/// Where a second dense pass may look, and how its ballot is accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearLine {
+    /// Ids the expansion may read, best cosine first.
+    pub feedback: Vec<String>,
+    /// Which accept rule the second pass has to meet.
+    pub kind: NearKind,
+}
+
+fn cosine_order<'a>(hits: &'a [(&'a str, f64)]) -> Vec<(&'a str, f64)> {
+    let mut order: Vec<(&str, f64)> = hits
+        .iter()
+        .copied()
+        .filter(|(id, cosine)| !id.is_empty() && cosine.is_finite() && *cosine > 0.0)
+        .collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    order
+}
+
+/// Whether the dense ballot sits just under [`DENSE_LINE`] in a shape a
+/// second pass can resolve. `hits` are `(id, cosine)` in any order.
+///
+/// A clear leader is one whose shortfall under the line is at most a fifth
+/// of its gap to the next hit: the question is expanded from that hit
+/// alone. Otherwise a leader within four hundredths of the line, with at
+/// least one neighbour within five hundredths, is expanded from that
+/// cluster. Anything already on the line, or further under it, is left.
+#[must_use]
+pub fn near_line(hits: &[(&str, f64)]) -> Option<NearLine> {
+    let order = cosine_order(hits);
+    if order.len() < 2 {
+        return None;
+    }
+    let top = order[0].1;
+    if top >= DENSE_LINE {
+        return None;
+    }
+    let margin = top - order[1].1;
+    if margin > 0.0 && top >= DENSE_LINE - CLEAR_FRACTION * margin {
+        return Some(NearLine {
+            feedback: vec![order[0].0.to_string()],
+            kind: NearKind::Leader,
+        });
+    }
+    if top < DENSE_LINE - NEIGHBOUR_BELOW {
+        return None;
+    }
+    let mut feedback = Vec::new();
+    for (id, cosine) in &order {
+        if top - *cosine > NEIGHBOUR_GAP {
+            break;
+        }
+        feedback.push((*id).to_string());
+        if feedback.len() == NEIGHBOUR_CAP {
+            break;
+        }
+    }
+    if feedback.len() < 2 {
+        return None;
+    }
+    Some(NearLine {
+        feedback,
+        kind: NearKind::Neighbourhood,
+    })
+}
+
+/// Whether the second pass's first hit is the one [`near_line`] asked for.
+///
+/// `leader` is the new ballot's first hit, the rank a client reads, and
+/// its cosine. A clear plan keeps that hit only when it is the same
+/// leader and it now clears the line. A neighbourhood keeps it only when
+/// it was third or further in `before`, it was one of the hits the
+/// expansion read, and it clears the line. A runner-up that the added
+/// words restate is not kept, and neither is a cosine that stays under
+/// the line.
+#[must_use]
+pub fn keep_expanded(before: &[(&str, f64)], leader: (&str, f64), plan: &NearLine) -> bool {
+    let (new_id, new_cos) = leader;
+    if new_id.is_empty() || !new_cos.is_finite() || new_cos < DENSE_LINE {
+        return false;
+    }
+    match plan.kind {
+        NearKind::Leader => plan.feedback.first().is_some_and(|id| id == new_id),
+        NearKind::Neighbourhood => {
+            if !plan.feedback.iter().any(|id| id == new_id) {
+                return false;
+            }
+            cosine_order(before)
+                .iter()
+                .position(|(id, _)| *id == new_id)
+                .is_some_and(|rank| rank >= PROMOTED_MIN_RANK)
+        }
+    }
+}
+
+/// The question plus the feedback words it did not already use.
+///
+/// RM3 over the surface forms, the same expansion the lexical scorer
+/// uses, with the original question left in front so the encoder still
+/// reads what was asked. `None` when the feedback adds no word.
+#[must_use]
+pub fn expansion_query(query: &str, feedback: &[(&str, f64)]) -> Option<String> {
+    let q_tokens = surface_tokens(query);
+    if q_tokens.is_empty() || feedback.is_empty() {
+        return None;
+    }
+    let docs: Vec<(Vec<String>, f64)> = feedback
+        .iter()
+        .map(|(text, score)| (surface_tokens(text), *score))
+        .filter(|(tokens, score)| !tokens.is_empty() && *score > 0.0)
+        .collect();
+    if docs.is_empty() {
+        return None;
+    }
+    let borrowed: Vec<(&[String], f64)> = docs
+        .iter()
+        .map(|(tokens, score)| (tokens.as_slice(), *score))
+        .collect();
+    let expanded = crate::bm25::Index::default().expand(
+        &q_tokens,
+        &borrowed,
+        DENSE_EXPANSION_TERMS,
+        DENSE_EXPANSION_ALPHA,
+    );
+    let extras: Vec<&str> = expanded
+        .iter()
+        .map(|(term, _)| term.as_str())
+        .filter(|term| !q_tokens.iter().any(|have| have == term))
+        .collect();
+    if extras.is_empty() {
+        return None;
+    }
+    Some(format!("{query} {}", extras.join(" ")))
+}
+
 /// Live atoms whose review is due; these lead the answer regardless of query.
 #[must_use]
 pub fn due_hits<R: Borrow<Record>>(atoms: &[R], set: Option<&str>, now: &str) -> Vec<Value> {
@@ -898,6 +1096,87 @@ mod tests {
         assert!(fused[1].get("cosine").is_none());
         assert_eq!(fused[2]["dense_rank"], json!(1));
         assert_eq!(fused[2]["cosine"], json!(0.71));
+    }
+
+    #[test]
+    fn a_clear_leader_just_under_the_line_is_read_again() {
+        // 0.6538, gap 0.0646. The shortfall is under a fifth of the gap.
+        let before = [("a", 0.6538), ("b", 0.5892)];
+        let plan = near_line(&before).unwrap();
+        assert_eq!(plan.kind, NearKind::Leader);
+        assert_eq!(plan.feedback, ["a"]);
+        assert!(keep_expanded(&before, ("a", 0.8840), &plan));
+        assert!(!keep_expanded(&before, ("b", 0.90), &plan));
+        assert!(!keep_expanded(&before, ("a", 0.6599), &plan));
+    }
+
+    #[test]
+    fn an_unrelated_first_hit_at_the_same_height_does_not_keep_its_leader() {
+        // 0.6531, gap 0.0248. The shortfall is more than a fifth of the gap,
+        // so this is a neighbourhood, and neither the leader nor the
+        // runner-up is the hit that rule will keep.
+        let before = [("a", 0.6531), ("b", 0.6283)];
+        let plan = near_line(&before).unwrap();
+        assert_eq!(plan.kind, NearKind::Neighbourhood);
+        assert!(!keep_expanded(&before, ("a", 0.84), &plan));
+        assert!(!keep_expanded(&before, ("b", 0.8217), &plan));
+    }
+
+    #[test]
+    fn a_wide_gap_further_under_the_line_is_left() {
+        // 0.6444, gap 0.0697. Too far under the line for the gap to carry it,
+        // and the next hit is outside the neighbourhood.
+        assert!(near_line(&[("a", 0.6444), ("b", 0.5747)]).is_none());
+    }
+
+    #[test]
+    fn a_leader_on_the_line_or_alone_is_left() {
+        assert!(near_line(&[("a", 0.66), ("b", 0.4)]).is_none());
+        assert!(near_line(&[("a", 0.9)]).is_none());
+        assert!(near_line(&[("a", 0.6099), ("b", 0.5940), ("c", 0.5847)]).is_none());
+    }
+
+    #[test]
+    fn a_third_place_hit_that_clears_the_line_is_kept() {
+        let before = [("a", 0.6381), ("b", 0.6093), ("c", 0.5962), ("d", 0.50)];
+        let plan = near_line(&before).unwrap();
+        assert_eq!(plan.kind, NearKind::Neighbourhood);
+        assert_eq!(plan.feedback, ["a", "b", "c"]);
+        assert!(keep_expanded(&before, ("c", 0.8425), &plan));
+        assert!(!keep_expanded(&before, ("c", 0.65), &plan));
+        assert!(!keep_expanded(&before, ("b", 0.84), &plan));
+        assert!(!keep_expanded(&before, ("d", 0.9), &plan));
+    }
+
+    #[test]
+    fn expansion_appends_feedback_words_the_question_did_not_use() {
+        let question = "add the lodash dependency to the web app";
+        let memory = "Use pnpm instead of npm for every JavaScript package install in this repo";
+        let got = expansion_query(question, &[(memory, 0.6538)]).unwrap();
+        assert_eq!(
+            got,
+            "add the lodash dependency to the web app every install instead javascript npm package pnpm repo"
+        );
+        let question = "can I use MERGE ... RETURNING in this query";
+        let cluster = [
+            (
+                "Format SQL migrations with sqlfluff and never edit a migration that has been applied",
+                0.6381,
+            ),
+            (
+                "Ask before running any database migration against staging or production",
+                0.6093,
+            ),
+            (
+                "Our staging Postgres is version 15; do not use features from Postgres 16",
+                0.5962,
+            ),
+        ];
+        let got = expansion_query(question, &cluster).unwrap();
+        assert_eq!(
+            got,
+            "can I use MERGE ... RETURNING in this query postgres staging migration 15 16 features version"
+        );
     }
 
     #[test]

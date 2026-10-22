@@ -311,6 +311,58 @@ fn live_cap_from_env() -> usize {
     }
 }
 
+/// The dense ballot `dense_rank` and `cosine` are copied from.
+///
+/// When the first pass sits just under the client's line, a second pass
+/// reads the question with words from that neighbourhood. The fuse keeps
+/// the first pass either way: replacing it would move the scores a prompt
+/// that already shares a word is admitted on.
+fn expand_near_line<R>(
+    ask: &packset_core::search::Ask<'_, R>,
+    query: &str,
+    hits: &[Value],
+) -> Option<Vec<Value>>
+where
+    R: std::borrow::Borrow<packset_core::search::Record>,
+{
+    let owned = cosine_ids(hits);
+    let before: Vec<(&str, f64)> = owned.iter().map(|(id, cos)| (id.as_str(), *cos)).collect();
+    let plan = packset_core::search::near_line(&before)?;
+    let feedback: Vec<(&str, f64)> = plan
+        .feedback
+        .iter()
+        .filter_map(|id| {
+            let text = text_of(hits, id)?;
+            let cos = before.iter().find(|(i, _)| *i == id.as_str())?.1;
+            Some((text, cos))
+        })
+        .collect();
+    let expanded = packset_core::search::expansion_query(query, &feedback)?;
+    let next = crate::embed::encode_query(&expanded)
+        .map(|vector| packset_core::search::search_dense(ask, &vector))
+        .filter(|found| !found.is_empty())?;
+    let leader_id = next[0]["id"].as_str().unwrap_or("");
+    let leader_cos = next[0]["cosine"].as_f64().unwrap_or(0.0);
+    packset_core::search::keep_expanded(&before, (leader_id, leader_cos), &plan).then_some(next)
+}
+
+fn cosine_ids(hits: &[Value]) -> Vec<(String, f64)> {
+    hits.iter()
+        .filter_map(|hit| {
+            let id = hit["id"].as_str().filter(|id| !id.is_empty())?;
+            let cosine = hit["cosine"].as_f64()?;
+            Some((id.to_string(), cosine))
+        })
+        .collect()
+}
+
+fn text_of<'a>(hits: &'a [Value], id: &str) -> Option<&'a str> {
+    hits.iter()
+        .find(|hit| hit["id"].as_str() == Some(id))?
+        .get("text")?
+        .as_str()
+}
+
 impl Service {
     /// Open the pack at `home`.
     ///
@@ -1501,7 +1553,9 @@ impl Service {
         let ranked_meaning = crate::embed::encode_query(query)
             .map(|vector| packset_core::search::search_dense(&ask, &vector))
             .filter(|hits| !hits.is_empty());
-        let meaning = ranked_meaning.clone();
+        let meaning = ranked_meaning
+            .as_ref()
+            .map(|hits| expand_near_line(&ask, query, hits).unwrap_or_else(|| hits.clone()));
 
         // The milli projection is live-now. A dated question over a closed
         // window would otherwise miss the atom the retrieve just found.
