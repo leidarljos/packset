@@ -62,9 +62,12 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// After `wait` with no request, give free heap and cold database pages
-/// back. One release per quiet stretch: trimming on every check would
-/// fault the pages back in on the next request and straight out again.
+/// After `wait` with no request that does real work, give free heap and
+/// cold database pages back. Health and status probes do not count: a
+/// herd of them would otherwise keep the clock moving and the release
+/// would never run. One release per quiet stretch: trimming on every
+/// check would fault the pages back in on the next request and straight
+/// out again.
 fn start_idle_release(service: Arc<Service>, busy: Arc<AtomicU64>, wait: Duration) {
     if wait.is_zero() {
         return;
@@ -161,10 +164,18 @@ pub fn serve(
     let busy = Arc::new(AtomicU64::new(unix_millis()));
     start_idle_release(Arc::clone(&service), Arc::clone(&busy), idle_trim_after());
     wire::serve(&listener, workers, queue, move |request| {
-        busy.store(unix_millis(), Ordering::Relaxed);
+        note_busy(&busy, &request.method, &request.target);
         handle(&service, &panel, token.as_deref(), request)
     });
     Ok(())
+}
+
+/// Stamp `busy` for a request that can encode, scan or write. A cheap
+/// probe leaves the clock where it was.
+fn note_busy(busy: &AtomicU64, method: &Method, target: &str) {
+    if !wire::is_cheap(method, target) {
+        busy.store(unix_millis(), Ordering::Relaxed);
+    }
 }
 
 fn handle(
@@ -907,6 +918,23 @@ mod tests {
         assert_eq!(MAX_WORKERS, 8);
         assert_eq!(wire::dear_limit(DEFAULT_WORKERS), 3);
         assert_eq!(wire::dear_limit(1), 1);
+    }
+
+    #[test]
+    fn a_probe_does_not_stamp_the_writer_busy() {
+        let busy = AtomicU64::new(7);
+        for target in [
+            "/health",
+            "/v1/status?workspace=seat",
+            "/v1/workspaces",
+            "/__inside_memd/health",
+            "/v1/atoms?workspace=seat&embedding=omit",
+        ] {
+            note_busy(&busy, &Method::Get, target);
+        }
+        assert_eq!(busy.load(Ordering::Relaxed), 7);
+        note_busy(&busy, &Method::Post, "/v1/atoms");
+        assert!(busy.load(Ordering::Relaxed) > 7);
     }
 
     #[test]

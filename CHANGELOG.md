@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Health, status and the other cheap probes do not keep the writer
+  busy. A herd of them used to move the idle clock on every request,
+  so the release never ran.
+
 - A cached atom keeps its vector as one array of floats, not as a JSON
   array on both copies of the record. With the default encoder that JSON
   was about 55 KiB per atom, and a fire or an activate copied it again
