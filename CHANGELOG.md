@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `POST /v1/proposals/accept`, `POST /v1/atoms/delete` and
+  `POST /v1/grade` answer a record with no origin as `unknown`, like
+  the other writes. They returned the stored row as it was, so the
+  field was absent. Their answer also leaves out the vector now.
+
 - `packset forget`'s usage text says it keeps a workspace's
   tombstones. It still said "no tombstones" after the forget began
   keeping them; a deleted id stays retired and a re-post is refused.

@@ -565,7 +565,7 @@ fn route(
             if workspace.is_empty() || id.is_empty() {
                 return Answer::err(400, "workspace and id required");
             }
-            cheap_answer(service.accept(workspace, id).map(Value::Object))
+            cheap_answer(service.accept(workspace, id).map(written))
         }
         (Method::Post, "/v1/compact") => match required(body, "workspace") {
             Err(a) => a,
@@ -601,7 +601,7 @@ fn route(
                 return Answer::err(400, "workspace and id required");
             };
             let why = body.get("why").and_then(Value::as_str);
-            answer(service.delete_atom(workspace, id, why).map(Value::Object))
+            answer(service.delete_atom(workspace, id, why).map(written))
         }
         (Method::Post, "/v1/grade") => {
             let workspace = body.get("workspace").and_then(Value::as_str).unwrap_or("");
@@ -617,7 +617,7 @@ fn route(
                 }
                 Some(other) => other.as_i64().unwrap_or(1) != 0,
             };
-            answer(service.grade(workspace, id, recalled))
+            answer(service.grade(workspace, id, recalled).map(written))
         }
         (Method::Post, "/v1/attach") => match required(body, "workspace") {
             Err(a) => a,
@@ -1025,6 +1025,56 @@ mod tests {
         );
         assert_eq!(updated.code, 200, "{:?}", updated.body);
         assert_eq!(updated.body["origin"], json!("unknown"));
+        let stored = svc.store().get("w", "neu").unwrap().unwrap();
+        assert!(stored.get("origin").is_none(), "{stored:?}");
+    }
+
+    fn post(svc: &Service, path: &str, body: &Value) -> Answer {
+        let panel = packset_core::Panel::default();
+        let got = route(
+            svc,
+            &panel,
+            &Method::Post,
+            path,
+            &HashMap::new(),
+            body.as_object().unwrap(),
+        );
+        assert_eq!(got.code, 200, "{path}: {:?}", got.body);
+        got
+    }
+
+    #[test]
+    fn an_accept_retry_reads_a_record_with_no_origin_as_unknown() {
+        let (_dir, svc) = dated_pack();
+        crate::proposals::mark_accepted(svc.home(), "w", &json!({"id": "p1"}), "neu").unwrap();
+        let got = post(
+            &svc,
+            "/v1/proposals/accept",
+            &json!({"workspace": "w", "id": "p1"}),
+        );
+        assert_eq!(got.body["id"], json!("neu"), "{:?}", got.body);
+        assert_eq!(got.body["origin"], json!("unknown"), "{:?}", got.body);
+        let stored = svc.store().get("w", "neu").unwrap().unwrap();
+        assert!(stored.get("origin").is_none(), "{stored:?}");
+    }
+
+    #[test]
+    fn a_delete_reads_a_record_with_no_origin_as_unknown() {
+        let (_dir, svc) = dated_pack();
+        let got = post(
+            &svc,
+            "/v1/atoms/delete",
+            &json!({"workspace": "w", "id": "neu"}),
+        );
+        assert_eq!(got.body["tombstone"], json!(true), "{:?}", got.body);
+        assert_eq!(got.body["origin"], json!("unknown"), "{:?}", got.body);
+    }
+
+    #[test]
+    fn a_grade_reads_a_record_with_no_origin_as_unknown() {
+        let (_dir, svc) = dated_pack();
+        let got = post(&svc, "/v1/grade", &json!({"workspace": "w", "id": "neu"}));
+        assert_eq!(got.body["origin"], json!("unknown"), "{:?}", got.body);
         let stored = svc.store().get("w", "neu").unwrap().unwrap();
         assert!(stored.get("origin").is_none(), "{stored:?}");
     }
