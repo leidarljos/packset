@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 pub const MAX_HEAD: usize = 64 * 1024;
 /// The largest body a request may carry: a day's transcript fits.
 pub const MAX_BODY: usize = 64 * 1024 * 1024;
+/// Parked bodies together stay within one request. The queue can hold
+/// many connections, and each used to be allowed a full body, which set
+/// the allocator's high-water mark for the life of the process.
+const PARKED_BODY_CAP: usize = MAX_BODY;
 /// How long a connection may take to send its whole request, and how long
 /// it may stop reading the answer, before the worker drops it.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -154,6 +158,9 @@ struct Lane {
     room: usize,
     in_flight: usize,
     parked: VecDeque<Held>,
+    /// Bytes sitting in `parked`. A body is counted while it waits and
+    /// dropped when the job starts.
+    parked_bytes: usize,
 }
 
 /// What the lane did with a job.
@@ -170,6 +177,7 @@ impl Lane {
             room: room.max(1),
             in_flight: 0,
             parked: VecDeque::new(),
+            parked_bytes: 0,
         }
     }
 
@@ -178,7 +186,13 @@ impl Lane {
         if self.in_flight < self.limit {
             self.in_flight += 1;
             Begin::Run(job)
-        } else if self.parked.len() < self.room {
+        } else if park_body(
+            self.parked_bytes,
+            job.request.body.len(),
+            self.room,
+            self.parked.len(),
+        ) {
+            self.parked_bytes = self.parked_bytes.saturating_add(job.request.body.len());
             self.parked.push_back(job);
             Begin::Parked
         } else {
@@ -189,12 +203,21 @@ impl Lane {
     /// The next parked job, which keeps this slot. `None` releases it.
     fn end(&mut self) -> Option<Held> {
         if let Some(next) = self.parked.pop_front() {
+            self.parked_bytes = self.parked_bytes.saturating_sub(next.request.body.len());
             Some(next)
         } else {
             self.in_flight = self.in_flight.saturating_sub(1);
             None
         }
     }
+}
+
+/// Whether a body of `body` bytes may wait. `queued` jobs already wait,
+/// out of `room`, holding `parked` bytes between them. An empty request
+/// still queues up to `room`. A body of [`MAX_BODY`] parks only when
+/// nothing else is already parked.
+pub(crate) fn park_body(parked: usize, body: usize, room: usize, queued: usize) -> bool {
+    queued < room && parked.saturating_add(body) <= PARKED_BODY_CAP
 }
 
 /// Serve `listener` until the process ends.
@@ -919,6 +942,15 @@ mod tests {
         let out = exchange(port, b"GET /after HTTP/1.1\r\n\r\n");
         assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
         assert_eq!(ran.load(Ordering::SeqCst), 2, "the abandoned request ran");
+    }
+
+    #[test]
+    fn parked_bodies_stay_within_one_request() {
+        assert!(park_body(0, MAX_BODY, 128, 0));
+        assert!(!park_body(MAX_BODY, 1, 128, 1));
+        assert!(!park_body(1, MAX_BODY, 128, 1));
+        assert!(park_body(0, 0, 128, 127));
+        assert!(!park_body(0, 0, 128, 128));
     }
 
     #[test]

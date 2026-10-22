@@ -4,6 +4,59 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The field soak drives several clients at once, a fake 384-d encoder,
+  more workspaces than the cache holds, set-scoped writes and
+  attachments near the body cap. Idle release stays at its default
+  minute. It fails when anonymous memory is still climbing after the
+  warm-up. The earlier soak remains the check that the workspace
+  cache itself stops the climb.
+
+- A workspace that was only counted is dropped from the cache clock
+  when its counts row is. The clock used to keep that name after the
+  row was gone, so a long list of status checks grew without a corpus
+  behind it.
+
+- Fires and cues each have their own cap. They used to share one map
+  of 4096 keys, so a burst of cues pushed a fire out and the same
+  claims tightened their links a second time inside the hour.
+
+- Bodies waiting for a worker stay within one request, 64 MiB together.
+  The queue of 128 could previously hold that many full transcripts at
+  once, and that high-water mark stayed in the allocator.
+
+- An attachment expires after an hour, and at most 64 workspaces hold
+  one. A slot that was only peeked used to stay until the workspace
+  was forgotten, with no cap on how many workspaces that was.
+
+- Shapes are kept per workspace. The same client id in two workspaces
+  no longer shares one token list, so a delete in one left the other
+  unable to see its own claim. A workspace larger than the shape cap
+  keeps the shapes it has. Dropping them and marking the workspace
+  unshaped rebuilt the whole pack on every later write.
+
+- Idle release of the database map is Linux only, and the heap return
+  is glibc only. macOS `MADV_DONTNEED` can discard dirty pages, and
+  musl has no `malloc_trim`, so on those the call does nothing and the
+  pages stay until the process ends. The write transaction taken
+  before the advice is dropped at once; it does not hold the writer
+  lock across the advice.
+
+- Health, status and the other cheap probes do not keep the writer
+  busy. A herd of them used to move the idle clock on every request,
+  so the release never ran.
+
+- A cached atom keeps its vector as one array of floats, not as a JSON
+  array on both copies of the record. With the default encoder that JSON
+  was about 55 KiB per atom, and a fire or an activate copied it again
+  with the live set. The file and the answers still carry the JSON array.
+  A rewrite that does not bring a vector keeps the one already stored.
+
+- A write in one set no longer drops the tokens of the workspace's other
+  sets. Duplicate detection reads those tokens, so the same text stored
+  again in the first set came back as a second claim. Shapes are
+  reconciled from the whole live workspace, and the first write in a
+  process shapes that whole workspace.
+
 - Idle release advises the database mapping. Advising the file leaves
   pages that are still mapped, so a quiet writer kept the database
   resident. The mapping stays open and the next read faults the pages

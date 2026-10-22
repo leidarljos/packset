@@ -789,6 +789,21 @@ pub fn max_sim(query: &[Vec<f32>], document: &[Vec<f32>]) -> f64 {
         .sum()
 }
 
+/// The vector for `ordinal`, from the cache when it was passed in, else
+/// parsed from the record. A cache hit does not rebuild the JSON array.
+fn vector_at<'a>(
+    vectors: &'a [Option<&'a [f32]>],
+    ordinal: usize,
+    atom: &'a Record,
+) -> Option<std::borrow::Cow<'a, [f32]>> {
+    if let Some(Some(vector)) = vectors.get(ordinal) {
+        if !vector.is_empty() {
+            return Some(std::borrow::Cow::Borrowed(*vector));
+        }
+    }
+    embedding_of(atom).map(std::borrow::Cow::Owned)
+}
+
 /// The dense ballot. Atoms without a stored vector are skipped, not scored
 /// zero: a missing encoder is not a vote.
 ///
@@ -799,6 +814,18 @@ pub fn max_sim(query: &[Vec<f32>], document: &[Vec<f32>]) -> f64 {
 /// fuse reads those scores.
 #[must_use]
 pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<Value> {
+    search_dense_at(ask, query, &[])
+}
+
+/// [`search_dense`] when the caller already holds the vectors as floats.
+/// `vectors[i]` belongs to `ask.atoms[i]`. An empty slice, or a missing
+/// slot, is read from the record's JSON array.
+#[must_use]
+pub fn search_dense_at<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
+    query: &[f32],
+    vectors: &[Option<&[f32]>],
+) -> Vec<Value> {
     let Ask {
         atoms,
         limit,
@@ -816,7 +843,7 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
         if !serves(atom, set, kind, now) {
             continue;
         }
-        let Some(vector) = embedding_of(atom) else {
+        let Some(vector) = vector_at(vectors, ordinal, atom) else {
             continue;
         };
         let relevance = cosine(query, &vector);
@@ -840,7 +867,7 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
             let mut hit = atom_hit(atom, c.score);
             // The plain cosine, without the tenth of trust added to the
             // score: one scale a client can set a floor on.
-            if let Some(vector) = embedding_of(atom) {
+            if let Some(vector) = vector_at(vectors, c.ordinal, atom) {
                 hit["cosine"] = json!((cosine(query, &vector) * 10_000.0).round() / 10_000.0);
             }
             hit

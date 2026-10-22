@@ -62,9 +62,12 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// After `wait` with no request, give free heap and cold database pages
-/// back. One release per quiet stretch: trimming on every check would
-/// fault the pages back in on the next request and straight out again.
+/// After `wait` with no request that does real work, give free heap and
+/// cold database pages back. Health and status probes do not count: a
+/// herd of them would otherwise keep the clock moving and the release
+/// would never run. One release per quiet stretch: trimming on every
+/// check would fault the pages back in on the next request and straight
+/// out again.
 fn start_idle_release(service: Arc<Service>, busy: Arc<AtomicU64>, wait: Duration) {
     if wait.is_zero() {
         return;
@@ -161,10 +164,18 @@ pub fn serve(
     let busy = Arc::new(AtomicU64::new(unix_millis()));
     start_idle_release(Arc::clone(&service), Arc::clone(&busy), idle_trim_after());
     wire::serve(&listener, workers, queue, move |request| {
-        busy.store(unix_millis(), Ordering::Relaxed);
+        note_busy(&busy, &request.method, &request.target);
         handle(&service, &panel, token.as_deref(), request)
     });
     Ok(())
+}
+
+/// Stamp `busy` for a request that can encode, scan or write. A cheap
+/// probe leaves the clock where it was.
+fn note_busy(busy: &AtomicU64, method: &Method, target: &str) {
+    if !wire::is_cheap(method, target) {
+        busy.store(unix_millis(), Ordering::Relaxed);
+    }
 }
 
 fn handle(
@@ -254,14 +265,6 @@ fn route(
                 // tenths of the listing, and a client reading texts, review
                 // clocks or rules parses every float for nothing.
                 let omit = query.get("embedding").map(String::as_str) == Some("omit");
-                let lean = |atom: &Map<String, Value>| {
-                    let mut atom = atom.clone();
-                    if omit {
-                        atom.remove("embedding");
-                    }
-                    packset_core::record::fill_origin(&mut atom);
-                    Value::Object(atom)
-                };
                 match as_of_stamp(query) {
                     Err(a) => a,
                     Ok(Some(at)) => answer(service.as_of(&workspace, &at).map(|mut body| {
@@ -279,7 +282,11 @@ fn route(
                     Ok(None) => match service.store().live(&workspace) {
                         // `kind` narrows the answer to one kind, so a roster
                         // of personas does not carry every lesson's embedding.
+                        // The cache keeps the vector as floats. The answer
+                        // puts the JSON array back, which is what a client
+                        // already reads.
                         Ok(atoms) => {
+                            let vectors = service.store().vectors(&workspace);
                             let kind = query
                                 .get("kind")
                                 .map(String::as_str)
@@ -288,7 +295,7 @@ fn route(
                                 Answer::ok(json!({
                                     "atoms": atoms
                                         .iter()
-                                        .map(|atom| packset_core::record::shown(atom))
+                                        .map(|atom| listed(atom, &vectors, false))
                                         .collect::<Vec<_>>()
                                 }))
                             } else {
@@ -298,7 +305,7 @@ fn route(
                                         .filter(|a| kind.is_none_or(|k| {
                                             a.get("kind").and_then(Value::as_str) == Some(k)
                                         }))
-                                        .map(|atom| lean(atom))
+                                        .map(|atom| listed(atom, &vectors, omit))
                                         .collect::<Vec<_>>()
                                 }))
                             }
@@ -550,16 +557,24 @@ fn route(
                 };
                 match service.store().live(&workspace) {
                     Err(e) => Answer::err(400, e),
-                    Ok(atoms) => Answer::ok(json!({
-                        "atoms": packset_core::recall::recall(
+                    Ok(atoms) => {
+                        let vectors = service.store().vectors(&workspace);
+                        let mut recalled = packset_core::recall::recall(
                             &atoms,
                             &seeds,
                             &hints,
                             limit,
                             &packset_core::clock::utcnow(),
-                            query.get("kind").map(String::as_str).filter(|k| !k.is_empty()),
-                        )
-                    })),
+                            query
+                                .get("kind")
+                                .map(String::as_str)
+                                .filter(|k| !k.is_empty()),
+                        );
+                        for atom in &mut recalled {
+                            crate::store::restore_embedding(atom, &vectors);
+                        }
+                        Answer::ok(json!({ "atoms": recalled }))
+                    }
                 }
             }
         },
@@ -705,6 +720,29 @@ fn route(
 }
 
 /// Turn a service result into an answer, keeping the store's own message.
+/// One atom as a listing answers it. The cache holds floats and a null
+/// slot; the answer carries the JSON array unless the caller left vectors
+/// out. A record with no vector stays as the cache has it.
+fn listed(
+    atom: &Map<String, Value>,
+    vectors: &std::collections::HashMap<String, std::sync::Arc<[f32]>>,
+    omit: bool,
+) -> Value {
+    let id = atom.get("id").and_then(Value::as_str);
+    let has_vector = id.is_some_and(|id| vectors.contains_key(id));
+    if !omit && !has_vector {
+        return Value::Object(packset_core::record::shown(atom).into_owned());
+    }
+    let mut copy = atom.clone();
+    if omit {
+        copy.remove("embedding");
+    } else {
+        crate::store::restore_embedding(&mut copy, vectors);
+    }
+    packset_core::record::fill_origin(&mut copy);
+    Value::Object(copy)
+}
+
 /// What a write answers: the stored claim without its vector. The writer
 /// needs the id, the text and what it superseded; the 384 floats were most
 /// of every reply and no client reads them back from a write.
@@ -880,6 +918,23 @@ mod tests {
         assert_eq!(MAX_WORKERS, 8);
         assert_eq!(wire::dear_limit(DEFAULT_WORKERS), 3);
         assert_eq!(wire::dear_limit(1), 1);
+    }
+
+    #[test]
+    fn a_probe_does_not_stamp_the_writer_busy() {
+        let busy = AtomicU64::new(7);
+        for target in [
+            "/health",
+            "/v1/status?workspace=seat",
+            "/v1/workspaces",
+            "/__inside_memd/health",
+            "/v1/atoms?workspace=seat&embedding=omit",
+        ] {
+            note_busy(&busy, &Method::Get, target);
+        }
+        assert_eq!(busy.load(Ordering::Relaxed), 7);
+        note_busy(&busy, &Method::Post, "/v1/atoms");
+        assert!(busy.load(Ordering::Relaxed) > 7);
     }
 
     #[test]
