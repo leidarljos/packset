@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A client-chosen id that was deleted stays retired. `POST /v1/atoms`
+  with that id in the same workspace answers 409, and the tombstone
+  keeps its text and its origin. Before, the post wrote a new live
+  atom over the tombstone, so a lesson a person had withdrawn came
+  back under the id a rule still named. The same id in another
+  workspace is a different atom. Forgetting a scratch workspace
+  still removes the keys, and a later post may use them.
+
 - A search hit carries `rerank_score`, the cross-encoder's number,
   or null when the stage did not score that hit. The second stage
   used to reorder the head and drop the score, so a caller could not

@@ -15,6 +15,21 @@ use crate::cards;
 use crate::home::Home;
 use crate::store::{Record, Store};
 
+/// A client-chosen id a tombstone still holds. The HTTP layer answers 409.
+///
+/// The id is the name a later reader uses. Writing a new live atom over
+/// the tombstone would put new text on the id a person had deleted.
+#[derive(Debug)]
+pub struct RetiredId(pub String);
+
+impl std::fmt::Display for RetiredId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RetiredId {}
+
 /// The cap on one attached body.
 pub const ATTACH_CAP: usize = 200_000;
 
@@ -747,12 +762,41 @@ impl Service {
         self.add_prepared_traced(atom, WriteTrace::begin())
     }
 
+    /// Refuse a post whose id a tombstone in this workspace still holds.
+    ///
+    /// The key is workspace and id together, so the same id in another
+    /// workspace is a different atom. A scratch workspace that was
+    /// forgotten has no tombstone, and its ids may be posted again.
+    fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<()> {
+        if workspace.is_empty() || id.is_empty() {
+            return Ok(());
+        }
+        let Some(existing) = self.store.get(workspace, id)? else {
+            return Ok(());
+        };
+        if existing
+            .get("tombstone")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(anyhow::Error::new(RetiredId(format!(
+                "{id} is retired; a deleted atom does not come back under its old id"
+            ))));
+        }
+        Ok(())
+    }
+
     /// [`Self::add_prepared`] with the stage clock a write's trace reads.
     fn add_prepared_traced(
         &self,
         mut atom: Record,
         mut trace: WriteTrace,
     ) -> anyhow::Result<Record> {
+        // Before a proposal is filed, and before a duplicate is answered:
+        // the id is retired even when the text matches what was deleted.
+        let workspace = atom.get("workspace").and_then(Value::as_str).unwrap_or("");
+        let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
+        self.refuse_retired(workspace, id)?;
         if packset_core::atom::needs_accept(
             record::origin_of(&atom),
             record::hook_of(&atom),
@@ -2403,6 +2447,26 @@ mod tests {
             svc.forget_workspace("   ").is_err(),
             "blank forgets nothing"
         );
+    }
+
+    /// Scratch cleanup removes the keys. The next run may post the same
+    /// id. Retirement is the tombstone, and this path leaves none.
+    #[test]
+    fn forgetting_a_scratch_workspace_does_not_retire_its_ids() {
+        let (_dir, svc) = service();
+        let id = "scratchid000000000000000000000001";
+        let mut row = atom("A scratch claim the smoke run leaves.");
+        row.insert("id".into(), json!(id));
+        row.insert("workspace".into(), json!("smoke:run"));
+        svc.add(row).unwrap();
+        svc.forget_workspace("smoke:run").unwrap();
+        assert!(svc.store().get("smoke:run", id).unwrap().is_none());
+        let mut again = atom("The next smoke run may reuse the id.");
+        again.insert("id".into(), json!(id));
+        again.insert("workspace".into(), json!("smoke:run"));
+        let stored = svc.add(again).unwrap();
+        assert_eq!(stored["id"], json!(id));
+        assert_eq!(stored["tombstone"], json!(false));
     }
 
     #[test]
