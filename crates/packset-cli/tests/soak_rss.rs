@@ -1,9 +1,12 @@
-//! Anonymous RSS stops climbing once the parsed-workspace cache is full.
+//! Anonymous RSS of a real packsetd.
 //!
-//! A seat that opens another checkout used to keep every one of them parsed,
-//! and the heap high-water mark stayed after the seat went quiet. This drives
-//! a real packsetd across more workspaces than the default cache holds, waits
-//! out the idle release, and fails if that memory is still growing.
+//! `resident_memory_stops_climbing_once_the_cache_is_full` is the cache cap:
+//! more checkouts than the cache holds, then a quiet stretch. The field soak
+//! is the other shape. Several clients write at once, a fake encoder returns
+//! 384-d vectors, more workspaces are touched than the cache holds, claims
+//! name a set, and attachments sit near the body cap. Idle release stays at
+//! its default minute, and the clients do not pause for it. The run fails
+//! when anonymous memory plus swap is still climbing after the warm-up.
 
 #![cfg(target_os = "linux")]
 
@@ -269,5 +272,223 @@ fn resident_memory_stops_climbing_once_the_cache_is_full() {
     assert!(
         climb < 2048,
         "anon grew {climb} KiB across a steady stretch; {report}"
+    );
+}
+
+/// Hot workspaces, the default cache. They are written after the extras
+/// so they stay parsed and a wave patches them instead of rebuilding.
+const HOT: usize = 8;
+/// Workspaces beyond the cache, touched first in a wave so the hot set
+/// evicts them. A wave does not fit.
+const BEYOND: usize = 4;
+/// Clients writing and searching at once. Health probes are not the load.
+const CLIENTS: usize = 4;
+/// Fresh claims each hot workspace receives per window. Enough that a
+/// cache still holding the JSON vectors climbs by more than the noise.
+const WAVE: usize = 8;
+/// Attachments stored before the first window, past the slot cap of 64,
+/// so a later window replaces slots instead of introducing them.
+const WARM_ATTACH: usize = 72;
+/// Just under `service::ATTACH_CAP`.
+const ATTACH_NEAR: usize = 180_000;
+/// Anonymous growth allowed from the first window to the third. The
+/// same load with the vectors still stored as JSON climbed about 14
+/// MiB. A float cache stays under this. A few mebibytes of the
+/// allowance is the allocator, which does not return a busy thread's
+/// high-water mark.
+const FIELD_SLOPE_KIB: u64 = 12 * 1024;
+
+const FAKE_ENCODER: &str = r#"#!/usr/bin/env python3
+import json, sys
+VEC = [0.01] * 384
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    texts = msg.get("texts")
+    if texts is None:
+        reply = {"v": VEC}
+    else:
+        reply = {"vs": [VEC for _ in texts]}
+    sys.stdout.write(json.dumps(reply) + "\n")
+    sys.stdout.flush()
+"#;
+
+fn write_encoder(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("fake-embed.py");
+    std::fs::write(&path, FAKE_ENCODER).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+fn field_writer() -> Writer {
+    let home = tempfile::tempdir().unwrap();
+    let encoder = write_encoder(home.path());
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let bin = std::env::var("PACKSET_SOAK_BIN")
+        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_packsetd").to_string());
+    let mut cmd = Command::new(bin);
+    cmd.args(["--port", &port.to_string(), "--home"])
+        .arg(home.path().join("pack"))
+        .env("HOME", home.path())
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_EMBED", &encoder)
+        .env_remove("INSIDE_EMBED")
+        .env_remove("PACKSET_IDLE_TRIM")
+        .env_remove("PACKSET_MILLI")
+        .env_remove("PACKSET_WORKSPACE_CACHE")
+        .env_remove("PACKSET_SHAPE_CAP")
+        .env_remove("PACKSET_FIRE_CAP")
+        .env_remove("PACKSET_BACKFILL_CAP")
+        .env_remove("PACKSET_HOME")
+        .env_remove("PACKSET_URL")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if ureq::get(&format!("{url}/health")).call().is_ok() {
+            return Writer { child, url, home };
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("packsetd did not answer on {url}");
+}
+
+fn field_workspace(index: usize) -> String {
+    format!("git:github.com/example/field-{index}")
+}
+
+fn attach_workspace(index: usize) -> String {
+    format!("git:github.com/example/attach-{index}")
+}
+
+fn post(url: &str, path: &str, body: serde_json::Value, what: &str) {
+    call(ureq::post(&format!("{url}{path}")).send_json(body), what);
+}
+
+fn across(jobs: usize, work: &(impl Fn(usize) + Sync)) {
+    std::thread::scope(|scope| {
+        for worker in 0..CLIENTS {
+            scope.spawn(move || {
+                let mut index = worker;
+                while index < jobs {
+                    work(index);
+                    index += CLIENTS;
+                }
+            });
+        }
+    });
+}
+
+fn write_claim(url: &str, workspace: usize, n: usize) {
+    let set = if n % 2 == 0 { "notes" } else { "refs" };
+    post(
+        url,
+        "/v1/atoms",
+        json!({
+            "workspace": field_workspace(workspace),
+            "kind": "lesson",
+            "origin": "user-declared",
+            "level": "explicit",
+            "set": set,
+            "text": text(workspace, n),
+            "entities": ["seat:grok", format!("repo:field-{workspace}")],
+        }),
+        "field write",
+    );
+}
+
+fn write_wave(url: &str, wave: usize) {
+    across(BEYOND, &|offset| {
+        write_claim(url, HOT + offset, wave * WAVE);
+    });
+    across(HOT, &|workspace| {
+        for n in 0..WAVE {
+            write_claim(url, workspace, wave * WAVE + n);
+        }
+        let q = format!("s{workspace}c0w0");
+        call(
+            ureq::get(&format!("{url}/v1/search"))
+                .query("workspace", &field_workspace(workspace))
+                .query("q", &q)
+                .query("limit", "8")
+                .call(),
+            "field search",
+        );
+    });
+}
+
+fn attach_wave(url: &str, body: &str, from: usize, count: usize) {
+    across(count, &|offset| {
+        let workspace = attach_workspace(from + offset);
+        post(
+            url,
+            "/v1/attach",
+            json!({
+                "workspace": workspace,
+                "label": "transcript",
+                "text": body,
+            }),
+            "field attach",
+        );
+    });
+}
+
+/// Embeddings, set-scoped writes, attachments near the cap, and more
+/// workspaces than the cache, under clients that do not let the writer
+/// go idle. The warm-up fills the attach slots. The three windows keep
+/// writing into the hot workspaces. Anonymous memory may move by a few
+/// mebibytes as those workspaces are parsed. A slope past that is a
+/// vector the cache kept.
+#[test]
+fn anonymous_memory_stays_flat_under_field_load() {
+    let writer = field_writer();
+    let pid = writer.child.id();
+    let body = "x".repeat(ATTACH_NEAR);
+    write_wave(&writer.url, 0);
+    attach_wave(&writer.url, &body, 0, WARM_ATTACH);
+    let listed = ureq::get(&format!("{}/v1/atoms", writer.url))
+        .query("workspace", &field_workspace(0))
+        .call()
+        .expect("list")
+        .into_string()
+        .expect("list body");
+    let parsed: serde_json::Value = serde_json::from_str(&listed).expect("list json");
+    let atoms = parsed.get("atoms").cloned().unwrap_or(parsed);
+    let embedded = atoms[0]["embedding"].as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(
+        embedded,
+        384,
+        "the fake encoder did not land a vector: {}",
+        &listed.chars().take(240).collect::<String>()
+    );
+    let mut held = [0u64; 3];
+    for (window, sample) in held.iter_mut().enumerate() {
+        write_wave(&writer.url, window + 1);
+        std::thread::sleep(Duration::from_millis(200));
+        *sample = resident(pid).held();
+    }
+    let slope = held[2].saturating_sub(held[0]);
+    let report = format!(
+        "KiB anon+swap windows {} -> {} -> {} slope {slope}",
+        held[0], held[1], held[2]
+    );
+    eprintln!("field soak {report}");
+    assert!(
+        slope < FIELD_SLOPE_KIB,
+        "anon grew {slope} KiB across three windows; {report}"
     );
 }

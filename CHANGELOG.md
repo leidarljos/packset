@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The field soak drives several clients at once, a fake 384-d encoder,
+  more workspaces than the cache holds, set-scoped writes and
+  attachments near the body cap. Idle release stays at its default
+  minute. It fails when anonymous memory is still climbing after the
+  warm-up. The earlier soak remains the check that the workspace
+  cache itself stops the climb.
+
 - A workspace that was only counted is dropped from the cache clock
   when its counts row is. The clock used to keep that name after the
   row was gone, so a long list of status checks grew without a corpus
