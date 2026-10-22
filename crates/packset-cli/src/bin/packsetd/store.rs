@@ -2275,6 +2275,43 @@ mod tests {
         rss
     }
 
+    /// Sixty-four cached 384-d vectors are floats. The JSON arrays they
+    /// replaced would have been a few mebibytes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cached_vectors_do_not_keep_the_json_arrays() {
+        let anon = || {
+            let text = std::fs::read_to_string("/proc/self/status").unwrap();
+            text.lines()
+                .find_map(|line| {
+                    let rest = line.strip_prefix("RssAnon:")?;
+                    rest.split_whitespace().next()?.parse::<u64>().ok()
+                })
+                .unwrap_or(0)
+        };
+        let (_dir, store) = store();
+        let start = anon();
+        let embedding: Vec<f64> = (0..384).map(|_| 0.01).collect();
+        for n in 0..64 {
+            store
+                .upsert(&record(json!({
+                    "id": format!("n{n:04}"),
+                    "workspace": "w",
+                    "text": format!("claim number {n} is distinct enough"),
+                    "kind": "lesson",
+                    "embedding": embedding,
+                })))
+                .unwrap();
+        }
+        let grown = anon().saturating_sub(start);
+        assert!(store
+            .live("w")
+            .unwrap()
+            .iter()
+            .all(|atom| atom.get("embedding").is_some_and(Value::is_null)));
+        assert!(grown < 2048, "anon grew {grown} KiB for 64 cached vectors");
+    }
+
     /// Counting a workspace notes it, and used to leave that note after
     /// the counts row was evicted. Three counts into a cap of one stay
     /// one entry on the clock.
