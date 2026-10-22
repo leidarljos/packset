@@ -4,8 +4,6 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
-- A search the encoder answers, whose best cosine sits just under the line a client uses, reads the question a second time with words drawn from that neighbourhood of the pack. The new dense ballot is what `dense_rank` and `cosine` report, and only when a clear leader stays first and now clears 0.66, or when a memory that was third or further in a tight cluster comes first and clears it. The cosine on that ballot is with the expanded question. The fuse stays on the first pass, so a prompt that already shares a word is scored as before. A first hit that is merely close, the gap to the next memory small beside the shortfall, is left alone. On the 20-memory paraphrase set, 18 of 20 paraphrases reached a client that admits a wordless hit at 0.66; the two that sat under the line now do too, and the 11 unrelated prompts still inject the same 8 memories.
-
 - Each release archive gets a GitHub build attestation from the release workflow, so `gh attestation verify` and the ljos installer can check that this repository built it. Releases before this one have none, and the installer counts them as not published.
 
 ## 0.15.3 (2026-10-18)
