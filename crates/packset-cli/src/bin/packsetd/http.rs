@@ -9,7 +9,9 @@
 
 use std::collections::HashMap;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use packset_core::record::AtomError;
 use serde_json::{json, Map, Value};
@@ -31,6 +33,65 @@ pub const MAX_WORKERS: usize = 8;
 pub const DEFAULT_QUEUE: usize = 128;
 /// The ceiling on the queue: each waiting connection holds a descriptor.
 pub const MAX_QUEUE: usize = 4096;
+/// How long the writer stays quiet before it returns free heap and drops
+/// cached database pages, when `PACKSET_IDLE_TRIM` is unset.
+pub const DEFAULT_IDLE_TRIM: Duration = Duration::from_secs(60);
+
+/// How long a quiet stretch lasts before idle memory is released.
+/// `off`, `none` and `0` never release.
+#[must_use]
+pub fn idle_trim_after() -> Duration {
+    idle_after(std::env::var("PACKSET_IDLE_TRIM").ok().as_deref())
+}
+
+fn idle_after(raw: Option<&str>) -> Duration {
+    match raw.map(str::trim) {
+        None | Some("") => DEFAULT_IDLE_TRIM,
+        Some("off" | "none" | "0") => Duration::ZERO,
+        Some(n) => n
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_IDLE_TRIM),
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// After `wait` with no request, give free heap and cold database pages
+/// back. One release per quiet stretch: trimming on every check would
+/// fault the pages back in on the next request and straight out again.
+fn start_idle_release(service: Arc<Service>, busy: Arc<AtomicU64>, wait: Duration) {
+    if wait.is_zero() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("packsetd-idle".to_string())
+        .spawn(move || {
+            let step = Duration::from_secs(1).min(wait);
+            let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            let mut released = false;
+            loop {
+                std::thread::sleep(step);
+                let quiet = unix_millis().saturating_sub(busy.load(Ordering::Relaxed));
+                if quiet >= wait_ms {
+                    if !released {
+                        service.store().release_idle();
+                        released = true;
+                    }
+                } else {
+                    released = false;
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        eprintln!("packsetd: cannot start idle release: {err}");
+    }
+}
 
 /// How many requests this writer will answer at once.
 ///
@@ -97,7 +158,10 @@ pub fn serve(
     eprintln!(
         "packsetd: listening on http://{host}:{port} with {workers} workers and room for {queue} waiting"
     );
+    let busy = Arc::new(AtomicU64::new(unix_millis()));
+    start_idle_release(Arc::clone(&service), Arc::clone(&busy), idle_trim_after());
     wire::serve(&listener, workers, queue, move |request| {
+        busy.store(unix_millis(), Ordering::Relaxed);
         handle(&service, &panel, token.as_deref(), request)
     });
     Ok(())
@@ -864,6 +928,17 @@ mod tests {
         assert!(!truthy(Some("on")));
         assert!(!truthy(Some("")));
         assert!(!truthy(None));
+    }
+
+    #[test]
+    fn idle_trim_is_a_minute_unless_it_is_turned_off() {
+        assert_eq!(idle_after(None), DEFAULT_IDLE_TRIM);
+        assert_eq!(idle_after(Some("")), DEFAULT_IDLE_TRIM);
+        assert_eq!(idle_after(Some("off")), Duration::ZERO);
+        assert_eq!(idle_after(Some("none")), Duration::ZERO);
+        assert_eq!(idle_after(Some("0")), Duration::ZERO);
+        assert_eq!(idle_after(Some("15")), Duration::from_secs(15));
+        assert_eq!(idle_after(Some("later")), DEFAULT_IDLE_TRIM);
     }
 
     #[test]

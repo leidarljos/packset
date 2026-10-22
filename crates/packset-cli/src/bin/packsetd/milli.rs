@@ -29,24 +29,67 @@ pub fn named() -> bool {
         .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
 }
 
+/// Sets already backfilled into an index by this process, oldest first.
+struct Backfill {
+    order: std::collections::VecDeque<(PathBuf, String)>,
+    seen: std::collections::HashSet<(PathBuf, String)>,
+}
+
+/// How many set backfills one process remembers. `off` remembers all of
+/// them. A set that falls out is uploaded once more on its next scoped
+/// search, which is the same work the first search did.
+pub const DEFAULT_BACKFILL_CAP: usize = 1024;
+
+fn backfill_cap() -> usize {
+    match std::env::var("PACKSET_BACKFILL_CAP") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_BACKFILL_CAP,
+            "off" | "none" => 0,
+            n => n.parse().unwrap_or(DEFAULT_BACKFILL_CAP),
+        },
+        Err(_) => DEFAULT_BACKFILL_CAP,
+    }
+}
+
 /// Sets already backfilled into an index by this process.
 ///
 /// The backfill exists for a projection written before atoms carried a `set`,
 /// and one pass over the set fixes that for good: every write since keeps the
 /// field current. Doing it per query instead re-uploads the whole set on every
 /// scoped search, which is the difference between a search and an indexing
-/// job.
-fn backfilled() -> &'static std::sync::Mutex<std::collections::HashSet<(PathBuf, String)>> {
-    static SEEN: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashSet<(PathBuf, String)>>,
-    > = std::sync::OnceLock::new();
-    SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+/// job. The set of names is capped: a writer that minted a new set per run
+/// would otherwise keep every name until it exited.
+fn backfilled() -> &'static std::sync::Mutex<Backfill> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Backfill>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| {
+        std::sync::Mutex::new(Backfill {
+            order: std::collections::VecDeque::new(),
+            seen: std::collections::HashSet::new(),
+        })
+    })
+}
+
+/// Record `key` and drop the oldest past `cap`. Zero keeps them all.
+fn remember_backfill(fill: &mut Backfill, key: (PathBuf, String), cap: usize) {
+    if !fill.seen.insert(key.clone()) {
+        return;
+    }
+    fill.order.push_back(key);
+    if cap == 0 {
+        return;
+    }
+    while fill.order.len() > cap {
+        if let Some(old) = fill.order.pop_front() {
+            fill.seen.remove(&old);
+        }
+    }
 }
 
 /// Forget what was backfilled into `dir`, because the index is being rebuilt.
 fn forget_backfill(dir: &Path) {
-    if let Ok(mut seen) = backfilled().lock() {
-        seen.retain(|(indexed, _)| indexed != dir);
+    if let Ok(mut fill) = backfilled().lock() {
+        fill.order.retain(|(indexed, _)| indexed != dir);
+        fill.seen.retain(|(indexed, _)| indexed != dir);
     }
 }
 
@@ -538,7 +581,10 @@ fn ensure_atoms(corpus: Corpus<'_>, dir: &Path, set: Option<&str>) -> bool {
         // turns a scoped search into an indexing job.
         Some(name) => {
             let key = (dir.to_path_buf(), name.to_string());
-            if backfilled().lock().is_ok_and(|seen| seen.contains(&key)) {
+            if backfilled()
+                .lock()
+                .is_ok_and(|fill| fill.seen.contains(&key))
+            {
                 return true;
             }
             let now = packset_core::clock::utcnow();
@@ -552,8 +598,8 @@ fn ensure_atoms(corpus: Corpus<'_>, dir: &Path, set: Option<&str>) -> bool {
                 .collect();
             let done = upsert(&docs, dir);
             if done {
-                if let Ok(mut seen) = backfilled().lock() {
-                    seen.insert(key);
+                if let Ok(mut fill) = backfilled().lock() {
+                    remember_backfill(&mut fill, key, backfill_cap());
                 }
             }
             done
@@ -618,6 +664,27 @@ pub fn search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Past the cap the oldest set is forgotten and would be uploaded
+    /// again. A repeat of a remembered set does not grow the list.
+    #[test]
+    fn the_backfill_remembers_a_capped_number_of_sets() {
+        let mut fill = Backfill {
+            order: std::collections::VecDeque::new(),
+            seen: std::collections::HashSet::new(),
+        };
+        let key = |n: u8| (PathBuf::from("/idx"), format!("set-{n}"));
+        remember_backfill(&mut fill, key(1), 2);
+        remember_backfill(&mut fill, key(1), 2);
+        assert_eq!(fill.order.len(), 1, "a repeat was stored again");
+        remember_backfill(&mut fill, key(2), 2);
+        remember_backfill(&mut fill, key(3), 2);
+        assert_eq!(fill.order.len(), 2);
+        assert!(!fill.seen.contains(&key(1)), "the oldest set was kept");
+        assert!(fill.seen.contains(&key(3)));
+        remember_backfill(&mut fill, key(4), 0);
+        assert_eq!(fill.order.len(), 3, "a cap of zero dropped a set");
+    }
 
     fn record(value: Value) -> Record {
         value.as_object().unwrap().clone()

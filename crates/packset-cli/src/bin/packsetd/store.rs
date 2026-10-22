@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use heed::types::Bytes;
@@ -23,6 +23,25 @@ use serde_json::{Map, Value};
 /// back fully allocated. `ls -ls` reported 1048580 blocks for a store
 /// holding one or two claims.
 pub const MAP_SIZE: usize = 1024 * 1024 * 1024;
+
+/// Parsed workspaces kept at once when `PACKSET_WORKSPACE_CACHE` is unset.
+/// Each one holds its live claims twice and the index over them. A seat
+/// that opens a checkout a day would otherwise keep every one of them
+/// until the process ends.
+pub const DEFAULT_WORKSPACE_CACHE: usize = 8;
+
+/// How many workspaces stay parsed. `off` and `none` keep them all, which
+/// is what a pack did before the cap.
+fn workspace_cache_from_env() -> usize {
+    match std::env::var("PACKSET_WORKSPACE_CACHE") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_WORKSPACE_CACHE,
+            "off" | "none" => 0,
+            n => n.parse().unwrap_or(DEFAULT_WORKSPACE_CACHE),
+        },
+        Err(_) => DEFAULT_WORKSPACE_CACHE,
+    }
+}
 
 /// One atom record.
 pub type Record = Map<String, Value>;
@@ -226,8 +245,19 @@ pub struct Store {
     counts: RwLock<HashMap<Option<String>, (u64, Counts)>>,
     /// One count at a time, as for the index.
     counts_build: Mutex<()>,
+    /// Parsed workspaces kept at once. Zero keeps every workspace a read
+    /// has touched.
+    workspace_cache: AtomicUsize,
+    /// Bumped when a cached workspace is used, so the coldest can be dropped.
+    cache_clock: AtomicU64,
+    /// The tick of each workspace last read or written.
+    cache_used: Mutex<HashMap<String, u64>>,
+    /// `memory.lmdb`, so an idle release can advise its pages.
+    db_dir: std::path::PathBuf,
     #[cfg(test)]
     counted: AtomicU64,
+    #[cfg(test)]
+    scanned: AtomicU64,
 }
 
 /// What `status` reports over one workspace: live, tombstoned and expired
@@ -289,8 +319,14 @@ impl Store {
             terms_build: Mutex::new(()),
             counts: RwLock::new(HashMap::new()),
             counts_build: Mutex::new(()),
+            workspace_cache: AtomicUsize::new(workspace_cache_from_env()),
+            cache_clock: AtomicU64::new(1),
+            cache_used: Mutex::new(HashMap::new()),
+            db_dir: db_path,
             #[cfg(test)]
             counted: AtomicU64::new(0),
+            #[cfg(test)]
+            scanned: AtomicU64::new(0),
         })
     }
 
@@ -300,6 +336,8 @@ impl Store {
     ///
     /// Fails when the read transaction does.
     pub fn scan(&self, workspace: Option<&str>) -> anyhow::Result<Vec<Record>> {
+        #[cfg(test)]
+        self.scanned.fetch_add(1, Ordering::SeqCst);
         if workspace == Some("") {
             return Ok(Vec::new());
         }
@@ -455,10 +493,12 @@ impl Store {
             if *seen + 1 != generation {
                 continue;
             }
+            let mut touched = false;
             for record in written {
                 if record.get("workspace").and_then(Value::as_str) != Some(workspace.as_str()) {
                     continue;
                 }
+                touched = true;
                 let Some(id) = record.get("id").and_then(Value::as_str) else {
                     continue;
                 };
@@ -477,6 +517,183 @@ impl Store {
             }
             *seen = generation;
             patch_shown(shown, stored, written, &now, dangling);
+            if touched {
+                self.note_cached(workspace);
+            }
+        }
+    }
+
+    /// Remember that `workspace` was just used.
+    fn note_cached(&self, workspace: &str) {
+        let tick = self.cache_clock.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut used) = self.cache_used.lock() {
+            if let Some(slot) = used.get_mut(workspace) {
+                *slot = tick;
+            } else {
+                used.insert(workspace.to_string(), tick);
+            }
+        }
+    }
+
+    /// Drop the coldest parsed workspaces until the cap holds. `keep` is the
+    /// workspace a caller just built and must not be the one dropped. Zero
+    /// is no cap. The index and the status counts leave with the snapshot:
+    /// they are the other copies of the same corpus.
+    fn evict_cached(&self, cache: &mut HashMap<String, Snapshot>, keep: &str) {
+        let cap = self.workspace_cache.load(Ordering::Relaxed);
+        if cap == 0 {
+            return;
+        }
+        while cache.len() > cap {
+            let coldest = {
+                let used = match self.cache_used.lock() {
+                    Ok(used) => used,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                cache
+                    .keys()
+                    .filter(|name| name.as_str() != keep)
+                    .min_by_key(|name| used.get(*name).copied().unwrap_or(0))
+                    .cloned()
+            };
+            let Some(name) = coldest else {
+                break;
+            };
+            cache.remove(&name);
+            if let Ok(mut terms) = self.terms.write() {
+                terms.remove(&name);
+            }
+            if let Ok(mut counts) = self.counts.write() {
+                counts.remove(&Some(name.clone()));
+            }
+            if let Ok(mut used) = self.cache_used.lock() {
+                used.remove(&name);
+            }
+        }
+    }
+
+    /// Drop indexes the workspace cap no longer has a snapshot for, and any
+    /// past that on their own. `keep` was just built.
+    fn evict_terms(&self, cache: &mut HashMap<String, Searchable>, keep: &str) {
+        let cap = self.workspace_cache.load(Ordering::Relaxed);
+        if cap == 0 {
+            return;
+        }
+        while cache.len() > cap {
+            let coldest = {
+                let used = match self.cache_used.lock() {
+                    Ok(used) => used,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                cache
+                    .keys()
+                    .filter(|name| name.as_str() != keep)
+                    .min_by_key(|name| used.get(*name).copied().unwrap_or(0))
+                    .cloned()
+            };
+            let Some(name) = coldest else {
+                break;
+            };
+            cache.remove(&name);
+        }
+    }
+
+    /// Drop status counts the same way. The all-workspace entry stays: it
+    /// is one row, not a corpus.
+    fn evict_counts(&self, cache: &mut HashMap<Option<String>, (u64, Counts)>, keep: &str) {
+        let cap = self.workspace_cache.load(Ordering::Relaxed);
+        if cap == 0 {
+            return;
+        }
+        while cache.keys().filter(|key| key.is_some()).count() > cap {
+            let coldest = {
+                let used = match self.cache_used.lock() {
+                    Ok(used) => used,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                cache
+                    .keys()
+                    .filter_map(|key| key.as_deref())
+                    .filter(|name| *name != keep)
+                    .min_by_key(|name| used.get(*name).copied().unwrap_or(0))
+                    .map(str::to_string)
+            };
+            let Some(name) = coldest else {
+                break;
+            };
+            cache.remove(&Some(name));
+        }
+    }
+
+    /// The cap, for a test that wants a smaller one than the process default.
+    pub fn set_workspace_cache(&self, cap: usize) {
+        self.workspace_cache.store(cap, Ordering::Relaxed);
+    }
+
+    /// How many workspaces are parsed right now.
+    #[cfg(test)]
+    pub fn cached_workspaces(&self) -> usize {
+        self.live.read().map(|cache| cache.len()).unwrap_or(0)
+    }
+
+    /// Return free heap to the kernel and drop the database's cached pages.
+    /// The mapping stays; the next read faults the pages it needs. Called
+    /// after a quiet stretch, when the high-water mark of a burst would
+    /// otherwise sit in swap until the process ends.
+    pub fn release_idle(&self) {
+        self.release_pages();
+        release_heap();
+    }
+
+    fn release_pages(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            // Take the writer slot and drop it, so a commit already in
+            // progress finishes before pages leave the map. The map is a
+            // read-only shared view: LMDB writes with `write`, not
+            // `WRITEMAP`. Advising that view reloads the file. Advising the
+            // file descriptor does not, the pages stay mapped.
+            if self.env.write_txn().is_err() {
+                return;
+            }
+            let Ok(maps) = fs::read_to_string("/proc/self/maps") else {
+                return;
+            };
+            let needle = self.db_dir.join("data.mdb");
+            let needle = fs::canonicalize(&needle).unwrap_or(needle);
+            let needle = needle.to_string_lossy();
+            for line in maps.lines() {
+                if !line.contains(needle.as_ref()) {
+                    continue;
+                }
+                let mut fields = line.split_whitespace();
+                let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+                    continue;
+                };
+                // A private mapping advised this way is discarded as
+                // zeroes. Only the shared read-only view is the database.
+                if !perms.starts_with("r--s") {
+                    continue;
+                }
+                let Some((start_s, end_s)) = range.split_once('-') else {
+                    continue;
+                };
+                let (Ok(start), Ok(end)) = (
+                    usize::from_str_radix(start_s, 16),
+                    usize::from_str_radix(end_s, 16),
+                ) else {
+                    continue;
+                };
+                if end <= start {
+                    continue;
+                }
+                // SAFETY: the range is this process's shared read-only map
+                // of its own database. The bytes stay in the file. The next
+                // read faults them back in.
+                unsafe {
+                    madvise(start as *mut std::ffi::c_void, end - start, MADV_DONTNEED);
+                }
+            }
         }
     }
 
@@ -539,6 +756,10 @@ impl Store {
         })?;
         if let Ok(mut cache) = self.counts.write() {
             cache.insert(key, (generation, counts.clone()));
+            if let Some(name) = workspace {
+                self.note_cached(name);
+                self.evict_counts(&mut cache, name);
+            }
         }
         Ok(counts)
     }
@@ -562,6 +783,7 @@ impl Store {
         if let Ok(cache) = self.live.read() {
             if let Some((seen, _stored, shown, _dangling)) = cache.get(workspace) {
                 if *seen == generation {
+                    self.note_cached(workspace);
                     return Ok((Arc::clone(shown), generation));
                 }
             }
@@ -583,6 +805,8 @@ impl Store {
                     workspace.to_string(),
                     (generation, stored, Arc::clone(&shared), dangling),
                 );
+                self.note_cached(workspace);
+                self.evict_cached(&mut cache, workspace);
             }
         }
         Ok((shared, generation))
@@ -668,6 +892,7 @@ impl Store {
                     ),
                 ),
             );
+            self.evict_terms(&mut cache, workspace);
         }
         Ok((atoms, index, documents))
     }
@@ -811,6 +1036,9 @@ impl Store {
         if let Ok(mut cache) = self.counts.write() {
             cache.remove(&Some(workspace.to_string()));
             cache.remove(&None);
+        }
+        if let Ok(mut used) = self.cache_used.lock() {
+            used.remove(workspace);
         }
         Ok(keys.len())
     }
@@ -1146,6 +1374,32 @@ const LOCK_NB: i32 = 4;
 
 extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
+}
+
+/// Ask glibc to return free arenas to the kernel. A burst allocates the
+/// high-water mark into per-thread arenas and, without this, holds it
+/// until the process ends.
+#[cfg(target_env = "gnu")]
+fn release_heap() {
+    // SAFETY: trim does not move live allocations.
+    let _ = unsafe { malloc_trim(0) };
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn release_heap() {}
+
+#[cfg(target_env = "gnu")]
+extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// `MADV_DONTNEED`.
+#[cfg(target_os = "linux")]
+const MADV_DONTNEED: i32 = 4;
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn madvise(addr: *mut std::ffi::c_void, length: usize, advice: i32) -> i32;
 }
 
 #[cfg(test)]
@@ -1690,6 +1944,100 @@ mod tests {
             }
         });
         assert_eq!(store.counted.load(Ordering::SeqCst) - before, 1);
+    }
+
+    /// Advising the database cold and trimming the heap leaves a claim readable.
+    #[test]
+    fn releasing_idle_memory_leaves_the_claim_readable() {
+        let (_dir, store) = store();
+        store
+            .upsert(&record(
+                json!({"id": "a", "workspace": "w", "text": "a", "kind": "lesson"}),
+            ))
+            .unwrap();
+        #[cfg(target_os = "linux")]
+        let path = store.db_dir.join("data.mdb");
+        #[cfg(target_os = "linux")]
+        let before = mapping_rss_kib(&path);
+        store.release_idle();
+        #[cfg(target_os = "linux")]
+        {
+            let after = mapping_rss_kib(&path);
+            assert!(
+                before > after,
+                "database mapping stayed resident ({before} KiB, then {after})"
+            );
+        }
+        assert_eq!(store.get("w", "a").unwrap().unwrap()["text"], json!("a"));
+    }
+
+    /// Resident size of one mapping, from `smaps`. Zero when it is not mapped.
+    #[cfg(target_os = "linux")]
+    fn mapping_rss_kib(path: &Path) -> u64 {
+        let Ok(text) = fs::read_to_string("/proc/self/smaps") else {
+            return 0;
+        };
+        let needle = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let needle = needle.to_string_lossy();
+        let mut rss = 0;
+        let mut matched = false;
+        for line in text.lines() {
+            if line.contains(needle.as_ref()) {
+                matched = true;
+                continue;
+            }
+            if !matched {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("Rss:") {
+                rss += rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .parse::<u64>()
+                    .unwrap_or(0);
+                matched = false;
+            } else if line.contains('-') {
+                matched = false;
+            }
+        }
+        rss
+    }
+
+    /// A cap of two keeps the workspaces just read and drops the cold one.
+    /// The dropped workspace is still in the database; the next read builds
+    /// it again.
+    #[test]
+    fn the_workspace_cache_drops_the_coldest_snapshot() {
+        let (_dir, store) = store();
+        store.set_workspace_cache(2);
+        for name in ["a", "b", "c"] {
+            store
+                .upsert(&record(
+                    json!({"id": name, "workspace": name, "text": name, "kind": "lesson"}),
+                ))
+                .unwrap();
+            let before = store.scanned.load(Ordering::SeqCst);
+            assert_eq!(store.live(name).unwrap().len(), 1);
+            assert!(
+                store.scanned.load(Ordering::SeqCst) > before,
+                "{name} was served from a cache it had not filled"
+            );
+        }
+        assert_eq!(store.cached_workspaces(), 2);
+        let before = store.scanned.load(Ordering::SeqCst);
+        assert_eq!(store.live("c").unwrap().len(), 1);
+        assert_eq!(store.live("b").unwrap().len(), 1);
+        assert_eq!(
+            store.scanned.load(Ordering::SeqCst),
+            before,
+            "the two hot workspaces were parsed again"
+        );
+        assert_eq!(store.live("a").unwrap().len(), 1);
+        assert!(
+            store.scanned.load(Ordering::SeqCst) > before,
+            "the cold workspace was still parsed"
+        );
     }
 
     #[test]

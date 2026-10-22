@@ -4,6 +4,49 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Idle release advises the database mapping. Advising the file leaves
+  pages that are still mapped, so a quiet writer kept the database
+  resident. The mapping stays open and the next read faults the pages
+  it needs.
+
+- A soak of the writer fails when resident memory keeps climbing after
+  the workspace cache is full. It drives a real packsetd across more
+  checkouts than the cache holds, waits out the idle release, and
+  compares anonymous RSS. `scripts/soak-rss.py` is the same mix, run
+  longer, and prints the sample a field report can be set beside.
+
+- After a quiet minute the writer returns free heap to the kernel and
+  drops cached pages of the database. `PACKSET_IDLE_TRIM` is that
+  wait in seconds (default 60, `off` to keep the pages). glibc holds
+  the high-water mark of a burst in per-thread arenas, and the mapped
+  database stays resident, so a laptop that had been idle still had
+  the whole working set in swap. The next request faults the pages it
+  needs. The mapping itself stays open.
+
+- The set-backfill memory stays bounded. `PACKSET_BACKFILL_CAP`
+  (default 1024, `off` for no cap) is how many set names one process
+  remembers having uploaded into the search index. A set that falls
+  out is uploaded once more on its next scoped search. A writer that
+  minted a new set per run used to keep every name until it exited.
+
+- The fire-hold map stays bounded. `PACKSET_FIRE_CAP` (default 4096,
+  `off` for no cap) is how many recent fires and cues are remembered
+  for the hour. A cue used to be inserted without dropping the expired
+  ones, so every distinct prompt stayed until some later fire cleaned
+  the map.
+
+- Shapes and the posting lists built from them stay bounded.
+  `PACKSET_SHAPE_CAP` (default 65536, `off` for no cap) is how many
+  claims keep their tokens in the process. A claim that is deleted,
+  forgotten or no longer live drops its shape. Before, every id ever
+  written kept one until the process ended.
+
+- Parsed workspaces stay bounded. `PACKSET_WORKSPACE_CACHE` (default 8,
+  `off` for no cap) is how many keep a live snapshot, an inverted index
+  and status counts. A seat that opens another checkout used to keep
+  every one of those until the process ended, and the cold ones sat in
+  swap. A workspace that falls out is read from the database again.
+
 - The reference's `origin` row says an `agent-derived` write and a
   hook write are live at once, and are held as proposals only when
   `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`. It said they
