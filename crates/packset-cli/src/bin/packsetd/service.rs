@@ -778,8 +778,8 @@ impl Service {
     /// else return the record the post would write over.
     ///
     /// The key is workspace and id together, so the same id in another
-    /// workspace is a different atom. A scratch workspace that was
-    /// forgotten has no tombstone, and its ids may be posted again.
+    /// workspace is a different atom. A forget keeps the tombstones, so a
+    /// forgotten workspace's other ids may be posted again and these not.
     fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<Option<Record>> {
         if workspace.is_empty() || id.is_empty() {
             return Ok(None);
@@ -1176,12 +1176,12 @@ impl Service {
         Ok(tomb)
     }
 
-    /// Drop a scratch workspace's atoms whole: no tombstones, no deed, the
-    /// keys are gone. Retraction stays `delete_atom`, which names the deed
-    /// that withdrew the claim; this is what a per-run scratch workspace
-    /// calls on its way out, so the long-lived writer does not keep every
-    /// smoke and herd run's atoms. Returns the workspace and how many
-    /// records were removed.
+    /// Drop a scratch workspace's atoms whole: no deed, the keys are gone,
+    /// and a tombstone stays so its id is still retired. Retraction stays
+    /// `delete_atom`, which names the deed that withdrew the claim; this is
+    /// what a per-run scratch workspace calls on its way out, so the
+    /// long-lived writer does not keep every smoke and herd run's atoms.
+    /// Returns the workspace and how many records were removed.
     ///
     /// # Errors
     ///
@@ -2496,7 +2496,7 @@ mod tests {
     }
 
     /// Scratch cleanup removes the keys. The next run may post the same
-    /// id. Retirement is the tombstone, and this path leaves none.
+    /// id. Retirement is the tombstone, and this path adds none.
     #[test]
     fn forgetting_a_scratch_workspace_does_not_retire_its_ids() {
         let (_dir, svc) = service();
@@ -2513,6 +2513,30 @@ mod tests {
         let stored = svc.add(again).unwrap();
         assert_eq!(stored["id"], json!(id));
         assert_eq!(stored["tombstone"], json!(false));
+    }
+
+    /// A forget is not a way back for a deleted id. Its tombstone survives
+    /// the forget, and the post after it is still refused.
+    #[test]
+    fn forgetting_a_workspace_keeps_its_retired_ids() {
+        let (_dir, svc) = service();
+        let id = "lessonid000000000000000000000007";
+        let mut lesson = atom("Paste the release key into every deploy form.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        svc.add(lesson.clone()).unwrap();
+        svc.delete_atom("w", id, None).unwrap();
+        let mut scratch = atom("A scratch claim the smoke run leaves.");
+        scratch.insert("id".into(), json!("scratchid000000000000000000000002"));
+        svc.add(scratch).unwrap();
+
+        let report = svc.forget_workspace("w").unwrap();
+        assert_eq!(report["forgotten"], json!(1), "{report:?}");
+        let err = svc.add(lesson).unwrap_err();
+        assert!(err.downcast_ref::<RetiredId>().is_some(), "{err}");
+        let tomb = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+        assert!(svc.store().live("w").unwrap().is_empty());
     }
 
     #[test]

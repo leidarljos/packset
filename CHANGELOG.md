@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `POST /v1/forget` (and `packset forget`) keeps a workspace's
+  tombstones. It removed every key, so after a forget a deleted id
+  could be posted again, and a lesson a person had withdrawn came
+  back under the id a rule still named. The other records go as
+  before, so a scratch run's live ids are free for the next run.
+
 - A record with no origin reads as `unknown` in every answer: search,
   `GET /v1/atoms` (with `kind`, `embedding=omit` or `as_of`),
   `GET /v1/atoms/<id>`, the pack, recall, and the record a write
@@ -61,7 +67,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   atom over the tombstone, so a lesson a person had withdrawn came
   back under the id a rule still named. The same id in another
   workspace is a different atom. Forgetting a scratch workspace
-  still removes the keys, and a later post may use them.
+  still removes its other keys, and a later post may use them.
 
 - A search hit carries `rerank_score`, the cross-encoder's number,
   or null when the stage did not score that hit. The second stage
