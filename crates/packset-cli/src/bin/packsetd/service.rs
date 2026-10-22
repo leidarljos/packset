@@ -32,6 +32,12 @@ impl std::error::Error for RetiredId {}
 
 /// The cap on one attached body.
 pub const ATTACH_CAP: usize = 200_000;
+/// How many workspaces may hold an attachment at once. A slot that is
+/// only peeked used to stay for the life of the process, one per
+/// workspace the seat had ever named.
+pub const ATTACH_SLOTS: usize = 64;
+/// How long a peeked attachment may stay.
+const ATTACH_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// One workspace's pending attachment.
 #[derive(Debug, Clone, Default)]
@@ -40,6 +46,17 @@ pub struct Attachment {
     pub text: String,
     /// What it is, for a reader.
     pub label: String,
+}
+
+/// An attachment and when it was stored. The clock is not part of the
+/// answer a client reads.
+struct HeldAttach {
+    body: Attachment,
+    at: std::time::Instant,
+}
+
+fn purge_attach(held: &mut BTreeMap<String, HeldAttach>, now: std::time::Instant) {
+    held.retain(|_, slot| now.saturating_duration_since(slot.at) < ATTACH_TTL);
 }
 
 /// The writer: the store, the cards, and the one-shot attach slots.
@@ -74,7 +91,7 @@ const FIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 pub struct Service {
     home: Home,
     store: Store,
-    attach: Mutex<BTreeMap<String, Attachment>>,
+    attach: Mutex<BTreeMap<String, HeldAttach>>,
     /// One logical write at a time. LMDB serialises transactions, not the
     /// read-check-write a dedupe or a grade is, so two identical remembers
     /// arriving together must not both be stored.
@@ -1651,7 +1668,8 @@ impl Service {
         cards::add_entry(&path, text, 1_000_000)
     }
 
-    /// Hold one body for a workspace, capped.
+    /// Hold one body for a workspace, capped. Expired slots go first. A
+    /// new workspace past the slot cap drops the oldest one.
     pub fn put_attach(&self, workspace: &str, text: &str, label: &str) -> Value {
         let mut body = text.to_string();
         if body.chars().count() > ATTACH_CAP {
@@ -1662,20 +1680,50 @@ impl Service {
             label: label.trim().to_string(),
         };
         let mut held = self.attach.lock().expect("attach lock");
-        held.insert(workspace.to_string(), slot.clone());
+        let now = std::time::Instant::now();
+        purge_attach(&mut held, now);
+        if !held.contains_key(workspace) && held.len() >= ATTACH_SLOTS {
+            if let Some(oldest) = held
+                .iter()
+                .min_by_key(|(_, slot)| slot.at)
+                .map(|(name, _)| name.clone())
+            {
+                held.remove(&oldest);
+            }
+        }
+        held.insert(
+            workspace.to_string(),
+            HeldAttach {
+                body: slot.clone(),
+                at: now,
+            },
+        );
         json!({"workspace": workspace, "text": slot.text, "label": slot.label})
     }
 
     /// Take the held body, leaving the slot empty: an attachment is one turn's.
     pub fn take_attach(&self, workspace: &str) -> Option<Attachment> {
         let mut held = self.attach.lock().expect("attach lock");
-        held.remove(workspace)
+        purge_attach(&mut held, std::time::Instant::now());
+        held.remove(workspace).map(|slot| slot.body)
     }
 
     /// Read the held body without taking it.
     pub fn peek_attach(&self, workspace: &str) -> Option<Attachment> {
-        let held = self.attach.lock().expect("attach lock");
-        held.get(workspace).cloned()
+        let mut held = self.attach.lock().expect("attach lock");
+        purge_attach(&mut held, std::time::Instant::now());
+        held.get(workspace).map(|slot| slot.body.clone())
+    }
+
+    /// Move one slot's clock back, so a test can expire it without waiting.
+    #[cfg(test)]
+    fn age_attach(&self, workspace: &str, ago: std::time::Duration) {
+        let mut held = self.attach.lock().expect("attach lock");
+        if let Some(slot) = held.get_mut(workspace) {
+            slot.at = std::time::Instant::now()
+                .checked_sub(ago)
+                .unwrap_or_else(std::time::Instant::now);
+        }
     }
 
     /// Keep the projection level with a write: upsert a live atom, delete one
@@ -4328,6 +4376,27 @@ mod tests {
         assert!(
             svc.take_attach("w").is_none(),
             "context for the next turn, not for every turn after it"
+        );
+    }
+
+    /// Peeked slots expire, and a new workspace past the cap drops the oldest.
+    #[test]
+    fn attach_slots_expire_and_stay_inside_the_cap() {
+        let (_dir, svc) = service();
+        for n in 0..ATTACH_SLOTS {
+            svc.put_attach(&format!("w{n}"), "body", "note");
+        }
+        assert!(svc.peek_attach("w0").is_some());
+        svc.put_attach("extra", "newer", "note");
+        assert!(
+            svc.peek_attach("w0").is_none(),
+            "the oldest slot stayed past the cap"
+        );
+        assert_eq!(svc.peek_attach("extra").unwrap().text, "newer");
+        svc.age_attach("extra", ATTACH_TTL);
+        assert!(
+            svc.peek_attach("extra").is_none(),
+            "a slot past the hour was still held"
         );
     }
 

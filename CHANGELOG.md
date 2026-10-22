@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An attachment expires after an hour, and at most 64 workspaces hold
+  one. A slot that was only peeked used to stay until the workspace
+  was forgotten, with no cap on how many workspaces that was.
+
 - Shapes are kept per workspace. The same client id in two workspaces
   no longer shares one token list, so a delete in one left the other
   unable to see its own claim. A workspace larger than the shape cap
