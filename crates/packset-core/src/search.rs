@@ -703,6 +703,12 @@ pub fn max_sim(query: &[Vec<f32>], document: &[Vec<f32>]) -> f64 {
 
 /// The dense ballot. Atoms without a stored vector are skipped, not scored
 /// zero: a missing encoder is not a vote.
+///
+/// The order is cosine plus a tenth of trust. Age is not in the score.
+/// A client reads `dense_rank` as the encoder's order, and one day of
+/// the fourteen-day half-life is about the gap between the first cosine
+/// and the fifth. The lexical ballots still add that half-life, and the
+/// fuse reads those scores.
 #[must_use]
 pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<Value> {
     let Ask {
@@ -729,9 +735,11 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
         if relevance <= 0.0 {
             continue;
         }
-        let ts = atom.get("ts").and_then(Value::as_str);
+        // No recency here: a client reads `dense_rank` as the encoder's
+        // order, and one day of age moves `recency` by about 0.05, the
+        // usual distance between the first cosine and the fifth.
         best.offer(Candidate {
-            score: relevance + 0.1 * trust_of(atom) + recency(ts, now),
+            score: relevance + 0.1 * trust_of(atom),
             id: id_of(atom),
             ordinal,
         });
@@ -742,7 +750,7 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
         .map(|c| {
             let atom: &Record = atoms[c.ordinal].borrow();
             let mut hit = atom_hit(atom, c.score);
-            // The plain cosine, without the trust and recency added to the
+            // The plain cosine, without the tenth of trust added to the
             // score: one scale a client can set a floor on.
             if let Some(vector) = embedding_of(atom) {
                 hit["cosine"] = json!((cosine(query, &vector) * 10_000.0).round() / 10_000.0);
@@ -898,6 +906,52 @@ mod tests {
         assert!(fused[1].get("cosine").is_none());
         assert_eq!(fused[2]["dense_rank"], json!(1));
         assert_eq!(fused[2]["cosine"], json!(0.71));
+    }
+
+    /// A client reads `dense_rank` as the encoder's order. Weeks of age
+    /// must not put a weaker cosine ahead of a closer one: one day of the
+    /// fourteen-day half-life is about the gap between the first cosine
+    /// and the fifth.
+    #[test]
+    fn an_older_closer_atom_leads_the_dense_rank() {
+        let query = [1.0f32, 0.0];
+        // Four weeks before NOW. The closer vector is nearly the query.
+        // The fresh one is a weaker cosine, close enough that recency
+        // 0.25 against 1.0 reverses them when age is added to the score.
+        let weaker = atom(json!({
+            "id": "weaker",
+            "kind": "lesson",
+            "text": "the newer claim",
+            "ts": NOW,
+            "trust": 1.0,
+            "embedding": [0.94, 0.341],
+        }));
+        let closer = atom(json!({
+            "id": "closer",
+            "kind": "lesson",
+            "text": "the older claim",
+            "ts": "2025-12-04T00:00:00.000Z",
+            "trust": 1.0,
+            "embedding": [1.0, 0.08],
+        }));
+        let atoms = [weaker, closer];
+        let hits = search_dense(&ask("", "", &atoms, "", 10, None), &query);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(
+            hits[0]["cosine"].as_f64().unwrap() > hits[1]["cosine"].as_f64().unwrap(),
+            "the first dense hit is the closer cosine: {hits:?}"
+        );
+        assert_eq!(hits[0]["id"], "closer", "{hits:?}");
+        assert_eq!(hits[0]["ts"], "2025-12-04T00:00:00.000Z");
+        assert_eq!(hits[1]["id"], "weaker");
+        // Trust stays in the score. Age does not: the score is the cosine
+        // plus a tenth of trust, not that plus a half-life.
+        let score = hits[0]["score"].as_f64().unwrap();
+        let cos = hits[0]["cosine"].as_f64().unwrap();
+        assert!(
+            (score - (cos + 0.1)).abs() < 1e-3,
+            "dense score {score} is cosine {cos} plus trust, without age"
+        );
     }
 
     #[test]

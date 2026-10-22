@@ -4,6 +4,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The dense ballot orders by cosine plus a tenth of trust. Age is
+  not in that score. A client reads `dense_rank` as the encoder's
+  order, and one day of the fourteen-day half-life moves the score
+  by about 0.05, the usual gap between the first cosine and the
+  fifth. On held-out packs aged across 0 to 90 days the gold memory
+  ranked first in 2 of 48, 2 of 80 and 2 of 128 cases, against 18,
+  26 and 39 when the same packs were fresh; leaving age out restored
+  those counts and left a fresh pack unchanged. The lexical scores
+  still add the half-life, and the fuse reads them.
+
 - `measurements/forgetting.txt` records the stdout of
   `cargo run --release -p packset-daemon --example forgetting`. The
   explanation page cites those retrieval rates, and the example

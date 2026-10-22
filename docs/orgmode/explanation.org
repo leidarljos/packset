@@ -17,8 +17,12 @@ closed or retracted with the deed that showed it wrong.
 Two lexical ballots always run: a prefix-and-one-edit scan that finds a
 claim through a typo, and BM25+ over an inverted index that weighs a word by
 how much it narrows the pack. A dense ballot runs when an encoder is
-present. The panel fuses the ballots by CombMNZ and diversifies by maximal marginal
-relevance (MMR).
+present. It orders by cosine plus a tenth of trust. Age is not in
+that score: a client reads =dense_rank= as the encoder's order, and
+one day of age is about the gap between the first cosine and the
+fifth. The lexical scores still add the fourteen-day half-life, and
+the fuse reads those scores. The panel fuses the ballots by CombMNZ
+and diversifies by maximal marginal relevance (MMR).
 Each default was measured on LoCoMo (doi:10.48550/arXiv.2402.17753), 1986
 questions over ten conversations with labelled evidence turns, loaded as
 atoms so the scorer is what is measured:
