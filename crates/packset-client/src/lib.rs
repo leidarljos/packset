@@ -852,7 +852,7 @@ impl PacksetClient {
         Ok(body)
     }
 
-    /// Drop a scratch workspace's atoms whole, no tombstones and no deed.
+    /// Drop a scratch workspace's live atoms, no deed; its tombstones stay.
     /// Retraction stays [`Self::delete_atom`]; this is what a per-run
     /// scratch workspace calls on its way out.
     ///
