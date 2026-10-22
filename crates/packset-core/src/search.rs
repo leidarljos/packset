@@ -703,6 +703,12 @@ pub fn max_sim(query: &[Vec<f32>], document: &[Vec<f32>]) -> f64 {
 
 /// The dense ballot. Atoms without a stored vector are skipped, not scored
 /// zero: a missing encoder is not a vote.
+///
+/// The order is cosine plus a tenth of trust. Age is not in the score.
+/// A client reads `dense_rank` as the encoder's order, and one day of
+/// the fourteen-day half-life is about the gap between the first cosine
+/// and the fifth. The lexical ballots still add that half-life, and the
+/// fuse reads those scores.
 #[must_use]
 pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<Value> {
     let Ask {
@@ -729,9 +735,11 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
         if relevance <= 0.0 {
             continue;
         }
-        let ts = atom.get("ts").and_then(Value::as_str);
+        // No recency here: a client reads `dense_rank` as the encoder's
+        // order, and one day of age moves `recency` by about 0.05, the
+        // usual distance between the first cosine and the fifth.
         best.offer(Candidate {
-            score: relevance + 0.1 * trust_of(atom) + recency(ts, now),
+            score: relevance + 0.1 * trust_of(atom),
             id: id_of(atom),
             ordinal,
         });
@@ -742,7 +750,7 @@ pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<V
         .map(|c| {
             let atom: &Record = atoms[c.ordinal].borrow();
             let mut hit = atom_hit(atom, c.score);
-            // The plain cosine, without the trust and recency added to the
+            // The plain cosine, without the tenth of trust added to the
             // score: one scale a client can set a floor on.
             if let Some(vector) = embedding_of(atom) {
                 hit["cosine"] = json!((cosine(query, &vector) * 10_000.0).round() / 10_000.0);
