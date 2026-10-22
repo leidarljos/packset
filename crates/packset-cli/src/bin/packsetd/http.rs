@@ -296,7 +296,7 @@ fn route(
                                     "atoms": snap
                                         .atoms
                                         .iter()
-                                        .map(|atom| listed(atom, &snap.vectors, false))
+                                        .map(|atom| listed(atom, &snap.originals, false))
                                         .collect::<Vec<_>>()
                                 }))
                             } else {
@@ -307,7 +307,7 @@ fn route(
                                         .filter(|a| kind.is_none_or(|k| {
                                             a.get("kind").and_then(Value::as_str) == Some(k)
                                         }))
-                                        .map(|atom| listed(atom, &snap.vectors, omit))
+                                        .map(|atom| listed(atom, &snap.originals, omit))
                                         .collect::<Vec<_>>()
                                 }))
                             }
@@ -572,7 +572,7 @@ fn route(
                                 .filter(|k| !k.is_empty()),
                         );
                         for atom in &mut recalled {
-                            crate::store::restore_embedding(atom, &snap.vectors);
+                            crate::store::restore_embedding(atom, &snap.originals);
                         }
                         Answer::ok(json!({ "atoms": recalled }))
                     }
@@ -721,16 +721,16 @@ fn route(
 }
 
 /// Turn a service result into an answer, keeping the store's own message.
-/// One atom as a listing answers it. The cache holds floats and a null
-/// slot; the answer carries the JSON array unless the caller left vectors
-/// out. A record with no vector stays as the cache has it.
+/// One atom as a listing answers it. The cache scores with floats. The
+/// answer copies the JSON numbers that were stored, unless the caller
+/// left vectors out. A record with no vector stays as the cache has it.
 fn listed(
     atom: &Map<String, Value>,
-    vectors: &std::collections::HashMap<String, std::sync::Arc<[f32]>>,
+    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
     omit: bool,
 ) -> Value {
     let id = atom.get("id").and_then(Value::as_str);
-    let has_vector = id.is_some_and(|id| vectors.contains_key(id));
+    let has_vector = id.is_some_and(|id| originals.contains_key(id));
     if !omit && !has_vector {
         return Value::Object(packset_core::record::shown(atom).into_owned());
     }
@@ -738,7 +738,7 @@ fn listed(
     if omit {
         copy.remove("embedding");
     } else {
-        crate::store::restore_embedding(&mut copy, vectors);
+        crate::store::restore_embedding(&mut copy, originals);
     }
     packset_core::record::fill_origin(&mut copy);
     Value::Object(copy)

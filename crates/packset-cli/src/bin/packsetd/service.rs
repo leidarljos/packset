@@ -1555,7 +1555,7 @@ impl Service {
                 .collect();
             atoms.iter_mut().for_each(|atom| {
                 record::fill_origin(atom);
-                crate::store::restore_embedding(atom, &snap.vectors);
+                crate::store::restore_embedding(atom, &snap.originals);
             });
             Ok(atoms)
         };
@@ -2927,6 +2927,31 @@ mod tests {
         let disk = svc.store.get("w", "a").unwrap().unwrap();
         assert!(disk["embedding"].is_null(), "{disk:?}");
         assert!(svc.store.vectors("w").get("a").is_none());
+    }
+
+    /// A pack answers a client vector as it was stored, not as f32.
+    #[test]
+    fn a_pack_returns_a_client_vector_as_stored() {
+        let (_dir, svc) = service();
+        svc.store
+            .upsert(
+                json!({
+                    "id": "a",
+                    "workspace": "w",
+                    "text": "a client vector stays as written",
+                    "kind": "lesson",
+                    "origin": "user-declared",
+                    "embedding": [0.1, 1e39, -0.3],
+                    "tombstone": false,
+                })
+                .as_object()
+                .unwrap(),
+            )
+            .unwrap();
+        let packed = svc.pack("w", None).unwrap();
+        let atoms = packed["atoms"].as_array().unwrap();
+        let atom = atoms.iter().find(|row| row["id"] == "a").unwrap();
+        assert_eq!(atom["embedding"], json!([0.1, 1e39, -0.3]));
     }
 
     /// A deleted claim leaves no shape, and a third workspace does not keep

@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An answer returns a client-supplied vector as it was stored. Scoring
+  still uses f32. Rebuilding the JSON from those floats turned 0.1 into
+  its approximation and an out-of-range value into null.
+
 - A write that sends `embedding: null` or `[]` clears the stored vector,
   and an update that changes the text drops the old vector unless it
   sends a new one. A rewrite that does not name the field, such as a
