@@ -648,15 +648,52 @@ impl Store {
     fn release_pages(&self) {
         #[cfg(target_os = "linux")]
         {
-            use std::os::fd::AsRawFd;
-            let path = self.db_dir.join("data.mdb");
-            let Ok(file) = File::open(&path) else {
+            // Take the writer slot and drop it, so a commit already in
+            // progress finishes before pages leave the map. The map is a
+            // read-only shared view: LMDB writes with `write`, not
+            // `WRITEMAP`. Advising that view reloads the file. Advising the
+            // file descriptor does not, the pages stay mapped.
+            if self.env.write_txn().is_err() {
+                return;
+            }
+            let Ok(maps) = fs::read_to_string("/proc/self/maps") else {
                 return;
             };
-            // SAFETY: the advice names a file this process has open. Dropping
-            // cached pages does not change the bytes. The next read faults
-            // them back in.
-            let _ = unsafe { posix_fadvise(file.as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED) };
+            let needle = self.db_dir.join("data.mdb");
+            let needle = fs::canonicalize(&needle).unwrap_or(needle);
+            let needle = needle.to_string_lossy();
+            for line in maps.lines() {
+                if !line.contains(needle.as_ref()) {
+                    continue;
+                }
+                let mut fields = line.split_whitespace();
+                let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+                    continue;
+                };
+                // A private mapping advised this way is discarded as
+                // zeroes. Only the shared read-only view is the database.
+                if !perms.starts_with("r--s") {
+                    continue;
+                }
+                let Some((start_s, end_s)) = range.split_once('-') else {
+                    continue;
+                };
+                let (Ok(start), Ok(end)) = (
+                    usize::from_str_radix(start_s, 16),
+                    usize::from_str_radix(end_s, 16),
+                ) else {
+                    continue;
+                };
+                if end <= start {
+                    continue;
+                }
+                // SAFETY: the range is this process's shared read-only map
+                // of its own database. The bytes stay in the file. The next
+                // read faults them back in.
+                unsafe {
+                    madvise(start as *mut std::ffi::c_void, end - start, MADV_DONTNEED);
+                }
+            }
         }
     }
 
@@ -1356,13 +1393,13 @@ extern "C" {
     fn malloc_trim(pad: usize) -> i32;
 }
 
-/// `POSIX_FADV_DONTNEED`.
+/// `MADV_DONTNEED`.
 #[cfg(target_os = "linux")]
-const POSIX_FADV_DONTNEED: i32 = 4;
+const MADV_DONTNEED: i32 = 4;
 
 #[cfg(target_os = "linux")]
 extern "C" {
-    fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+    fn madvise(addr: *mut std::ffi::c_void, length: usize, advice: i32) -> i32;
 }
 
 #[cfg(test)]
@@ -1918,8 +1955,53 @@ mod tests {
                 json!({"id": "a", "workspace": "w", "text": "a", "kind": "lesson"}),
             ))
             .unwrap();
+        #[cfg(target_os = "linux")]
+        let path = store.db_dir.join("data.mdb");
+        #[cfg(target_os = "linux")]
+        let before = mapping_rss_kib(&path);
         store.release_idle();
+        #[cfg(target_os = "linux")]
+        {
+            let after = mapping_rss_kib(&path);
+            assert!(
+                before > after,
+                "database mapping stayed resident ({before} KiB, then {after})"
+            );
+        }
         assert_eq!(store.get("w", "a").unwrap().unwrap()["text"], json!("a"));
+    }
+
+    /// Resident size of one mapping, from `smaps`. Zero when it is not mapped.
+    #[cfg(target_os = "linux")]
+    fn mapping_rss_kib(path: &Path) -> u64 {
+        let Ok(text) = fs::read_to_string("/proc/self/smaps") else {
+            return 0;
+        };
+        let needle = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let needle = needle.to_string_lossy();
+        let mut rss = 0;
+        let mut matched = false;
+        for line in text.lines() {
+            if line.contains(needle.as_ref()) {
+                matched = true;
+                continue;
+            }
+            if !matched {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("Rss:") {
+                rss += rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .parse::<u64>()
+                    .unwrap_or(0);
+                matched = false;
+            } else if line.contains('-') {
+                matched = false;
+            }
+        }
+        rss
     }
 
     /// A cap of two keeps the workspaces just read and drops the cold one.

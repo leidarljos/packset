@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Idle release advises the database mapping. Advising the file leaves
+  pages that are still mapped, so a quiet writer kept the database
+  resident. The mapping stays open and the next read faults the pages
+  it needs.
+
 - A soak of the writer fails when resident memory keeps climbing after
   the workspace cache is full. It drives a real packsetd across more
   checkouts than the cache holds, waits out the idle release, and
