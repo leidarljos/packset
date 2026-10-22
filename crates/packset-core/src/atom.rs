@@ -114,6 +114,13 @@ pub const ORIGINS: &[&str] = &[
 /// The origin a record written before this field reads as.
 pub const USER_DECLARED: &str = "user-declared";
 
+/// The rank of a record whose origin is missing, empty or not one of
+/// [`ORIGINS`]. A writer may not store it.
+pub const UNKNOWN_ORIGIN: &str = "unknown";
+
+/// The `source.basis` that names the person standing behind a claim.
+pub const PERSON_BASIS: &str = "person";
+
 /// Content the writer typed as fact. It cannot outrank a lower origin.
 pub const CONTENT_AUTHORITATIVE: &str = "authoritative";
 
@@ -185,11 +192,33 @@ pub fn hold_agent_writes() -> bool {
         .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-/// Whether `to` would relabel an agent-derived lesson as the user's
-/// without an accept.
+/// Where an origin sits in the one order a write may only move down:
+/// [`USER_DECLARED`] above every other origin, and a missing or unknown
+/// one below them all. The other origins share a step, so a move between
+/// them is not a rise.
+#[must_use]
+pub fn origin_rank(origin: &str) -> u8 {
+    if origin == USER_DECLARED {
+        2
+    } else if known_origin(origin) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Where a `source.basis` sits: [`PERSON_BASIS`], read trimmed and
+/// without case, above everything else. A missing basis is not a person.
+#[must_use]
+pub fn basis_rank(basis: Option<&str>) -> u8 {
+    u8::from(basis.is_some_and(|b| b.trim().eq_ignore_ascii_case(PERSON_BASIS)))
+}
+
+/// Whether `to` ranks above `from` in [`origin_rank`]: a rise only an
+/// accept may make.
 #[must_use]
 pub fn launders(from: &str, to: &str) -> bool {
-    from == "agent-derived" && to == USER_DECLARED
+    origin_rank(to) > origin_rank(from)
 }
 
 /// Jaccard on entity sets. Empty intersection is 0.
@@ -361,11 +390,31 @@ mod tests {
         assert!(!needs_accept("peer", false, true));
         assert!(!needs_accept("tool-echo", false, true));
         assert!(!needs_accept("external", false, true));
-        assert!(launders("agent-derived", USER_DECLARED));
-        assert!(!launders("tool-echo", USER_DECLARED));
-        assert!(!launders("peer", USER_DECLARED));
-        assert!(!launders(USER_DECLARED, USER_DECLARED));
         assert!(ORIGINS.iter().all(|name| known_origin(name)));
         assert!(!known_origin("forged"));
+        assert!(!known_origin(UNKNOWN_ORIGIN));
+    }
+
+    #[test]
+    fn user_declared_is_above_every_origin_and_unknown_below_them() {
+        for other in ORIGINS.iter().filter(|o| **o != USER_DECLARED) {
+            assert!(launders(other, USER_DECLARED), "{other}");
+            assert!(!launders(USER_DECLARED, other), "{other}");
+            assert!(launders(UNKNOWN_ORIGIN, other), "{other}");
+            assert!(launders("", other), "{other}");
+            assert!(!launders(other, "agent-derived"), "{other}");
+        }
+        assert!(!launders(USER_DECLARED, USER_DECLARED));
+        assert!(launders("forged", USER_DECLARED));
+        assert!(!launders(" user-declared", UNKNOWN_ORIGIN));
+    }
+
+    #[test]
+    fn only_a_person_basis_ranks_above_the_rest() {
+        assert_eq!(basis_rank(Some(PERSON_BASIS)), 1);
+        assert_eq!(basis_rank(Some(" Person ")), 1);
+        for below in [None, Some(""), Some("agent"), Some("persons"), Some("tool")] {
+            assert_eq!(basis_rank(below), 0, "{below:?}");
+        }
     }
 }

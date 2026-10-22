@@ -326,8 +326,8 @@ fn live_cap_from_env() -> usize {
     }
 }
 
-/// Why an agent-derived lesson cannot be relabelled by an update.
-const LAUNDERED_ORIGIN: &str = "an agent-derived lesson reaches user-declared only through accept";
+/// Why an update cannot raise an origin.
+const LAUNDERED_ORIGIN: &str = "an origin reaches user-declared only through accept";
 
 /// Whether `origin` is missing, null, or an empty string.
 fn origin_is_blank(value: Option<&Value>) -> bool {
@@ -348,26 +348,18 @@ fn origin_shown(value: &Value) -> String {
     }
 }
 
-/// Refuse an origin update that would store `user-declared` without accept.
+/// Refuse an origin update that would raise the origin without accept.
 ///
-/// Null, `""` and any non-string are the values `validate` would default to
-/// `user-declared`. That default is the launder, so they take the same check
-/// as the string. A blank origin is not written as `user-declared` either.
+/// Null and `""` are the values `validate` would default to `user-declared`,
+/// which is a rise from any other origin, so an update may not send them.
 fn refuse_origin_update(current: &Record, raw: &Value) -> Result<(), AtomError> {
-    let from = record::origin_of(current);
     if let Value::String(to) = raw {
         if packset_core::atom::known_origin(to) {
-            if packset_core::atom::launders(from, to) {
+            if packset_core::atom::launders(record::origin_of(current), to) {
                 return Err(AtomError(LAUNDERED_ORIGIN.into()));
             }
             return Ok(());
         }
-        if !to.is_empty() {
-            return Err(AtomError(format!("unknown atom origin: {to}")));
-        }
-    }
-    if packset_core::atom::launders(from, packset_core::atom::USER_DECLARED) {
-        return Err(AtomError(LAUNDERED_ORIGIN.into()));
     }
     let shown = origin_shown(raw);
     Err(AtomError(format!("unknown atom origin: {shown}")))
@@ -383,13 +375,13 @@ fn basis_name(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Whether this update would raise `source.basis` from agent to person.
+/// Whether this update would raise `source.basis` to person.
 fn basis_rises(stored: Option<&Value>, incoming: Option<&Value>) -> bool {
     let Some(incoming) = incoming else {
         return false;
     };
-    basis_name(stored).as_deref() == Some("agent")
-        && basis_name(Some(incoming)).as_deref() == Some("person")
+    packset_core::atom::basis_rank(basis_name(Some(incoming)).as_deref())
+        > packset_core::atom::basis_rank(basis_name(stored).as_deref())
 }
 
 impl Service {
@@ -1122,7 +1114,7 @@ impl Service {
         }
         if basis_rises(updated.get("source"), fields.get("source")) {
             return Err(anyhow::Error::new(AtomError(
-                "an update cannot raise source.basis from agent to person".into(),
+                "an update cannot raise source.basis to person".into(),
             )));
         }
         for (key, value) in fields {
@@ -2937,7 +2929,7 @@ mod tests {
             fields.insert("origin".into(), origin);
             fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
             let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains("accept"), "{err}");
+            assert!(err.to_string().contains("unknown atom origin"), "{err}");
             let got = svc.store.get("w", id).unwrap().unwrap();
             assert_eq!(got["origin"], json!("agent-derived"), "{got:?}");
             assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
@@ -2963,10 +2955,11 @@ mod tests {
     }
 
     /// Basis `person` on top of `agent` is the same rise as the origin.
-    /// A record that never had a basis can still be stamped, which is how
-    /// a person's old preference is marked, and a downgrade is kept.
+    /// A missing basis is not a person's either, so a record that never
+    /// had one is not stamped by an update. A basis that stays below
+    /// person may change.
     #[test]
-    fn an_update_cannot_raise_basis_from_agent_to_person() {
+    fn an_update_cannot_raise_basis_to_person() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid000000000000000000000003";
@@ -3008,15 +3001,77 @@ mod tests {
                 "basis": "person"
             }),
         );
-        let stamped = svc.update("w", legacy_id, &fields).unwrap();
-        assert_eq!(stamped["source"]["basis"], json!("person"));
-        assert_eq!(stamped["origin"], json!("user-declared"));
-        assert_eq!(stamped["source"]["via"], json!("ljos"));
+        let err = svc.update("w", legacy_id, &fields).unwrap_err();
+        assert!(err.to_string().contains("basis"), "{err}");
+        let kept = svc.store.get("w", legacy_id).unwrap().unwrap();
+        assert!(kept["source"].get("basis").is_none(), "{kept:?}");
+        assert_eq!(kept["origin"], json!("user-declared"));
 
         let mut down = Map::new();
         down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
         let dropped = svc.update("w", legacy_id, &down).unwrap();
         assert_eq!(dropped["source"]["basis"], json!("agent"));
+    }
+
+    /// The order, not a list of pairs: user-declared sits above every
+    /// other origin. A lesson moved sideways to another origin cannot
+    /// climb from there.
+    #[test]
+    fn an_origin_cannot_climb_through_another_origin() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000004";
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        svc.add(lesson).unwrap();
+
+        for step in ["tool-echo", "peer", "external"] {
+            let mut fields = Map::new();
+            fields.insert("origin".into(), json!(step));
+            let moved = svc.update("w", id, &fields).unwrap();
+            assert_eq!(moved["origin"], json!(step));
+            let mut fields = Map::new();
+            fields.insert("origin".into(), json!("user-declared"));
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains("accept"), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["origin"], json!(step), "{got:?}");
+        }
+    }
+
+    /// A `source` that hides the basis under another key, or replaces the
+    /// object whole, leaves no person basis, and the next update cannot
+    /// stamp one back.
+    #[test]
+    fn a_basis_cannot_climb_back_through_a_nested_or_missing_one() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000005";
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("user-declared"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        svc.add(lesson).unwrap();
+
+        for hidden in [
+            json!({"meta": {"basis": "person"}, "via": "ljos"}),
+            json!({"via": "ljos"}),
+            json!("person"),
+            Value::Null,
+        ] {
+            let mut fields = Map::new();
+            fields.insert("source".into(), hidden.clone());
+            svc.update("w", id, &fields).unwrap();
+            let mut fields = Map::new();
+            fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains("basis"), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["source"], hidden, "{got:?}");
+        }
     }
 
     /// A record written before origin existed stays without the field.

@@ -4,6 +4,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- An update cannot raise an origin or a basis by a detour. Origins
+  now sit in one order with `user-declared` above the rest, so a
+  lesson moved to `tool-echo`, `peer` or `external` is not relabelled
+  the person's from there, and null or `""` is refused as an origin
+  on any record. `person` sits above every other `source.basis`, and
+  a missing basis is not a person's: a `source` that dropped the
+  basis, or hid it under another key, is not stamped `person` again,
+  and neither is an old preference that never had one. Accept is
+  still the one way up.
+
 - A search hit from the index carries the atom's stored origin. The
   projection has none, and the filter copied the source without it,
   so a missing field was read as `user-declared`. The hit copies the
@@ -15,8 +25,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the check and validate stored `user-declared`, which only an accept
   may do. A blank origin is refused, and an update that does not
   name origin leaves a missing one unset. `source.basis` cannot rise
-  from agent to person on an update either. A claim that never had a
-  basis can still be stamped `person`.
+  from agent to person on an update either.
 
 - A client-chosen id that was deleted stays retired. `POST /v1/atoms`
   with that id in the same workspace answers 409, and the tombstone
