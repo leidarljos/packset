@@ -1236,6 +1236,11 @@ impl Service {
     ///
     /// [`AtomError`] for a bad set name, else the store's.
     pub fn pack(&self, workspace: &str, set: Option<&str>) -> anyhow::Result<Value> {
+        let current = |set: Option<&str>| -> anyhow::Result<Vec<Record>> {
+            let mut atoms = self.store.current(workspace, set)?;
+            atoms.iter_mut().for_each(record::fill_origin);
+            Ok(atoms)
+        };
         match set {
             Some(raw) => {
                 let named = packset_core::set_name::check(raw)
@@ -1248,14 +1253,14 @@ impl Service {
                     "instructions": cards::read_text(
                         &self.home.set_instructions_path(workspace, &named)
                     ),
-                    "atoms": self.store.current(workspace, Some(&named))?,
+                    "atoms": current(Some(&named))?,
                 }))
             }
             None => Ok(json!({
                 "workspace": workspace,
                 "user": cards::read_text(&self.home.user_path()),
                 "memory": cards::read_text(&self.home.memory_path(workspace)),
-                "atoms": self.store.current(workspace, None)?,
+                "atoms": current(None)?,
             })),
         }
     }
@@ -1465,7 +1470,7 @@ impl Service {
         let at =
             clock::canonicalize(at).ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
         let atoms = self.store.as_of(workspace, &at)?;
-        let atoms: Vec<&Record> = atoms.iter().map(AsRef::as_ref).collect();
+        let atoms: Vec<_> = atoms.iter().map(|atom| record::shown(atom)).collect();
         Ok(json!({ "atoms": atoms, "as_of": at }))
     }
 
@@ -2826,7 +2831,7 @@ mod tests {
         svc.store.upsert(&row).unwrap();
         let got = svc.store.get("w", &id).unwrap().unwrap();
         assert!(got.get("origin").is_none(), "{got:?}");
-        assert_eq!(record::origin_of(&got), "user-declared");
+        assert_eq!(record::origin_of(&got), "unknown");
     }
 
     #[test]
@@ -3177,7 +3182,7 @@ mod tests {
         let got = svc.store.get("w", &id).unwrap().unwrap();
         assert!(got.get("origin").is_none(), "{got:?}");
         assert_eq!(got["pinned"], json!(true));
-        assert_eq!(record::origin_of(&got), "user-declared");
+        assert_eq!(record::origin_of(&got), "unknown");
 
         let mut fields = Map::new();
         fields.insert("origin".into(), Value::Null);

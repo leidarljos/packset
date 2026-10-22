@@ -1056,7 +1056,7 @@ mod tests {
             .unwrap()
             .clone();
         assert!(atom_hit(&without, 1.0).get("source").is_none());
-        assert_eq!(atom_hit(&without, 1.0)["origin"], json!("user-declared"));
+        assert_eq!(atom_hit(&without, 1.0)["origin"], json!("unknown"));
     }
 
     #[test]

@@ -513,14 +513,8 @@ pub fn filter_atom_hits<R: Borrow<Record>>(
                 hit["entities"] = entities.clone();
             }
             // Origin is not a scored field, so the index does not have it.
-            // A missing one reads as user-declared. Copy the stored string,
-            // and mark a blank record unknown, over whatever the index said.
-            let origin = atom
-                .get("origin")
-                .and_then(Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or("unknown");
-            hit["origin"] = Value::String(origin.to_string());
+            // The stored record's is written over whatever the index said.
+            hit["origin"] = Value::String(record::origin_of(atom).to_string());
             Some(hit)
         })
         .collect()

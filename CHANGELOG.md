@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A record with no origin reads as `unknown` in every answer: search,
+  `GET /v1/atoms` (with `kind`, `embedding=omit` or `as_of`),
+  `GET /v1/atoms/<id>`, the pack, recall, and the record a write
+  returns. Every path but the index's read it as `user-declared`, the
+  person's origin. The stored row stays without the field, and a post
+  that names no origin is still stored as `user-declared`.
+
 - `POST /v1/atoms` with the id of a live record takes the update's
   rule. The post writes over that record, so it was a second way to
   relabel a lesson the person's: send the same id with

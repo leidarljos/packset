@@ -195,6 +195,7 @@ fn route(
                     if omit {
                         atom.remove("embedding");
                     }
+                    packset_core::record::fill_origin(&mut atom);
                     Value::Object(atom)
                 };
                 match as_of_stamp(query) {
@@ -221,7 +222,10 @@ fn route(
                                 .filter(|k| !k.is_empty());
                             if kind.is_none() && !omit {
                                 Answer::ok(json!({
-                                    "atoms": atoms.iter().map(AsRef::as_ref).collect::<Vec<&Map<String, Value>>>()
+                                    "atoms": atoms
+                                        .iter()
+                                        .map(|atom| packset_core::record::shown(atom))
+                                        .collect::<Vec<_>>()
                                 }))
                             } else {
                                 Answer::ok(json!({
@@ -279,7 +283,7 @@ fn route(
                 Ok(workspace) => match service.store().get(&workspace, id) {
                     Err(e) => Answer::err(400, e),
                     Ok(None) => Answer::err(404, "no atom"),
-                    Ok(Some(atom)) => match as_of_stamp(query) {
+                    Ok(Some(mut atom)) => match as_of_stamp(query) {
                         Err(a) => a,
                         Ok(at) => {
                             let dated = at.is_some();
@@ -290,6 +294,7 @@ fn route(
                                 packset_core::record::is_live(&atom, &now)
                             };
                             if live {
+                                packset_core::record::fill_origin(&mut atom);
                                 Answer::ok(Value::Object(atom))
                             } else {
                                 Answer::err(404, "no atom")
@@ -641,6 +646,7 @@ fn route(
 /// of every reply and no client reads them back from a write.
 fn written(mut atom: Map<String, Value>) -> Map<String, Value> {
     atom.remove("embedding");
+    packset_core::record::fill_origin(&mut atom);
     atom
 }
 
@@ -968,6 +974,59 @@ mod tests {
             "live-now search still drops it: {:?}",
             now.body
         );
+    }
+
+    /// A record with no origin is not the person's. Every answer that hands
+    /// it to a client says `unknown`, and the stored row stays without one.
+    #[test]
+    fn a_record_with_no_origin_reads_as_unknown() {
+        let (_dir, svc) = dated_pack();
+        let panel = packset_core::Panel::default();
+        let get = |path: &str, extra: &[(&str, &str)]| {
+            let mut q: HashMap<String, String> = HashMap::new();
+            q.insert("workspace".into(), "w".into());
+            for (key, value) in extra {
+                q.insert((*key).into(), (*value).into());
+            }
+            let got = route(&svc, &panel, &Method::Get, path, &q, &Map::new());
+            assert_eq!(got.code, 200, "{path} {extra:?}: {:?}", got.body);
+            got.body
+        };
+        for (path, extra, list) in [
+            ("/v1/atoms", vec![], "atoms"),
+            ("/v1/atoms", vec![("embedding", "omit")], "atoms"),
+            ("/v1/atoms", vec![("kind", "voice")], "atoms"),
+            (
+                "/v1/atoms",
+                vec![("as_of", "2024-06-01T00:00:00.000Z")],
+                "atoms",
+            ),
+            ("/v1/pack", vec![], "atoms"),
+            ("/v1/search", vec![("q", "fuse")], "hits"),
+            ("/v1/recall", vec![], "atoms"),
+        ] {
+            let body = get(path, &extra);
+            let rows = body[list].as_array().unwrap();
+            assert!(!rows.is_empty(), "{path} {extra:?}: {body:?}");
+            for row in rows {
+                assert_eq!(row["origin"], json!("unknown"), "{path} {extra:?}: {row:?}");
+            }
+        }
+        assert_eq!(get("/v1/atoms/neu", &[])["origin"], json!("unknown"));
+        let updated = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/update",
+            &HashMap::new(),
+            json!({"workspace": "w", "id": "neu", "fields": {"pinned": true}})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(updated.code, 200, "{:?}", updated.body);
+        assert_eq!(updated.body["origin"], json!("unknown"));
+        let stored = svc.store().get("w", "neu").unwrap().unwrap();
+        assert!(stored.get("origin").is_none(), "{stored:?}");
     }
 
     fn write_embed_stub(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {

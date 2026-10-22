@@ -111,11 +111,11 @@ pub const ORIGINS: &[&str] = &[
     "peer",
 ];
 
-/// The origin a record written before this field reads as.
+/// The person's origin, and the one a new write that names none is given.
 pub const USER_DECLARED: &str = "user-declared";
 
-/// The rank of a record whose origin is missing, empty or not one of
-/// [`ORIGINS`]. A writer may not store it.
+/// What a record whose origin is missing or empty reads as, and the rank
+/// of any origin not one of [`ORIGINS`]. A writer may not store it.
 pub const UNKNOWN_ORIGIN: &str = "unknown";
 
 /// The `source.basis` that names the person standing behind a claim.

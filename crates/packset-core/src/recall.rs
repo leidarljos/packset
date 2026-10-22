@@ -378,7 +378,7 @@ mod tests {
             .collect();
         let got = recall(&live, &[], &Hints::default(), None, NOW, None);
         assert_eq!(got.len(), 5, "nothing is ranked away from a full reader");
-        assert!(got.iter().all(|a| a["origin"] == "user-declared"));
+        assert!(got.iter().all(|a| a["origin"] == "unknown"));
         assert!(live.iter().all(|a| !a.contains_key("origin")));
     }
 

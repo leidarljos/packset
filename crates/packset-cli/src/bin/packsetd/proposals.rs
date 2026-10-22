@@ -758,7 +758,7 @@ mod tests {
         .clone();
         let rec = hold(&home, "w", &lesson, "hook", &mut next).unwrap();
         assert_eq!(rec["hook"], json!(true));
-        assert_eq!(rec["origin"], json!("user-declared"));
+        assert_eq!(rec["origin"], json!("unknown"));
         assert_eq!(rec["why"], json!("hook"));
         assert_eq!(list_open(&home, "w").len(), 1);
     }

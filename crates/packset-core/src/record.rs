@@ -830,31 +830,43 @@ pub fn hold_provenance(
     Ok(())
 }
 
-/// The origin on a record. A missing or empty field reads as
-/// [`crate::atom::USER_DECLARED`] and the map is not written.
-#[must_use]
-pub fn origin_of(atom: &Map<String, Value>) -> &str {
-    match atom.get("origin").and_then(Value::as_str) {
-        Some(name) if !name.is_empty() => name,
-        _ => crate::atom::USER_DECLARED,
-    }
+fn named_origin(atom: &Map<String, Value>) -> Option<&str> {
+    atom.get("origin")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
 }
 
-/// Write the default origin onto a copy the caller is about to return.
+/// The origin on a record. A missing or blank field reads as
+/// [`crate::atom::UNKNOWN_ORIGIN`], never as the person's, and the map is
+/// not written.
+#[must_use]
+pub fn origin_of(atom: &Map<String, Value>) -> &str {
+    named_origin(atom).unwrap_or(crate::atom::UNKNOWN_ORIGIN)
+}
+
+/// Write [`origin_of`] onto a copy the caller is about to return.
 ///
 /// A stored record is left alone. Call this on the answer, not on the row
 /// the store handed back.
 pub fn fill_origin(atom: &mut Map<String, Value>) {
-    let missing = atom
-        .get("origin")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .is_empty();
-    if missing {
+    if named_origin(atom).is_none() {
         atom.insert(
             "origin".into(),
-            Value::String(crate::atom::USER_DECLARED.to_string()),
+            Value::String(crate::atom::UNKNOWN_ORIGIN.to_string()),
         );
+    }
+}
+
+/// `atom` as a client reads it: [`fill_origin`] on a copy when the
+/// origin is missing, else the record itself.
+#[must_use]
+pub fn shown(atom: &Map<String, Value>) -> std::borrow::Cow<'_, Map<String, Value>> {
+    if named_origin(atom).is_some() {
+        std::borrow::Cow::Borrowed(atom)
+    } else {
+        let mut copy = atom.clone();
+        fill_origin(&mut copy);
+        std::borrow::Cow::Owned(copy)
     }
 }
 
@@ -2247,7 +2259,7 @@ The build failed. Look at the log. It is the writer.";
     }
 
     #[test]
-    fn an_old_atom_reads_as_user_declared_and_stays_unwritten() {
+    fn an_old_atom_reads_as_unknown_and_stays_unwritten() {
         let stored = atom(json!({
             "id": "old",
             "kind": "lesson",
@@ -2255,12 +2267,17 @@ The build failed. Look at the log. It is the writer.";
             "workspace": "w"
         }));
         let before = stored.clone();
-        assert_eq!(origin_of(&stored), crate::atom::USER_DECLARED);
+        assert_eq!(origin_of(&stored), crate::atom::UNKNOWN_ORIGIN);
         assert_eq!(stored, before, "a read does not write the field back");
         let mut answered = stored.clone();
         fill_origin(&mut answered);
-        assert_eq!(answered["origin"], json!(crate::atom::USER_DECLARED));
+        assert_eq!(answered["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
+        assert_eq!(shown(&stored)["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
         assert!(!stored.contains_key("origin"));
+        let mut empty = stored.clone();
+        empty.insert("origin".into(), json!(""));
+        assert_eq!(origin_of(&empty), crate::atom::UNKNOWN_ORIGIN);
+        assert!(matches!(shown(&answered), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
