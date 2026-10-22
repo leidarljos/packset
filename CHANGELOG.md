@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The cached-vector RSS check measures a child process. It reads
+  anonymous memory for the whole test process, so a neighbour running
+  in parallel could push a small float cache over the limit.
+
 - Idle page advice stays Linux-only because the database map is
   read-only, not because macOS would discard dirty pages. Clean
   file-backed pages are already outside that footprint. Heap return

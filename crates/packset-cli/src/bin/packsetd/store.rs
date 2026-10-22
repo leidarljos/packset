@@ -2408,10 +2408,30 @@ mod tests {
     }
 
     /// Sixty-four cached 384-d vectors are floats. The JSON arrays they
-    /// replaced would have been a few mebibytes.
+    /// replaced would have been a few mebibytes. RssAnon is the whole
+    /// process, so the measurement runs in a child: a neighbour in the
+    /// same test binary charges its own allocations to this number.
     #[cfg(target_os = "linux")]
     #[test]
     fn cached_vectors_do_not_keep_the_json_arrays() {
+        if std::env::var_os("PACKSET_RSS_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .env("PACKSET_RSS_CHILD", "1")
+                .args([
+                    "--exact",
+                    "store::tests::cached_vectors_do_not_keep_the_json_arrays",
+                    "--test-threads=1",
+                    "--quiet",
+                ])
+                .output()
+                .expect("rss child");
+            assert!(
+                output.status.success(),
+                "rss child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let anon = || {
             let text = std::fs::read_to_string("/proc/self/status").unwrap();
             text.lines()
