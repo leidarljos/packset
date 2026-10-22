@@ -3,8 +3,8 @@
 //! The HTTP layer decodes and encodes; everything a verb actually means lives
 //! here, so the rules can be tested without a socket.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use packset_core::clock;
@@ -94,8 +94,14 @@ pub struct Service {
     /// What the replacement and linking rules read of each claim, by id.
     /// A claim's text never changes under its id, so a write tokenises the
     /// pack once, not once per write; ten thousand writes took forty
-    /// times a thousand before this.
-    shapes: RwLock<HashMap<String, Arc<record::Shape>>>,
+    /// times a thousand before this. Capped, and dropped when the claim
+    /// leaves the live set: a forgotten id used to keep its tokens for
+    /// the life of the process.
+    shapes: RwLock<HashMap<String, Shaped>>,
+    /// Most shapes kept. Zero is no cap.
+    shape_cap: AtomicUsize,
+    /// Bumped when a shape is used, so a cold workspace can be dropped whole.
+    shape_clock: AtomicU64,
     /// Which shaped claims carry each token, head word or entity. The
     /// replacement rule needs a shared token, a shared head or a shared
     /// entity, so a write compares against the claims these name and not
@@ -315,6 +321,29 @@ pub const FORGETTABLE_KINDS: &[&str] = &[
     "correction",
 ];
 
+/// One kept shape: the tokens, which workspace it belongs to, and when
+/// it was last used.
+struct Shaped {
+    shape: Arc<record::Shape>,
+    workspace: String,
+    used: AtomicU64,
+}
+
+/// Shapes kept when `PACKSET_SHAPE_CAP` is unset. Above the live cap, so
+/// one workspace's claims stay shaped and a second checkout still fits.
+pub const DEFAULT_SHAPE_CAP: usize = 65_536;
+
+fn shape_cap_from_env() -> usize {
+    match std::env::var("PACKSET_SHAPE_CAP") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_SHAPE_CAP,
+            "off" | "none" => 0,
+            n => n.parse().unwrap_or(DEFAULT_SHAPE_CAP),
+        },
+        Err(_) => DEFAULT_SHAPE_CAP,
+    }
+}
+
 fn live_cap_from_env() -> usize {
     match std::env::var("PACKSET_LIVE_CAP") {
         Ok(raw) => match raw.trim() {
@@ -351,6 +380,8 @@ impl Service {
             live_cap: live_cap_from_env(),
             hold_agent_writes: packset_core::atom::hold_agent_writes(),
             shapes: RwLock::new(HashMap::new()),
+            shape_cap: AtomicUsize::new(shape_cap_from_env()),
+            shape_clock: AtomicU64::new(1),
             postings: RwLock::new(HashMap::new()),
             shaped: Mutex::new(BTreeSet::new()),
             swept: Mutex::new(HashMap::new()),
@@ -471,6 +502,11 @@ impl Service {
             let stored = self.store.upsert_many(&all)?;
             self.project_atoms(&stored);
         }
+        let forgotten_ids: Vec<String> = forgotten
+            .iter()
+            .filter_map(|atom| atom.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        self.unshape(&forgotten_ids);
         if let Ok(mut swept) = self.swept.lock() {
             swept.insert(workspace.to_string(), now[..10].to_string());
         }
@@ -497,10 +533,15 @@ impl Service {
     /// The shape of a stored claim, computed the first time it is asked for.
     fn shape_of(&self, atom: &Record) -> Arc<record::Shape> {
         let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
+        let workspace = atom.get("workspace").and_then(Value::as_str).unwrap_or("");
         if !id.is_empty() {
             if let Ok(map) = self.shapes.read() {
                 if let Some(found) = map.get(id) {
-                    return Arc::clone(found);
+                    found.used.store(
+                        self.shape_clock.fetch_add(1, Ordering::Relaxed),
+                        Ordering::Relaxed,
+                    );
+                    return Arc::clone(&found.shape);
                 }
             }
         }
@@ -509,7 +550,17 @@ impl Service {
             let fresh = self
                 .shapes
                 .write()
-                .map(|mut map| map.insert(id.to_string(), Arc::clone(&shape)).is_none())
+                .map(|mut map| {
+                    map.insert(
+                        id.to_string(),
+                        Shaped {
+                            shape: Arc::clone(&shape),
+                            workspace: workspace.to_string(),
+                            used: AtomicU64::new(self.shape_clock.fetch_add(1, Ordering::Relaxed)),
+                        },
+                    )
+                    .is_none()
+                })
                 .unwrap_or(false);
             if fresh {
                 if let Ok(mut postings) = self.postings.write() {
@@ -517,9 +568,128 @@ impl Service {
                         postings.entry(term).or_default().push(id.to_string());
                     }
                 }
+                self.evict_shapes(workspace, id);
             }
         }
         shape
+    }
+
+    /// Drop shapes whose claims have left this workspace's live set, and the
+    /// postings that named them. A tombstone, a closed window and a forget
+    /// all end here.
+    fn reconcile_shapes(&self, workspace: &str, live: &HashSet<&str>) {
+        let stale: Vec<String> = {
+            let Ok(map) = self.shapes.read() else {
+                return;
+            };
+            map.iter()
+                .filter(|(id, kept)| kept.workspace == workspace && !live.contains(id.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        self.unshape(&stale);
+    }
+
+    /// Forget these ids in the shape map and in every posting list.
+    fn unshape(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let gone: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        if let Ok(mut shapes) = self.shapes.write() {
+            for id in ids {
+                shapes.remove(id);
+            }
+        }
+        if let Ok(mut postings) = self.postings.write() {
+            postings.retain(|_, held| {
+                held.retain(|id| !gone.contains(id.as_str()));
+                !held.is_empty()
+            });
+        }
+    }
+
+    /// Keep the shape map inside its cap. Another workspace goes first, as
+    /// a whole, and is shaped again the next time it is written. The id
+    /// just stored stays.
+    fn evict_shapes(&self, protect_workspace: &str, protect_id: &str) {
+        let cap = self.shape_cap.load(Ordering::Relaxed);
+        if cap == 0 {
+            return;
+        }
+        loop {
+            let Ok(map) = self.shapes.read() else {
+                return;
+            };
+            if map.len() <= cap {
+                return;
+            }
+            let mut heat: HashMap<&str, u64> = HashMap::new();
+            for kept in map.values() {
+                if kept.workspace == protect_workspace {
+                    continue;
+                }
+                let tick = kept.used.load(Ordering::Relaxed);
+                let slot = heat.entry(kept.workspace.as_str()).or_insert(0);
+                if tick > *slot {
+                    *slot = tick;
+                }
+            }
+            let other = heat
+                .into_iter()
+                .min_by_key(|(_, tick)| *tick)
+                .map(|(workspace, _)| workspace.to_string());
+            drop(map);
+            if let Some(workspace) = other {
+                self.drop_workspace_shapes(&workspace);
+                continue;
+            }
+            let oldest = {
+                let Ok(map) = self.shapes.read() else {
+                    return;
+                };
+                map.iter()
+                    .filter(|(id, _)| id.as_str() != protect_id)
+                    .min_by_key(|(_, kept)| kept.used.load(Ordering::Relaxed))
+                    .map(|(id, _)| id.clone())
+            };
+            let Some(id) = oldest else {
+                return;
+            };
+            self.unshape(std::slice::from_ref(&id));
+            if let Ok(mut shaped) = self.shaped.lock() {
+                shaped.remove(protect_workspace);
+            }
+        }
+    }
+
+    /// Drop every shape filed under `workspace` and mark it unshaped, so
+    /// the next write there rebuilds the postings from the live set.
+    fn drop_workspace_shapes(&self, workspace: &str) {
+        let ids: Vec<String> = {
+            let Ok(map) = self.shapes.read() else {
+                return;
+            };
+            map.iter()
+                .filter(|(_, kept)| kept.workspace == workspace)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        self.unshape(&ids);
+        if let Ok(mut shaped) = self.shaped.lock() {
+            shaped.remove(workspace);
+        }
+    }
+
+    /// The cap, for a test that wants a smaller one than the process default.
+    pub fn set_shape_cap(&self, cap: usize) {
+        self.shape_cap.store(cap, Ordering::Relaxed);
+    }
+
+    /// How many shapes are kept right now.
+    #[cfg(test)]
+    fn shape_count(&self) -> usize {
+        self.shapes.read().map(|map| map.len()).unwrap_or(0)
     }
 
     /// Shape every live claim of a workspace the first time this process
@@ -682,6 +852,11 @@ impl Service {
         }
         let tombs = self.store.upsert_many(&tombs)?;
         self.project_atoms(&tombs);
+        let forgotten: Vec<String> = tombs
+            .iter()
+            .filter_map(|atom| atom.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        self.unshape(&forgotten);
         Ok(tombs.len())
     }
 
@@ -859,6 +1034,11 @@ impl Service {
         let shape = record::Shape::of(&atom);
         // One id map per write serves the duplicate, replacement and linking
         // rules; the candidates are the claims that could satisfy any of them.
+        let live_ids: HashSet<&str> = live
+            .iter()
+            .filter_map(|peer| peer.get("id").and_then(Value::as_str))
+            .collect();
+        self.reconcile_shapes(&workspace, &live_ids);
         self.shape_workspace_once(&workspace, &live);
         let by_id: HashMap<&str, &Record> = live
             .iter()
@@ -1173,6 +1353,7 @@ impl Service {
         };
         let tomb = self.store.delete(workspace, id, why)?;
         self.queue_projection(vec![ProjectionOp::Delete(id.to_string())]);
+        self.unshape(&[id.to_string()]);
         Ok(tomb)
     }
 
@@ -2471,6 +2652,40 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    /// A deleted claim leaves no shape, and a third workspace does not keep
+    /// the first two when the cap is two.
+    #[test]
+    fn shapes_follow_the_live_set_and_the_cap() {
+        let (_dir, svc) = service();
+        let stored = svc
+            .add(atom("The first claim is the one that is deleted."))
+            .unwrap();
+        let id = stored
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_eq!(svc.shape_count(), 1);
+        svc.delete_atom("w", &id, None).unwrap();
+        assert_eq!(svc.shape_count(), 0, "a tombstone kept its tokens");
+
+        svc.set_shape_cap(2);
+        for (workspace, text) in [
+            ("a", "Alpha keeps its own sentence here."),
+            ("b", "Beta keeps its own sentence here."),
+            ("c", "Gamma keeps its own sentence here."),
+        ] {
+            let mut row = atom(text);
+            row.insert("workspace".into(), json!(workspace));
+            svc.add(row).unwrap();
+        }
+        assert!(
+            svc.shape_count() <= 2,
+            "shapes grew to {}",
+            svc.shape_count()
+        );
     }
 
     #[test]

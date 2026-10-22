@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Shapes and the posting lists built from them stay bounded.
+  `PACKSET_SHAPE_CAP` (default 65536, `off` for no cap) is how many
+  claims keep their tokens in the process. A claim that is deleted,
+  forgotten or no longer live drops its shape. Before, every id ever
+  written kept one until the process ended.
+
 - Parsed workspaces stay bounded. `PACKSET_WORKSPACE_CACHE` (default 8,
   `off` for no cap) is how many keep a live snapshot, an inverted index
   and status counts. A seat that opens another checkout used to keep
