@@ -49,18 +49,35 @@ pub type Record = Map<String, Value>;
 
 /// One workspace's live set at a write count. `stored` is what a write
 /// folds into. `shown` is that set with links narrowed to ids present.
-/// `vectors` is the one copy of each atom's embedding; the records here
-/// keep `embedding: null` in its place.
+/// `vectors` is the one copy of each atom's embedding. The records here
+/// omit the key, so a null a client sent still means clear.
 struct Snapshot {
     generation: u64,
     stored: Vec<Record>,
     shown: Live,
     dangling: HashSet<String>,
     vectors: Arc<HashMap<String, Arc<[f32]>>>,
+    /// The JSON numbers the client stored. Answers copy these. The floats
+    /// are for scoring, and rebuilding the array from them is not the
+    /// value that was written.
+    originals: Arc<HashMap<String, Arc<[serde_json::Number]>>>,
 }
 
 /// A workspace's live set, one `Arc` per record.
 pub type Live = Arc<Vec<Arc<Record>>>;
+
+/// Records and the vectors that belong to them, from one read.
+///
+/// A later lookup of the cache can miss the workspace: another reader
+/// evicted it, or the scan was not cached because a write landed while
+/// it ran. The vectors here are the ones lifted out of these records.
+pub struct LiveSnapshot {
+    pub atoms: Live,
+    pub vectors: Arc<HashMap<String, Arc<[f32]>>>,
+    /// JSON numbers for each vector, as stored, for an answer to copy.
+    pub originals: Arc<HashMap<String, Arc<[serde_json::Number]>>>,
+    pub generation: u64,
+}
 
 /// A workspace's index at one generation: the id and content hash of
 /// each atom the index was built over, in order, beside the index and
@@ -482,9 +499,9 @@ impl Store {
                     _ => None,
                 });
             stamp_write(&mut payload, stored.as_ref(), now);
-            // A fire or a grade rewrites the record from the cache, and the
-            // cache does not carry the vector. Keep the array already stored
-            // so the file stays the row that was written.
+            // A fire or a grade rewrites the record from the cache, which
+            // does not carry the vector. A null or an empty array is a
+            // clear. A write that leaves the key off keeps what is stored.
             keep_stored_embedding(&mut payload, stored.as_ref());
             let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
             self.db.put(&mut wtxn, &key, &blob)?;
@@ -516,6 +533,7 @@ impl Store {
             let mut lean_written = Vec::new();
             {
                 let vectors = Arc::make_mut(&mut snap.vectors);
+                let originals = Arc::make_mut(&mut snap.originals);
                 for item in &parked {
                     if item.lean.get("workspace").and_then(Value::as_str)
                         != Some(workspace.as_str())
@@ -534,9 +552,18 @@ impl Store {
                             if !same {
                                 vectors.insert(id.to_string(), Arc::clone(vector));
                             }
+                            if let Some(original) = &item.original {
+                                let same = originals
+                                    .get(id)
+                                    .is_some_and(|old| old.as_ref() == original.as_ref());
+                                if !same {
+                                    originals.insert(id.to_string(), Arc::clone(original));
+                                }
+                            }
                         }
                         None if item.named => {
                             vectors.remove(id);
+                            originals.remove(id);
                         }
                         None => {}
                     }
@@ -550,10 +577,12 @@ impl Store {
                         (Some(i), false) => {
                             snap.stored.remove(i);
                             vectors.remove(id);
+                            originals.remove(id);
                         }
                         (None, true) => snap.stored.push(item.lean.clone()),
                         (None, false) => {
                             vectors.remove(id);
+                            originals.remove(id);
                         }
                     }
                     lean_written.push(item.lean.clone());
@@ -738,9 +767,11 @@ impl Store {
     }
 
     fn release_pages(&self) {
-        // Linux only. The same advice is not applied on macOS: there
-        // `MADV_DONTNEED` can discard dirty pages. Everywhere else this
-        // function is a no-op and the mapped file stays resident.
+        // Linux only. The map is read-only: LMDB writes with `write`,
+        // not `WRITEMAP`, so there are no dirty pages to discard. This
+        // advice is not applied on macOS, where clean file-backed pages
+        // are already outside the footprint. Everywhere else the mapped
+        // file stays resident.
         #[cfg(target_os = "linux")]
         {
             // Open a write transaction and drop it at once, so a commit
@@ -801,7 +832,7 @@ impl Store {
     ///
     /// Fails when the scan does.
     pub fn live(&self, workspace: &str) -> anyhow::Result<Live> {
-        self.live_versioned(workspace).map(|(shown, _)| shown)
+        self.live_versioned(workspace).map(|snap| snap.atoms)
     }
 
     /// Status counts over one workspace, or over all of them: cached under
@@ -874,25 +905,36 @@ impl Store {
         (*seen == generation).then(|| found.clone())
     }
 
-    /// [`Self::live`] with the generation the set belongs to, for a cache
-    /// keyed on it.
+    /// [`Self::live`] with the generation the set belongs to, and the
+    /// vectors lifted out of that same set.
+    ///
+    /// The vectors are returned with the records even when the scan is
+    /// not cached. A reader that then asked the cache for them would
+    /// see an empty map: the workspace was evicted, or a write landed
+    /// while the scan ran and the snapshot was thrown away.
     ///
     /// # Errors
     ///
     /// Fails when the scan does.
-    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<(Live, u64)> {
+    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.live.read() {
             if let Some(found) = cache.get(workspace) {
                 if found.generation == generation {
                     self.note_cached(workspace);
-                    return Ok((Arc::clone(&found.shown), generation));
+                    return Ok(LiveSnapshot {
+                        atoms: Arc::clone(&found.shown),
+                        vectors: Arc::clone(&found.vectors),
+                        originals: Arc::clone(&found.originals),
+                        generation,
+                    });
                 }
             }
         }
         // Built outside the write lock, so a slow parse does not hold up a
         // reader whose own workspace is current. The vector is lifted out
-        // of the record here, once, and the cached copies keep a null.
+        // of the record here, once. The cached copies omit the key, and the
+        // original numbers are kept beside the floats for answers.
         let now = packset_core::clock::utcnow();
         let scanned: Vec<Record> = self
             .scan(Some(workspace))?
@@ -900,6 +942,7 @@ impl Store {
             .filter(|atom| shown_at(atom, &now))
             .collect();
         let mut vectors = HashMap::with_capacity(scanned.len());
+        let mut originals = HashMap::with_capacity(scanned.len());
         let mut stored = Vec::with_capacity(scanned.len());
         for record in scanned {
             let parked = park(&record);
@@ -907,12 +950,19 @@ impl Store {
                 if let Some(vector) = parked.vector {
                     vectors.insert(id.to_string(), vector);
                 }
+                if let Some(original) = parked.original {
+                    originals.insert(id.to_string(), original);
+                }
             }
             stored.push(parked.lean);
         }
         let (shown, dangling) = shown_from(&stored);
         let shared = Arc::new(shown);
-        // Cached only if nothing committed while the scan ran.
+        let vectors = Arc::new(vectors);
+        let originals = Arc::new(originals);
+        // Cached only if nothing committed while the scan ran. The caller
+        // still receives the vectors this scan lifted: they are not a
+        // second read of a cache that may not hold them.
         if self.generation.load(Ordering::Acquire) == generation {
             if let Ok(mut cache) = self.live.write() {
                 cache.insert(
@@ -922,19 +972,27 @@ impl Store {
                         stored,
                         shown: Arc::clone(&shared),
                         dangling,
-                        vectors: Arc::new(vectors),
+                        vectors: Arc::clone(&vectors),
+                        originals: Arc::clone(&originals),
                     },
                 );
                 self.note_cached(workspace);
                 self.evict_cached(&mut cache, workspace);
             }
         }
-        Ok((shared, generation))
+        Ok(LiveSnapshot {
+            atoms: shared,
+            vectors,
+            originals,
+            generation,
+        })
     }
 
     /// The vectors cached for `workspace`, one shared copy each. Empty when
-    /// the workspace is not parsed. The records from [`Self::live`] carry
-    /// `embedding: null` in their place.
+    /// the workspace is not parsed. A caller that also has the records
+    /// wants [`Self::live_versioned`]: this is a second read, and the
+    /// workspace may have left the cache since the records were taken.
+    /// The records from [`Self::live`] omit `embedding` where a vector was lifted.
     pub fn vectors(&self, workspace: &str) -> Arc<HashMap<String, Arc<[f32]>>> {
         self.live
             .read()
@@ -966,7 +1024,10 @@ impl Store {
         if let Some(found) = self.searchable_cached(workspace)? {
             return Ok(found);
         }
-        let (atoms, generation) = self.live_versioned(workspace)?;
+        let snap = self.live_versioned(workspace)?;
+        let atoms = snap.atoms;
+        let generation = snap.generation;
+        let vectors = snap.vectors;
         // The stale set is taken out of the cache, so this thread holds its
         // only reference and the index is edited rather than copied.
         let previous = self
@@ -1025,17 +1086,15 @@ impl Store {
             );
             self.evict_terms(&mut cache, workspace);
         }
-        // After the terms lock: taking `live` while holding `terms` inverts
-        // the lock order.
-        Ok((atoms, index, documents, self.vectors(workspace)))
+        Ok((atoms, index, documents, vectors))
     }
 
     /// The cached index when it matches the live set's generation.
     fn searchable_cached(&self, workspace: &str) -> anyhow::Result<Option<SearchSet>> {
-        let (atoms, generation) = self.live_versioned(workspace)?;
+        let snap = self.live_versioned(workspace)?;
         let cached = if let Ok(cache) = self.terms.read() {
             if let Some((seen, (_, index, documents))) = cache.get(workspace) {
-                if *seen == generation && atoms.len() == index.len() {
+                if *seen == snap.generation && snap.atoms.len() == index.len() {
                     Some((Arc::clone(index), Arc::clone(documents)))
                 } else {
                     None
@@ -1046,7 +1105,7 @@ impl Store {
         } else {
             None
         };
-        Ok(cached.map(|(index, documents)| (atoms, index, documents, self.vectors(workspace))))
+        Ok(cached.map(|(index, documents)| (snap.atoms, index, documents, snap.vectors)))
     }
 
     /// The atoms that were live at `at`, from a store scan since the snapshot
@@ -1331,35 +1390,38 @@ fn is_tombstone(raw: &[u8]) -> bool {
 struct Parked {
     lean: Record,
     vector: Option<Arc<[f32]>>,
+    original: Option<Arc<[serde_json::Number]>>,
     /// The write named `embedding`, so a null clears a vector the cache held.
     named: bool,
 }
 
 /// Lift `embedding` out of a clone of `record`. An array of numbers becomes
-/// floats and the clone keeps null. Anything else stays on the clone.
+/// floats and the key leaves the clone. A null on the clone would be the
+/// clear a client sends, and a fire copies this record back on a rewrite.
+/// Anything that is not a vector stays on the clone.
 fn park(record: &Record) -> Parked {
     let mut lean = record.clone();
     let named = lean.contains_key("embedding");
-    let vector = match lean.remove("embedding") {
-        Some(Value::Array(items)) if !items.is_empty() => match floats_of(&items) {
-            Some(parsed) => {
-                lean.insert("embedding".into(), Value::Null);
-                Some(Arc::from(parsed))
+    let (vector, original) = match lean.remove("embedding") {
+        Some(Value::Array(items)) if !items.is_empty() => {
+            match (floats_of(&items), numbers_of(&items)) {
+                (Some(parsed), Some(original)) => (Some(Arc::from(parsed)), Some(original)),
+                _ => {
+                    lean.insert("embedding".into(), Value::Array(items));
+                    (None, None)
+                }
             }
-            None => {
-                lean.insert("embedding".into(), Value::Array(items));
-                None
-            }
-        },
+        }
         Some(other) => {
             lean.insert("embedding".into(), other);
-            None
+            (None, None)
         }
-        None => None,
+        None => (None, None),
     };
     Parked {
         lean,
         vector,
+        original,
         named,
     }
 }
@@ -1372,37 +1434,39 @@ fn floats_of(items: &[Value]) -> Option<Box<[f32]>> {
     Some(out.into_boxed_slice())
 }
 
-/// The JSON array a client reads. Built for one answer, not kept in the cache.
-pub(crate) fn embedding_json(vector: &[f32]) -> Value {
-    Value::Array(
-        vector
-            .iter()
-            .map(|n| serde_json::Number::from_f64(f64::from(*n)).map_or(Value::Null, Value::Number))
-            .collect(),
-    )
+/// The JSON numbers as parsed. Scoring uses f32; an answer copies these,
+/// so 0.1 stays 0.1 and a value f32 cannot hold does not become null.
+fn numbers_of(items: &[Value]) -> Option<Arc<[serde_json::Number]>> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(item.as_number()?.clone());
+    }
+    Some(Arc::from(out))
 }
 
-/// Put `workspace`'s cached vector back on `atom` for an answer. A record
-/// with no cached vector is left as it is, null included.
-pub(crate) fn restore_embedding(atom: &mut Record, vectors: &HashMap<String, Arc<[f32]>>) {
+/// Put the stored JSON numbers back on `atom` for an answer. A record
+/// with no cached vector is left as it is.
+pub(crate) fn restore_embedding(
+    atom: &mut Record,
+    originals: &HashMap<String, Arc<[serde_json::Number]>>,
+) {
     let Some(id) = atom.get("id").and_then(Value::as_str) else {
         return;
     };
-    let Some(vector) = vectors.get(id) else {
+    let Some(numbers) = originals.get(id) else {
         return;
     };
-    atom.insert("embedding".into(), embedding_json(vector));
+    atom.insert(
+        "embedding".into(),
+        Value::Array(numbers.iter().cloned().map(Value::Number).collect()),
+    );
 }
 
-/// A rewrite that did not bring a vector keeps the array already stored.
-/// The cache hands back null, and dropping that null would erase the vector
-/// from the file.
+/// A rewrite that did not name `embedding` keeps the array already stored.
+/// Null and `[]` are a clear. Restoring over those made a vector impossible
+/// to drop, and an update of the text then kept the old meaning.
 fn keep_stored_embedding(payload: &mut Record, stored: Option<&Record>) {
-    if payload
-        .get("embedding")
-        .and_then(Value::as_array)
-        .is_some_and(|items| !items.is_empty())
-    {
+    if payload.contains_key("embedding") {
         return;
     }
     let Some(existing) = stored.and_then(|row| row.get("embedding")) else {
@@ -1601,21 +1665,22 @@ extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
-/// Ask glibc to return free arenas to the kernel. A burst allocates the
-/// high-water mark into per-thread arenas and, without this, holds it
-/// until the process ends. musl has no `malloc_trim`. macOS can relieve
-/// a zone, but that call is not exercised here, so on musl and on macOS
-/// this is a no-op and the high-water mark stays until the process ends.
-#[cfg(target_env = "gnu")]
+/// Ask glibc on Linux to return free arenas to the kernel. A burst
+/// leaves that high-water mark in per-thread arenas until asked.
+/// musl and the macOS allocator return large freed regions on their
+/// own; what stays is fragmentation from small allocations.
+/// `malloc_trim` is not linked elsewhere: windows-gnu shares
+/// `target_env = "gnu"` and does not provide this symbol.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn release_heap() {
     // SAFETY: trim does not move live allocations.
     let _ = unsafe { malloc_trim(0) };
 }
 
-#[cfg(not(target_env = "gnu"))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn release_heap() {}
 
-#[cfg(target_env = "gnu")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 extern "C" {
     fn malloc_trim(pad: usize) -> i32;
 }
@@ -2189,7 +2254,7 @@ mod tests {
             .unwrap();
         let live = store.live("w").unwrap();
         assert!(
-            live[0].get("embedding").unwrap().is_null(),
+            live[0].get("embedding").is_none(),
             "the cache kept the JSON array"
         );
         let cached = store.vectors("w");
@@ -2209,12 +2274,79 @@ mod tests {
         assert_eq!(disk["text"], json!("a lesson about vectors revised"));
         assert_eq!(disk["embedding"].as_array().unwrap().len(), 384);
         assert_eq!(store.vectors("w").get("a").unwrap().len(), 384);
-        assert!(store.live("w").unwrap()[0]
-            .get("embedding")
-            .unwrap()
-            .is_null());
+        assert!(store.live("w").unwrap()[0].get("embedding").is_none());
         // The second write reused the float buffer when the numbers matched.
         assert!(Arc::ptr_eq(got, store.vectors("w").get("a").unwrap()));
+    }
+
+    /// Null and an empty array are a clear. Omitting the key is not.
+    #[test]
+    fn a_null_or_empty_embedding_clears_the_stored_vector() {
+        let (_dir, store) = store();
+        let write = |embedding: Value| {
+            store
+                .upsert(&record(json!({
+                    "id": "a",
+                    "workspace": "w",
+                    "text": "a lesson about vectors",
+                    "embedding": embedding,
+                })))
+                .unwrap();
+        };
+        write(json!([0.2, 0.4, 0.6]));
+        let snap = store.live_versioned("w").unwrap();
+        assert_eq!(snap.vectors.get("a").map(|v| v.len()), Some(3));
+        write(Value::Null);
+        let disk = store.get("w", "a").unwrap().unwrap();
+        assert!(disk["embedding"].is_null(), "{disk:?}");
+        assert!(store
+            .live_versioned("w")
+            .unwrap()
+            .vectors
+            .get("a")
+            .is_none());
+        write(json!([0.2, 0.4, 0.6]));
+        write(json!([]));
+        let disk = store.get("w", "a").unwrap().unwrap();
+        assert_eq!(disk["embedding"], json!([]));
+        assert!(store
+            .live_versioned("w")
+            .unwrap()
+            .vectors
+            .get("a")
+            .is_none());
+    }
+
+    /// A client vector is answered as stored. f32 would turn 0.1 into its
+    /// approximation and 1e39 into null.
+    #[test]
+    fn an_answer_returns_the_numbers_that_were_stored() {
+        let (dir, store) = store();
+        let raw = json!([0.1, 1e39, -0.3]);
+        store
+            .upsert(&record(json!({
+                "id": "a",
+                "workspace": "w",
+                "text": "a client vector",
+                "embedding": raw,
+            })))
+            .unwrap();
+        let check = |store: &Store| {
+            let snap = store.live_versioned("w").unwrap();
+            let mut atom = Record::clone(&snap.atoms[0]);
+            restore_embedding(&mut atom, &snap.originals);
+            assert_eq!(atom.get("embedding"), Some(&json!([0.1, 1e39, -0.3])));
+            assert!(atom["embedding"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.as_f64().is_some()));
+            let disk = store.get("w", "a").unwrap().unwrap();
+            assert_eq!(disk.get("embedding"), atom.get("embedding"));
+        };
+        check(&store);
+        drop(store);
+        check(&reopen(dir.path()));
     }
 
     /// Advising the database cold and trimming the heap leaves a claim readable.
@@ -2276,10 +2408,30 @@ mod tests {
     }
 
     /// Sixty-four cached 384-d vectors are floats. The JSON arrays they
-    /// replaced would have been a few mebibytes.
+    /// replaced would have been a few mebibytes. RssAnon is the whole
+    /// process, so the measurement runs in a child: a neighbour in the
+    /// same test binary charges its own allocations to this number.
     #[cfg(target_os = "linux")]
     #[test]
     fn cached_vectors_do_not_keep_the_json_arrays() {
+        if std::env::var_os("PACKSET_RSS_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .env("PACKSET_RSS_CHILD", "1")
+                .args([
+                    "--exact",
+                    "store::tests::cached_vectors_do_not_keep_the_json_arrays",
+                    "--test-threads=1",
+                    "--quiet",
+                ])
+                .output()
+                .expect("rss child");
+            assert!(
+                output.status.success(),
+                "rss child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let anon = || {
             let text = std::fs::read_to_string("/proc/self/status").unwrap();
             text.lines()
@@ -2308,7 +2460,7 @@ mod tests {
             .live("w")
             .unwrap()
             .iter()
-            .all(|atom| atom.get("embedding").is_some_and(Value::is_null)));
+            .all(|atom| atom.get("embedding").is_none()));
         assert!(grown < 2048, "anon grew {grown} KiB for 64 cached vectors");
     }
 

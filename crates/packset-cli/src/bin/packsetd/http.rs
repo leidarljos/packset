@@ -279,33 +279,35 @@ fn route(
                         }
                         body
                     })),
-                    Ok(None) => match service.store().live(&workspace) {
+                    Ok(None) => match service.store().live_versioned(&workspace) {
                         // `kind` narrows the answer to one kind, so a roster
                         // of personas does not carry every lesson's embedding.
                         // The cache keeps the vector as floats. The answer
                         // puts the JSON array back, which is what a client
-                        // already reads.
-                        Ok(atoms) => {
-                            let vectors = service.store().vectors(&workspace);
+                        // already reads. The records and the vectors are one
+                        // snapshot: a second cache read can miss the workspace.
+                        Ok(snap) => {
                             let kind = query
                                 .get("kind")
                                 .map(String::as_str)
                                 .filter(|k| !k.is_empty());
                             if kind.is_none() && !omit {
                                 Answer::ok(json!({
-                                    "atoms": atoms
+                                    "atoms": snap
+                                        .atoms
                                         .iter()
-                                        .map(|atom| listed(atom, &vectors, false))
+                                        .map(|atom| listed(atom, &snap.originals, false))
                                         .collect::<Vec<_>>()
                                 }))
                             } else {
                                 Answer::ok(json!({
-                                    "atoms": atoms
+                                    "atoms": snap
+                                        .atoms
                                         .iter()
                                         .filter(|a| kind.is_none_or(|k| {
                                             a.get("kind").and_then(Value::as_str) == Some(k)
                                         }))
-                                        .map(|atom| listed(atom, &vectors, omit))
+                                        .map(|atom| listed(atom, &snap.originals, omit))
                                         .collect::<Vec<_>>()
                                 }))
                             }
@@ -555,12 +557,11 @@ fn route(
                     text: query.get("q").cloned().unwrap_or_default(),
                     entities: Vec::new(),
                 };
-                match service.store().live(&workspace) {
+                match service.store().live_versioned(&workspace) {
                     Err(e) => Answer::err(400, e),
-                    Ok(atoms) => {
-                        let vectors = service.store().vectors(&workspace);
+                    Ok(snap) => {
                         let mut recalled = packset_core::recall::recall(
-                            &atoms,
+                            &snap.atoms,
                             &seeds,
                             &hints,
                             limit,
@@ -571,7 +572,7 @@ fn route(
                                 .filter(|k| !k.is_empty()),
                         );
                         for atom in &mut recalled {
-                            crate::store::restore_embedding(atom, &vectors);
+                            crate::store::restore_embedding(atom, &snap.originals);
                         }
                         Answer::ok(json!({ "atoms": recalled }))
                     }
@@ -720,16 +721,16 @@ fn route(
 }
 
 /// Turn a service result into an answer, keeping the store's own message.
-/// One atom as a listing answers it. The cache holds floats and a null
-/// slot; the answer carries the JSON array unless the caller left vectors
-/// out. A record with no vector stays as the cache has it.
+/// One atom as a listing answers it. The cache scores with floats. The
+/// answer copies the JSON numbers that were stored, unless the caller
+/// left vectors out. A record with no vector stays as the cache has it.
 fn listed(
     atom: &Map<String, Value>,
-    vectors: &std::collections::HashMap<String, std::sync::Arc<[f32]>>,
+    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
     omit: bool,
 ) -> Value {
     let id = atom.get("id").and_then(Value::as_str);
-    let has_vector = id.is_some_and(|id| vectors.contains_key(id));
+    let has_vector = id.is_some_and(|id| originals.contains_key(id));
     if !omit && !has_vector {
         return Value::Object(packset_core::record::shown(atom).into_owned());
     }
@@ -737,7 +738,7 @@ fn listed(
     if omit {
         copy.remove("embedding");
     } else {
-        crate::store::restore_embedding(&mut copy, vectors);
+        crate::store::restore_embedding(&mut copy, originals);
     }
     packset_core::record::fill_origin(&mut copy);
     Value::Object(copy)

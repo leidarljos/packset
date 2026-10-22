@@ -4,6 +4,38 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.16.0 (2026-10-22)
 
+- The cached-vector RSS check measures a child process. It reads
+  anonymous memory for the whole test process, so a neighbour running
+  in parallel could push a small float cache over the limit.
+
+- Idle page advice stays Linux-only because the database map is
+  read-only, not because macOS would discard dirty pages. Clean
+  file-backed pages are already outside that footprint. Heap return
+  calls `malloc_trim` only for glibc on Linux. musl and macOS return
+  large freed regions on their own; small-allocation fragmentation
+  is what remains. windows-gnu is not given the symbol.
+
+- The constant-corpus soak rewrites one set of claims and gives each
+  window a new vector. The field soak grows the corpus and returns one
+  constant, so a cache that still stores the JSON arrays passed it.
+  This one fails when that set costs more anonymous memory than the
+  float cache does.
+
+- An answer returns a client-supplied vector as it was stored. Scoring
+  still uses f32. Rebuilding the JSON from those floats turned 0.1 into
+  its approximation and an out-of-range value into null.
+
+- A write that sends `embedding: null` or `[]` clears the stored vector,
+  and an update that changes the text drops the old vector unless it
+  sends a new one. A rewrite that does not name the field, such as a
+  fire, still keeps the array. The cache omits the key where it holds
+  a vector, so that null is not mistaken for a clear.
+
+- A listing, a recall, a pack and a search read an atom's record and its
+  vector from one snapshot. They used to be two cache lookups, so a
+  workspace that left the cache between them, or a scan a write raced,
+  answered `embedding: null` and dropped the dense ballot.
+
 - The field soak drives several clients at once, a fake 384-d encoder,
   more workspaces than the cache holds, set-scoped writes and
   attachments near the body cap. Idle release stays at its default
