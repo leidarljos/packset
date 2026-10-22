@@ -1387,7 +1387,7 @@ impl Service {
     /// Ranked hits, and which engine produced them: the projection when
     /// present, else the linear scan; any projection failure falls back whole.
     /// `as_of` retrieves the atoms live then; `rerank` runs the cross-encoder
-    /// second stage.
+    /// second stage. The rank is the shipped order.
     ///
     /// # Errors
     ///
@@ -1404,6 +1404,39 @@ impl Service {
         as_of: Option<&str>,
         rerank: bool,
         kind: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        self.search_ranked(
+            workspace,
+            query,
+            limit,
+            set,
+            panel,
+            as_of,
+            rerank,
+            kind,
+            packset_core::search::Rank::Fused,
+        )
+    }
+
+    /// [`Self::search`] with an explicit rank. `Rank::Relevance` chooses
+    /// the top k by lexical, BM25 and cosine, with no half-life and no
+    /// retrievability.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::search`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_ranked(
+        &self,
+        workspace: &str,
+        query: &str,
+        limit: usize,
+        set: Option<&str>,
+        panel: &packset_core::Panel,
+        as_of: Option<&str>,
+        rerank: bool,
+        kind: Option<&str>,
+        rank: packset_core::search::Rank,
     ) -> anyhow::Result<Value> {
         let named = match set {
             Some(raw) => Some(
@@ -1459,7 +1492,13 @@ impl Service {
             // Nothing to score, so the second stage does not run. Reporting
             // it as off rather than as a stage that ran over an empty list
             // keeps a client from thinking a model was asked.
-            return Ok(json!({"hits": [], "engine": "linear", "as_of": as_of, "rerank": "off"}));
+            return Ok(json!({
+                "hits": [],
+                "engine": "linear",
+                "as_of": as_of,
+                "rerank": "off",
+                "rank": rank.as_str(),
+            }));
         }
 
         // The index sees every write so far before it is asked.
@@ -1494,7 +1533,7 @@ impl Service {
             kind,
             now: &now,
         };
-        let ranked_terms = packset_core::search::search_bm25(&ask, &index);
+        let ranked_terms = packset_core::search::search_bm25_ranked(&ask, &index, rank);
         // A third ballot when this seat has an encoder. The two lexical
         // scorers both need the question and the atom to share words, and this
         // one does not, which is the gap it exists to close.
@@ -1525,17 +1564,30 @@ impl Service {
                 let mut ballots = vec![prose, atom_hits, ranked_terms];
                 ballots.extend(ranked_meaning);
                 (
-                    packset_core::search::merge_ballots(&ballots, first_limit, panel, &now),
+                    packset_core::search::merge_ballots_ranked(
+                        &ballots,
+                        first_limit,
+                        panel,
+                        &now,
+                        rank,
+                    ),
                     "milli",
                 )
             }
             None => {
-                let lexical = packset_core::search::search_linear_with(&ask, &documents);
+                let lexical =
+                    packset_core::search::search_linear_with_ranked(&ask, &documents, rank);
                 let mut ballots = vec![lexical, ranked_terms];
                 ballots.extend(ranked_meaning);
                 let engine = if ballots.len() > 2 { "dense" } else { "linear" };
                 (
-                    packset_core::search::merge_ballots(&ballots, first_limit, panel, &now),
+                    packset_core::search::merge_ballots_ranked(
+                        &ballots,
+                        first_limit,
+                        panel,
+                        &now,
+                        rank,
+                    ),
                     engine,
                 )
             }
@@ -1564,7 +1616,13 @@ impl Service {
         }
         // Due is the clock (`/v1/due`, `ljos due`). Mixing it into search
         // put 212 due personas at score 3.1 on every query.
-        Ok(json!({"hits": ranked, "engine": engine, "as_of": as_of, "rerank": stage}))
+        Ok(json!({
+            "hits": ranked,
+            "engine": engine,
+            "as_of": as_of,
+            "rerank": stage,
+            "rank": rank.as_str(),
+        }))
     }
 
     /// Mine one archived day into proposals.
@@ -2204,6 +2262,11 @@ impl Service {
                 "fuse": panel.fuse.as_str(),
                 "diversify": panel.diversify.as_str(),
                 "decay": panel.decay.as_str(),
+            },
+            // Which top-k cuts this writer honours. An older writer omits
+            // `search`, which is how a client falls back to the shipped order.
+            "search": {
+                "ranks": ["fused", "relevance"],
             },
         }))
     }
@@ -3424,6 +3487,79 @@ mod tests {
         assert_eq!(after["embedder"]["answering"], json!(false), "{after}");
         assert_eq!(after["embedder"]["available"], json!(false), "{after}");
         assert_eq!(after["rerank"]["available"], json!(false), "{after}");
+    }
+
+    /// Twenty-four fresh lessons and one from January, all sharing the
+    /// query words. The shipped order cuts the older lesson. Relevance
+    /// mode returns it inside k. Status names the cut so an older writer,
+    /// which has no `search` object, can be told apart.
+    #[test]
+    fn relevance_returns_the_older_lesson_the_default_cuts() {
+        let (_dir, svc) = service();
+        // The fresh lessons share the query words and nothing else, so none
+        // is a rewrite of another. The january lesson is the short one:
+        // BM25 likes it, and the half-life still puts the fresh ones ahead.
+        let old = {
+            let mut row = atom("Zeta quorum kept.");
+            row.insert("id".into(), json!("a-january"));
+            row.insert("kind".into(), json!("lesson"));
+            row.insert("ts".into(), json!("2025-01-15T00:00:00.000Z"));
+            row.insert("entities".into(), json!([]));
+            row
+        };
+        svc.add(old).unwrap();
+        for i in 0..24 {
+            let mut row = atom(&format!(
+                "Zeta quorum n{i:02}a n{i:02}b n{i:02}c n{i:02}d n{i:02}e n{i:02}f."
+            ));
+            row.insert("id".into(), json!(format!("f-{i:02}")));
+            row.insert("kind".into(), json!("lesson"));
+            row.insert("entities".into(), json!([]));
+            svc.add(row).unwrap();
+        }
+        assert_eq!(svc.store().live("w").unwrap().len(), 25);
+        let panel = packset_core::Panel::default();
+        let fused = svc
+            .search("w", "zeta quorum", 20, None, &panel, None, false, None)
+            .unwrap();
+        let rel = svc
+            .search_ranked(
+                "w",
+                "zeta quorum",
+                20,
+                None,
+                &panel,
+                None,
+                false,
+                None,
+                packset_core::search::Rank::Relevance,
+            )
+            .unwrap();
+        let ids = |body: &Value| -> Vec<String> {
+            body["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|h| h["id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let fused_ids = ids(&fused);
+        let rel_ids = ids(&rel);
+        assert_eq!(fused["rank"], json!("fused"), "{fused}");
+        assert_eq!(rel["rank"], json!("relevance"), "{rel}");
+        assert_eq!(fused_ids.len(), 20, "{fused_ids:?}");
+        assert!(
+            !fused_ids.iter().any(|id| id == "a-january"),
+            "default order changed: {fused_ids:?}"
+        );
+        assert!(
+            rel_ids.iter().any(|id| id == "a-january"),
+            "relevance dropped the january lesson: {rel_ids:?}"
+        );
+        let status = svc.status(Some("w"), &panel).unwrap();
+        let ranks = status["search"]["ranks"].as_array().unwrap();
+        assert!(ranks.iter().any(|v| v == "fused"));
+        assert!(ranks.iter().any(|v| v == "relevance"));
     }
 
     /// The seat search path does not run the measured second stage unless

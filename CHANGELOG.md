@@ -4,6 +4,15 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `GET /v1/search?rank=relevance` (and `packset search --rank relevance`,
+  and the MCP search tool's `rank`) chooses the top k by lexical, BM25
+  and cosine. The shipped order is unchanged: a lexical ballot still
+  adds the fourteen-day half-life, and the fuse still scales by
+  retrievability, so a lesson from January sat behind fresher
+  lookalikes that share its words and the cut at k dropped it. The
+  answer echoes `rank`. `GET /v1/status` lists `search.ranks`. An
+  older writer omits `search`, which is how a client falls back.
+
 - A sentence cut no longer panics when a note holds "vs." near
   char 160. The stop is rewritten to U+2024, three bytes, and the
   next slice took byte 161 from inside that character, so `ljos

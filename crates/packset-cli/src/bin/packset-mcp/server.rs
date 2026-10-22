@@ -87,7 +87,7 @@ impl PacksetServer {
     }
 
     #[tool(
-        description = "What the seat remembers about a question, ranked by the panel the host configured. An empty list means the pack holds nothing matching; a failure means the writer is not running, which is a different thing.",
+        description = "What the seat remembers about a question, ranked by the panel the host configured. Pass rank=relevance to choose the top k by lexical, BM25 and cosine, with no half-life and no retrievability; omit rank for the shipped order. An empty list means the pack holds nothing matching; a failure means the writer is not running, which is a different thing.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -100,12 +100,13 @@ impl PacksetServer {
     ) -> Result<Json<Vec<AtomRow>>, McpError> {
         let workspace = self.workspace_for(args.workspace.as_deref());
         let hits = client(self.port)
-            .search_opts(
+            .search_ranked(
                 &workspace,
                 &args.query,
                 args.limit.unwrap_or(10),
                 args.as_of.as_deref(),
                 args.rerank.unwrap_or(false),
+                args.rank.as_deref(),
             )
             .map_err(down)?;
         Ok(Json(
@@ -306,6 +307,7 @@ mod tests {
                 limit: None,
                 as_of: None,
                 rerank: None,
+                rank: None,
             }))
             .await
         else {

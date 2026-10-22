@@ -429,10 +429,16 @@ fn route(
                 let q = query.get("q").cloned().unwrap_or_default();
                 let set = query.get("set").filter(|s| !s.is_empty());
                 let rerank = crate::embed::requested(query.get("rerank").map(String::as_str));
+                let rank = match packset_core::search::Rank::parse(
+                    query.get("rank").map(String::as_str),
+                ) {
+                    Ok(rank) => rank,
+                    Err(reason) => return Answer::err(400, reason),
+                };
                 match as_of_stamp(query) {
                     Err(a) => a,
                     Ok(at) => answer(
-                        service.search(
+                        service.search_ranked(
                             &workspace,
                             &q,
                             limit,
@@ -444,6 +450,7 @@ fn route(
                                 .get("kind")
                                 .map(String::as_str)
                                 .filter(|k| !k.is_empty()),
+                            rank,
                         ),
                     ),
                 }
@@ -1118,6 +1125,7 @@ for line in sys.stdin:
         assert_eq!(on.code, 200, "{:?}", on.body);
         assert_eq!(off.body["rerank"], json!("off"), "{:?}", off.body);
         assert_eq!(on.body["rerank"], json!("cross-encoder"), "{:?}", on.body);
+        assert_eq!(off.body["rank"], json!("fused"), "{:?}", off.body);
         let off_ids = hit_ids(&off);
         let on_ids = hit_ids(&on);
         assert_eq!(off_ids.len(), 2, "{:?}", off.body);
@@ -1169,5 +1177,22 @@ for line in sys.stdin:
             on.body,
             off.body
         );
+    }
+
+    /// `rank` is a query parameter. A typo is a 400, not a silent default,
+    /// and the answer echoes the cut that ran.
+    #[test]
+    fn rank_is_a_query_parameter() {
+        let (_pack, svc) = two_claim_pack();
+        let panel = packset_core::Panel::default();
+        let mut q = search_query(None);
+        q.insert("rank".into(), "relevance".into());
+        let rel = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        assert_eq!(rel.code, 200, "{:?}", rel.body);
+        assert_eq!(rel.body["rank"], json!("relevance"), "{:?}", rel.body);
+        q.insert("rank".into(), "nope".into());
+        let bad = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        assert_eq!(bad.code, 400, "{:?}", bad.body);
+        assert_eq!(bad.body["error"], json!("rank must be fused or relevance"));
     }
 }

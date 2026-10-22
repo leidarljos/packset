@@ -39,6 +39,13 @@ refused rather than read as a workspace, an id or a word of the text. ``--``
 ends the flags, so ``packset forget -- -odd`` names a workspace that starts
 with a dash.
 
+``packset search --rank relevance`` (and ``GET /v1/search?rank=relevance``)
+chooses the top k by lexical, BM25 and cosine. The fourteen-day half-life
+and the retrievability scale stay on the default, which is ``rank=fused``
+when it is named. The answer echoes ``rank``. ``GET /v1/status`` lists
+``search.ranks``. An older writer omits ``search``, and a client keeps the
+default order then.
+
 HTTP
 ====
 

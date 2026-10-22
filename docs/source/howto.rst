@@ -189,6 +189,23 @@ on the lexical ballots.
 The published binary remains ``cargo binstall packset-embed`` for a seat
 that does not compile the runtime.
 
+Rank by the words, not the age
+===============================
+
+The default search adds a fourteen-day half-life on the lexical ballots
+and scales the fuse by retrievability. A lesson from January that shares
+the question's words then sits behind fresher lookalikes, and the cut at
+k never returns it. ``rank=relevance`` keeps the lexical, BM25 and cosine
+scores and leaves that decay off. The default is unchanged.
+
+.. code:: console
+
+   $ packset search --rank relevance --workspace seat fusion
+   $ curl -s "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rank=relevance" | jq '.rank'
+
+``GET /v1/status`` lists ``search.ranks``. An older writer has no ``search``
+object, and a client should keep the default order then.
+
 Run the second stage on one question
 ====================================
 

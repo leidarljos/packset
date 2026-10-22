@@ -24,6 +24,10 @@ pub struct SearchArgs {
     /// Run the measured cross-encoder second stage. Off unless asked.
     #[serde(default)]
     pub rerank: Option<bool>,
+    /// `relevance` chooses the top k by lexical, BM25 and cosine, with
+    /// no half-life and no retrievability. Omit it for the shipped order.
+    #[serde(default)]
+    pub rank: Option<String>,
 }
 
 /// A workspace, optionally dated.

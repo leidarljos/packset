@@ -12,6 +12,55 @@ pub const SHORT_EXACT: usize = 4;
 /// Days over which a hit's recency weight halves.
 pub const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 
+/// How `/v1/search` chooses its top k.
+///
+/// [`Rank::Fused`] is the shipped order: a lexical ballot adds the
+/// fourteen-day half-life, and the fuse then scales by retrievability.
+/// [`Rank::Relevance`] keeps the lexical, BM25 and cosine scores and
+/// leaves that decay off, so an older lesson that shares the question's
+/// words is not cut for a fresher lookalike.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rank {
+    /// Recency on the lexical ballots, then the panel's retrievability.
+    #[default]
+    Fused,
+    /// Lexical, BM25 and cosine. No recency and no retrievability.
+    Relevance,
+}
+
+impl Rank {
+    /// A missing or empty value is the shipped order. `fused` names it.
+    /// `relevance` drops age. Anything else is a typo and is refused,
+    /// rather than silently searching the default.
+    pub fn parse(raw: Option<&str>) -> Result<Self, &'static str> {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Ok(Self::Fused),
+            Some(name) => match name.to_ascii_lowercase().as_str() {
+                "fused" => Ok(Self::Fused),
+                "relevance" => Ok(Self::Relevance),
+                _ => Err("rank must be fused or relevance"),
+            },
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fused => "fused",
+            Self::Relevance => "relevance",
+        }
+    }
+}
+
+/// The half-life added to a lexical ballot. Relevance mode adds none:
+/// one day of age is enough to put a fresh lookalike ahead of the
+/// lesson that shares its words, and the cut at k then drops the lesson.
+fn age_weight(ts: Option<&str>, now: &str, rank: Rank) -> f64 {
+    match rank {
+        Rank::Relevance => 0.0,
+        Rank::Fused => recency(ts, now),
+    }
+}
+
 /// Words carrying no signal, dropped from a query and from the text.
 pub const STOP: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could", "do",
@@ -423,6 +472,18 @@ pub fn search_linear_with<R: Borrow<Record>>(
     ask: &Ask<'_, R>,
     documents: &[Vec<String>],
 ) -> Vec<Value> {
+    search_linear_with_ranked(ask, documents, Rank::Fused)
+}
+
+/// [`search_linear_with`] with the caller's rank. Relevance mode drops
+/// the half-life from the score the top k is chosen by. Trust and a due
+/// bonus stay: neither is age.
+#[must_use]
+pub fn search_linear_with_ranked<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
+    documents: &[Vec<String>],
+    rank: Rank,
+) -> Vec<Value> {
     let Ask {
         user,
         memory,
@@ -465,7 +526,7 @@ pub fn search_linear_with<R: Borrow<Record>>(
         best.offer(Candidate {
             score: relevance
                 + 0.1 * trust_of(atom)
-                + recency(ts, now)
+                + age_weight(ts, now, rank)
                 + if due { 2.0 } else { 0.0 },
             id: id_of(atom),
             ordinal,
@@ -503,7 +564,18 @@ pub fn atom_tokens(atom: &Record) -> Vec<String> {
 /// scored against the same corpus.
 #[must_use]
 pub fn search_bm25<R: Borrow<Record>>(ask: &Ask<'_, R>, index: &crate::bm25::Index) -> Vec<Value> {
-    search_lexical(ask, index, crate::bm25::Scorer::default())
+    search_bm25_ranked(ask, index, Rank::Fused)
+}
+
+/// [`search_bm25`] with the caller's rank. Relevance mode drops the
+/// half-life from the score the top k is chosen by.
+#[must_use]
+pub fn search_bm25_ranked<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
+    index: &crate::bm25::Index,
+    rank: Rank,
+) -> Vec<Value> {
+    lexical_hits(ask, index, crate::bm25::Scorer::default(), rank)
 }
 
 /// Plain Okapi BM25, for a caller measuring against the formula.
@@ -522,11 +594,20 @@ pub fn search_lexical<R: Borrow<Record>>(
     index: &crate::bm25::Index,
     scorer: crate::bm25::Scorer,
 ) -> Vec<Value> {
+    lexical_hits(ask, index, scorer, Rank::Fused)
+}
+
+fn lexical_hits<R: Borrow<Record>>(
+    ask: &Ask<'_, R>,
+    index: &crate::bm25::Index,
+    scorer: crate::bm25::Scorer,
+    rank: Rank,
+) -> Vec<Value> {
     let qtoks = tokens(ask.query);
     // Each word asked for once, which is the unweighted query written as a
     // weighted one so both paths score through the same code.
     let weighted: Vec<(String, f64)> = qtoks.into_iter().map(|term| (term, 1.0)).collect();
-    bm25_hits(ask, index, &weighted, scorer)
+    bm25_hits(ask, index, &weighted, scorer, rank)
 }
 
 /// How many of the first pass's hits the relevance model is estimated from.
@@ -563,7 +644,13 @@ pub fn search_bm25_expanded<R: Borrow<Record>>(
         })
         .collect();
     let expanded = index.expand(&qtoks, &feedback, RM3_TERMS, RM3_ALPHA);
-    bm25_hits(ask, index, &expanded, crate::bm25::Scorer::default())
+    bm25_hits(
+        ask,
+        index,
+        &expanded,
+        crate::bm25::Scorer::default(),
+        Rank::Fused,
+    )
 }
 
 /// The hits a weighted query scores, cards and atoms together.
@@ -572,6 +659,7 @@ fn bm25_hits<R: Borrow<Record>>(
     index: &crate::bm25::Index,
     query: &[(String, f64)],
     scorer: crate::bm25::Scorer,
+    rank: Rank,
 ) -> Vec<Value> {
     let Ask {
         user,
@@ -617,7 +705,7 @@ fn bm25_hits<R: Borrow<Record>>(
         }
         let ts = atom.get("ts").and_then(Value::as_str);
         best.offer(Candidate {
-            score: relevance + 0.1 * trust_of(atom) + recency(ts, now),
+            score: relevance + 0.1 * trust_of(atom) + age_weight(ts, now, rank),
             id: id_of(atom),
             ordinal,
         });
@@ -1488,6 +1576,60 @@ mod tests {
         assert!(search_linear(&ask("", "", &atoms, "ripgrep", 0, None)).is_empty());
         assert!(front_due(vec![json!({})], vec![], 0).is_empty());
     }
+
+    /// Twenty-four fresh lessons and one from January, all sharing the
+    /// query words. The half-life puts the fresh ones in the top k. Relevance
+    /// mode keeps the older lesson, which ties them on the words and sorts
+    /// first by id.
+    #[test]
+    fn relevance_keeps_an_older_lesson_the_half_life_cuts() {
+        let now = "2026-10-22T00:00:00.000Z";
+        let mut atoms = vec![atom(json!({
+            "id": "a-january",
+            "text": "zeta quorum kept january borda lesson intact here",
+            "kind": "lesson",
+            "ts": "2025-01-15T00:00:00.000Z",
+        }))];
+        for i in 0..24 {
+            atoms.push(atom(json!({
+                "id": format!("f-{i:02}"),
+                "text": format!("zeta quorum note{i:02} willow cedar maple birch pine"),
+                "kind": "lesson",
+                "ts": now,
+            })));
+        }
+        let asked = Ask {
+            now,
+            ..ask("", "", &atoms, "zeta quorum", 20, None)
+        };
+        let fused = search_linear_with_ranked(&asked, &[], Rank::Fused);
+        let fused_ids = hit_ids(&fused);
+        assert_eq!(fused_ids.len(), 20, "{fused_ids:?}");
+        assert!(
+            !fused_ids.contains(&"a-january"),
+            "the half-life cut the january lesson: {fused_ids:?}"
+        );
+        let rel = search_linear_with_ranked(&asked, &[], Rank::Relevance);
+        let rel_ids = hit_ids(&rel);
+        assert_eq!(rel_ids.len(), 20, "{rel_ids:?}");
+        assert_eq!(rel_ids[0], "a-january", "{rel_ids:?}");
+    }
+
+    fn hit_ids(hits: &[Value]) -> Vec<&str> {
+        hits.iter().filter_map(|h| h["id"].as_str()).collect()
+    }
+
+    #[test]
+    fn rank_parses_the_two_names_and_refuses_a_typo() {
+        assert_eq!(Rank::parse(None).unwrap(), Rank::Fused);
+        assert_eq!(Rank::parse(Some("")).unwrap(), Rank::Fused);
+        assert_eq!(Rank::parse(Some("fused")).unwrap(), Rank::Fused);
+        assert_eq!(Rank::parse(Some("Relevance")).unwrap(), Rank::Relevance);
+        assert_eq!(
+            Rank::parse(Some("nope")).unwrap_err(),
+            "rank must be fused or relevance"
+        );
+    }
 }
 
 /// The identity of a hit across ranked lists: field and id, since a prose hit
@@ -1570,6 +1712,20 @@ pub fn merge_ballots(
     panel: &crate::panel::Panel,
     now: &str,
 ) -> Vec<Value> {
+    merge_ballots_ranked(ballots, limit, panel, now, Rank::Fused)
+}
+
+/// [`merge_ballots`] with the caller's rank. Relevance mode leaves the
+/// panel's retrievability off: the fuse order is the relevance order,
+/// and the cut at k is taken from that.
+#[must_use]
+pub fn merge_ballots_ranked(
+    ballots: &[Vec<Value>],
+    limit: usize,
+    panel: &crate::panel::Panel,
+    now: &str,
+    rank: Rank,
+) -> Vec<Value> {
     if limit == 0 {
         return Vec::new();
     }
@@ -1589,7 +1745,10 @@ pub fn merge_ballots(
         .map(|key| (key.clone(), scores.get(key).copied().unwrap_or(0.0)))
         .collect();
 
-    if panel.decay != crate::panel::Decay::Off {
+    // Relevance mode is the lexical, BM25 and cosine order. The
+    // retrievability scale is what puts a fresh lookalike ahead of the
+    // older lesson once both have made a ballot.
+    if rank != Rank::Relevance && panel.decay != crate::panel::Decay::Off {
         let order: std::collections::HashMap<&String, usize> =
             ranked.iter().enumerate().map(|(i, k)| (k, i)).collect();
         for key in &ranked {
@@ -1766,9 +1925,19 @@ mod merge_tests {
         let off = merge_ballots(std::slice::from_ref(&ballot), 2, &default_panel(), NOW);
         assert_eq!(off[0]["id"], "stale");
         let fsrs = crate::panel::Panel::named("combmnz", "none", "fsrs").unwrap();
-        let ranked = merge_ballots(&[ballot], 2, &fsrs, NOW);
+        let ranked = merge_ballots(std::slice::from_ref(&ballot), 2, &fsrs, NOW);
         assert_eq!(ranked[0]["id"], "fresh");
         assert_eq!(ranked.len(), 2);
+        // The same ballot, with age left out of the cut. Retrievability
+        // must not move the older claim behind the fresh one.
+        let kept = merge_ballots_ranked(
+            std::slice::from_ref(&ballot),
+            2,
+            &fsrs,
+            NOW,
+            Rank::Relevance,
+        );
+        assert_eq!(kept[0]["id"], "stale");
     }
 
     #[test]

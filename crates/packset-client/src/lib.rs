@@ -510,6 +510,28 @@ impl PacksetClient {
         as_of: Option<&str>,
         rerank: bool,
     ) -> Result<Vec<Hit>, Error> {
+        self.search_ranked(workspace, q, limit, as_of, rerank, None)
+    }
+
+    /// [`Self::search_opts`] with a rank. `Some("relevance")` asks for the
+    /// top k by lexical, BM25 and cosine, with no half-life and no
+    /// retrievability. `None` leaves the shipped order. An older writer
+    /// ignores the parameter; `GET /v1/status` lists `search.ranks` when
+    /// this writer honours it.
+    ///
+    /// # Errors
+    ///
+    /// The request's, including a rank the writer refuses, or a body that
+    /// is not a hit list.
+    pub fn search_ranked(
+        &self,
+        workspace: &str,
+        q: &str,
+        limit: u32,
+        as_of: Option<&str>,
+        rerank: bool,
+        rank: Option<&str>,
+    ) -> Result<Vec<Hit>, Error> {
         let url = format!("{}/v1/search", self.base);
         let budget = if rerank {
             Duration::from_secs(60).max(timeout())
@@ -525,6 +547,9 @@ impl PacksetClient {
         }
         if rerank {
             req = req.query("rerank", "1");
+        }
+        if let Some(rank) = rank.map(str::trim).filter(|s| !s.is_empty()) {
+            req = req.query("rank", rank);
         }
         let body: serde_json::Value = send(req, None, budget)
             .map_err(|e| refused(&url, e))?

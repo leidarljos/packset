@@ -8,7 +8,7 @@
 //! packset ensure | start | stop | status | port | url | which
 //! packset remember [--workspace WS] TEXT...
 //! packset prefer [--workspace WS] TEXT...
-//! packset search [--workspace WS] [--as-of TS] [--rerank] QUERY...
+//! packset search [--workspace WS] [--as-of TS] [--rerank] [--rank MODE] QUERY...
 //! packset due [WORKSPACE]
 //! packset islands [WORKSPACE]
 //! packset island [--workspace WS] [--fire] CUE
@@ -190,7 +190,7 @@ fn spec(verb: &str) -> Option<Spec> {
             text: true,
         },
         "search" => Spec {
-            values: &["--workspace", "--as-of"],
+            values: &["--workspace", "--as-of", "--rank"],
             switches: &["--rerank"],
             most: None,
             text: true,
@@ -397,7 +397,7 @@ fn usage() -> String {
          migrate-home           move ~/.grokinside/memory to $XDG_DATA_HOME/packset; the writer must be stopped\n\
          remember [--workspace WS] TEXT   one lesson, two sentences at most\n\
          prefer [--workspace WS] TEXT     one standing preference\n\
-         search [--workspace WS] [--as-of TS] [--rerank] QUERY  ranked claims live now, or at TS\n\
+         search [--workspace WS] [--as-of TS] [--rerank] [--rank MODE] QUERY  ranked claims live now, or at TS\n\
          due [WORKSPACE]        claims whose review clock has run out\n\
          islands [WORKSPACE]    the link graph's clusters, largest first\n\
          hubs [WORKSPACE]       the claims the link graph turns on, highest first\n\
@@ -842,6 +842,8 @@ fn write(kind: &str, args: &Args) -> anyhow::Result<()> {
 /// Ranked claims for a question: score, kind, id, text.
 /// `--as-of TS` ranks the claims whose window contained TS.
 /// `--rerank` runs the measured cross-encoder second stage.
+/// `--rank relevance` chooses the top k by lexical, BM25 and cosine,
+/// with no half-life and no retrievability. The default is unchanged.
 fn search(args: &Args) -> anyhow::Result<()> {
     let query = args.positional.join(" ").trim().to_string();
     if query.is_empty() {
@@ -849,12 +851,13 @@ fn search(args: &Args) -> anyhow::Result<()> {
     }
     let workspace = workspace(args.value("--workspace"))?;
     eprintln!("packset: workspace {workspace}");
-    for hit in client()?.search_opts(
+    for hit in client()?.search_ranked(
         &workspace,
         &query,
         10,
         args.value("--as-of"),
         args.switch("--rerank"),
+        args.value("--rank"),
     )? {
         println!(
             "{:.4}\t{}\t{}\t{}",
@@ -1233,6 +1236,14 @@ mod tests {
         assert_eq!(args.value("--workspace"), Some("acme-cli"));
         assert_eq!(args.value("--as-of"), Some("2024-06-01T00:00:00Z"));
         assert_eq!(args.positional, ["Borda"]);
+        assert!(!args.switch("--rerank"));
+    }
+
+    #[test]
+    fn search_rank_is_not_the_query() {
+        let args = run_args("search", &["--rank", "relevance", "fusion"]);
+        assert_eq!(args.value("--rank"), Some("relevance"));
+        assert_eq!(args.positional, ["fusion"]);
         assert!(!args.switch("--rerank"));
     }
 

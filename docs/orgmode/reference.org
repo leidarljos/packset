@@ -12,7 +12,7 @@
 | =packset port= / =url= / =which= | the port, the URL, the daemon binary |
 | =packset remember [--workspace WS] TEXT= | one lesson |
 | =packset prefer [--workspace WS] TEXT= | one standing preference |
-| =packset search [--workspace WS] [--as-of TS] [--rerank] QUERY= | ranked claims live now, or those live at =TS=: score, kind, id, text; =--rerank= runs the measured cross-encoder over the top 20; a lone hit reports =settled= (no model call: one candidate cannot be reordered) |
+| =packset search [--workspace WS] [--as-of TS] [--rerank] [--rank MODE] QUERY= | ranked claims live now, or those live at =TS=: score, kind, id, text; =--rank relevance= chooses the top k by lexical, BM25 and cosine, with no half-life and no retrievability (the default order is unchanged); =--rerank= runs the measured cross-encoder over the top 20; a lone hit reports =settled= (no model call: one candidate cannot be reordered) |
 | =packset due [WS]= | claims whose review clock has run out, soonest first |
 | =packset islands [WS]= | the link graph's clusters, largest first: size and first claim |
 | =packset hubs [WS]= | the claims the link graph turns on, highest first: a weighted PageRank over the links |
@@ -36,6 +36,12 @@ refused rather than read as a workspace, an id or a word of the text. =--=
 ends the flags, so =packset forget -- -odd= names a workspace that starts
 with a dash.
 
+=packset search --rank relevance= chooses the top k by lexical, BM25 and
+cosine. The fourteen-day half-life and the retrievability scale stay on
+the default, which is =rank=fused= when it is named. The answer echoes
+=rank=. =GET /v1/status= lists =search.ranks=. An older writer omits
+=search=, and a client keeps the default order then.
+
 * HTTP
 
 The writer listens on =127.0.0.1= only. Bodies are JSON.
@@ -43,7 +49,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | Request | Does |
 |---+---|
 | =GET /health= | =packsetd= |
-| =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, and =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave) |
+| =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave), and =search.ranks= (the top-k cuts this writer honours; an older writer omits =search=) |
 | =GET /v1/workspaces= | names with live counts |
 | =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate |
 | =GET /v1/atoms?workspace=&as_of== | live claims, or those live at =as_of= |
@@ -51,7 +57,7 @@ The writer listens on =127.0.0.1= only. Bodies are JSON.
 | =POST /v1/atoms/update= | merge fields into one live claim |
 | =POST /v1/atoms/delete= | tombstone; =why= names the deed that withdrew it |
 | =POST /v1/grade= | =recalled= true or false; moves =due_at= |
-| =GET /v1/search?workspace=&q=&limit=&as_of=&rerank== | ranked hits, the engine, the stage; a hit the encoder named carries =dense_rank= (cosine plus a tenth of trust, not age) and =cosine= |
+| =GET /v1/search?workspace=&q=&limit=&as_of=&rerank=&rank== | ranked hits, the engine, the stage, and =rank= (=fused= or =relevance=); =rank=relevance= chooses the top k by lexical, BM25 and cosine, with no half-life and no retrievability; a hit the encoder named carries =dense_rank= (cosine plus a tenth of trust, not age) and =cosine= |
 | =GET /v1/islands?workspace== | the link graph's communities, largest first |
 | =GET /v1/hubs?workspace=&limit== | the claims the link graph turns on, highest first, with their scores |
 | =GET /v1/activate?workspace=&q=&limit=&fire=&as== | the cluster a cue activates: top hits as seeds, two hops along the links, as =island=; =seeds=, =agreed_seeds= (two scorers agreed), =weak= (no seed both scorers agreed on), =fired= and =held= (the same cue fired within the hour, so nothing moved), =as=; =fire=1= wires the top eight; =as=NAME= reads and writes that persona's weights (=link_weights_by=), the shared ones untouched |

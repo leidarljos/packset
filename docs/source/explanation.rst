@@ -23,7 +23,13 @@ present. It orders by cosine plus a tenth of trust. Age is not in
 that score: a client reads ``dense_rank`` as the encoder's order, and
 one day of age is about the gap between the first cosine and the
 fifth. The lexical scores still add the fourteen-day half-life, and
-the fuse reads those scores. The panel fuses the ballots by CombMNZ
+the fuse reads those scores, then scales them by retrievability.
+``rank=relevance`` (``packset search --rank relevance``, or
+``GET /v1/search?rank=relevance``) chooses the top k from the lexical,
+BM25 and cosine scores alone, so a lesson from January is not cut for
+a fresher lookalike that shares its words. The shipped order stays
+the default. ``GET /v1/status`` lists ``search.ranks``; an older writer
+omits ``search``. The panel fuses the ballots by CombMNZ
 and diversifies by maximal marginal relevance (MMR).
 Each default was measured on LoCoMo (doi:10.48550/arXiv.2402.17753), 1986
 questions over ten conversations with labelled evidence turns, loaded as
