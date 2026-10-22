@@ -471,6 +471,8 @@ pub fn index_ready(dir: &Path) -> bool {
 /// predates the `set` field still scopes correctly after this, and a hit for
 /// an atom that has since been tombstoned never reaches a reader. Prose hits
 /// from the index are dropped because prose always comes from the pack.
+/// Each kept hit carries the atom's stored origin. A record with no origin
+/// is marked `unknown`, so a missing field is not read as `user-declared`.
 #[must_use]
 pub fn filter_atom_hits<R: Borrow<Record>>(
     hits: &[Value],
@@ -510,6 +512,15 @@ pub fn filter_atom_hits<R: Borrow<Record>>(
             if let Some(entities) = atom.get("entities").filter(|v| v.is_array()) {
                 hit["entities"] = entities.clone();
             }
+            // Origin is not a scored field, so the index does not have it.
+            // A missing one reads as user-declared. Copy the stored string,
+            // and mark a blank record unknown, over whatever the index said.
+            let origin = atom
+                .get("origin")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or("unknown");
+            hit["origin"] = Value::String(origin.to_string());
             Some(hit)
         })
         .collect()
@@ -690,6 +701,63 @@ mod tests {
         let kept = filter_atom_hits(&hits, &live, None, None);
         assert_eq!(kept[0]["source"]["harness"], json!("acme"));
         assert_eq!(kept[0]["entities"], json!(["seat:acme", "issue:brio-1"]));
+    }
+
+    /// The index has no origin. The hit carries the atom's, a forged
+    /// `user-declared` on the hit does not survive, and a record with no
+    /// origin is `unknown` so it is not read as the person's.
+    #[test]
+    fn an_index_hit_carries_the_stored_origin() {
+        let live = vec![
+            record(json!({
+                "id": "agent", "kind": "lesson", "text": "one",
+                "origin": "agent-derived",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "legacy", "kind": "lesson", "text": "two",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "blank", "kind": "lesson", "text": "three",
+                "origin": "",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "spaced", "kind": "lesson", "text": "four",
+                "origin": "   ",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "person", "kind": "lesson", "text": "five",
+                "origin": "user-declared",
+                "source": {"basis": "person"}
+            })),
+        ];
+        let hits = vec![
+            json!({"field": "atom", "id": "agent", "text": "one", "score": 1.0}),
+            json!({
+                "field": "atom", "id": "agent", "text": "one",
+                "origin": "user-declared", "score": 0.9
+            }),
+            json!({
+                "field": "atom", "id": "legacy", "text": "two",
+                "origin": "user-declared"
+            }),
+            json!({"field": "atom", "id": "blank", "text": "three"}),
+            json!({"field": "atom", "id": "spaced", "text": "four", "origin": "user-declared"}),
+            json!({"field": "atom", "id": "person", "text": "five"}),
+        ];
+        let kept = filter_atom_hits(&hits, &live, None, None);
+        assert_eq!(kept.len(), 6, "{kept:?}");
+        assert_eq!(kept[0]["origin"], json!("agent-derived"));
+        assert_eq!(kept[0]["source"]["basis"], json!("person"));
+        assert_eq!(kept[1]["origin"], json!("agent-derived"), "{kept:?}");
+        assert_eq!(kept[2]["origin"], json!("unknown"));
+        assert!(!kept[2]["origin"].as_str().unwrap().is_empty());
+        assert_eq!(kept[3]["origin"], json!("unknown"));
+        assert_eq!(kept[4]["origin"], json!("unknown"));
+        assert_eq!(kept[5]["origin"], json!("user-declared"));
     }
 
     #[test]

@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A search hit from the index carries the atom's stored origin. The
+  projection has none, and the filter copied the source without it,
+  so a missing field was read as `user-declared`. The hit copies the
+  stored string, and a record with no origin is marked `unknown`. An
+  origin the index invented does not survive.
+
 - An update cannot turn an agent-derived lesson into the person's by
   sending `origin` null, `""` or a non-string. Those values skipped
   the check and validate stored `user-declared`, which only an accept
