@@ -113,6 +113,18 @@ const INNER_DOT: char = '\u{2024}';
 /// Abbreviations whose stops never end a sentence.
 const DOTTED_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "a.k.a."];
 
+/// Largest index at or before `index` that begins a character.
+///
+/// `str::floor_char_boundary` is not in the 1.88 MSRV. A character is at
+/// most four bytes, so the walk is short.
+fn floor_char(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 /// `text` with every full stop that cannot end a sentence masked: one in a
 /// code span (`` `foo.rs. bar` ``), one followed at once by a letter, digit
 /// or `_` (`foo.rs`, `v0.29.1`, `.DS_Store`), and the stops of
@@ -157,11 +169,19 @@ fn mask_inner_dots(text: &str) -> String {
             from = 0;
         }
         for (a, b) in spans.into_iter().rev() {
-            let piece: String = masked[a..b]
+            // The index came from the lowercased note. A stop rewritten
+            // to U+2024 is three bytes, so the next span can name a byte
+            // inside that character. Floor back to a boundary.
+            let end = floor_char(&masked, b);
+            let start = floor_char(&masked, a.min(end));
+            if start >= end {
+                continue;
+            }
+            let piece: String = masked[start..end]
                 .chars()
                 .map(|c| if c == '.' { INNER_DOT } else { c })
                 .collect();
-            masked.replace_range(a..b, &piece);
+            masked.replace_range(start..end, &piece);
         }
     }
     masked
@@ -620,5 +640,40 @@ mod tests {
         assert_eq!(syllables("the"), 1);
         assert_eq!(syllables("reproducibility"), 7);
         assert_eq!(syllables(""), 1);
+    }
+
+    /// `vs.` is rewritten so the stop is U+2024, three bytes. A note with
+    /// that abbreviation near char 160 then asks for byte 161, inside
+    /// the new character.
+    #[test]
+    fn a_vs_abbreviation_near_char_160_stays_one_sentence() {
+        let note = format!("{} vs. lease {}", "n".repeat(157), "m".repeat(98));
+        assert_eq!(note.chars().count(), 266);
+        assert_eq!(note.find("vs."), Some(158));
+        let got = sentences(&note);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("vs. lease"), "{got:?}");
+    }
+
+    /// é, an emoji and a CJK ideograph on the byte the cut asks for.
+    /// `İ` lowercases to a longer string, so the index of `vs.` falls
+    /// inside the following character instead of on a boundary.
+    #[test]
+    fn a_multibyte_char_on_the_cut_stays_whole() {
+        let cases = [
+            (format!("{} vs. é lease", "İ".repeat(2)), 'é', true),
+            (format!("{} vs. 😀 lease", "İ".repeat(4)), '😀', true),
+            (format!("{} vs. 字 lease", "İ".repeat(2)), '字', false),
+        ];
+        for (note, mark, one_sentence) in cases {
+            let got = sentences(&note);
+            let flat = got.join(" ");
+            assert!(flat.contains(mark), "{mark}: {got:?}");
+            assert!(flat.contains("vs."), "{mark}: {got:?}");
+            assert!(!flat.contains('\u{2024}'), "{mark}: {got:?}");
+            if one_sentence {
+                assert_eq!(got.len(), 1, "{mark}: {got:?}");
+            }
+        }
     }
 }

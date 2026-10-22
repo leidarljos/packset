@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A sentence cut no longer panics when a note holds "vs." near
+  char 160. The stop is rewritten to U+2024, three bytes, and the
+  next slice took byte 161 from inside that character, so `ljos
+  note` exited 101 on a note of about 266 characters. The same
+  cut panicked when é, an emoji or a CJK ideograph sat on the
+  index. The slice now stops on the previous character boundary.
+
 - The dense ballot orders by cosine plus a tenth of trust. Age is
   not in that score. A client reads `dense_rank` as the encoder's
   order, and one day of the fourteen-day half-life moves the score
