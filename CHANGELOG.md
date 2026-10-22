@@ -4,6 +4,50 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `POST /v1/forget` (and `packset forget`) keeps a workspace's
+  tombstones. It removed every key, so after a forget a deleted id
+  could be posted again, and a lesson a person had withdrawn came
+  back under the id a rule still named. The other records go as
+  before, so a scratch run's live ids are free for the next run.
+
+- A record with no origin reads as `unknown` in every answer: search,
+  `GET /v1/atoms` (with `kind`, `embedding=omit` or `as_of`),
+  `GET /v1/atoms/<id>`, the pack, recall, and the record a write
+  returns. Every path but the index's read it as `user-declared`, the
+  person's origin. The stored row stays without the field, and a post
+  that names no origin is still stored as `user-declared`.
+
+- `POST /v1/atoms` with the id of a live record takes the update's
+  rule. The post writes over that record, so it was a second way to
+  relabel a lesson the person's: send the same id with
+  `user-declared` or a `person` basis and the record was replaced.
+  Such a post may lower the origin or basis, or keep them, and
+  carries `provenance_floor`; a rise is refused. Accept is still the
+  one way up.
+
+- A record keeps the lowest origin and basis it has held, as
+  `provenance_floor`, and an update is checked against that as well
+  as the pair it carries now. The writer sets it on the first update
+  that lowers either. A post's value is dropped, and an update cannot
+  clear or raise it.
+
+- An update is checked on the record it would leave. A record written
+  before `origin` existed ranks below every origin, so an update
+  cannot name one for it; an update of its other fields still leaves
+  the field unset. Before, the missing field was read as
+  `user-declared` for the check, and any origin could be written
+  over it.
+
+- An update cannot raise an origin or a basis by a detour. Origins
+  now sit in one order with `user-declared` above the rest, so a
+  lesson moved to `tool-echo`, `peer` or `external` is not relabelled
+  the person's from there, and null or `""` is refused as an origin
+  on any record. `person` sits above every other `source.basis`, and
+  a missing basis is not a person's: a `source` that dropped the
+  basis, or hid it under another key, is not stamped `person` again,
+  and neither is an old preference that never had one. Accept is
+  still the one way up.
+
 - A search hit from the index carries the atom's stored origin. The
   projection has none, and the filter copied the source without it,
   so a missing field was read as `user-declared`. The hit copies the
@@ -15,8 +59,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the check and validate stored `user-declared`, which only an accept
   may do. A blank origin is refused, and an update that does not
   name origin leaves a missing one unset. `source.basis` cannot rise
-  from agent to person on an update either. A claim that never had a
-  basis can still be stamped `person`.
+  from agent to person on an update either.
 
 - A client-chosen id that was deleted stays retired. `POST /v1/atoms`
   with that id in the same workspace answers 409, and the tombstone
@@ -24,7 +67,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   atom over the tombstone, so a lesson a person had withdrawn came
   back under the id a rule still named. The same id in another
   workspace is a different atom. Forgetting a scratch workspace
-  still removes the keys, and a later post may use them.
+  still removes its other keys, and a later post may use them.
 
 - A search hit carries `rerank_score`, the cross-encoder's number,
   or null when the stage did not score that hit. The second stage

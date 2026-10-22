@@ -722,11 +722,12 @@ impl Store {
         Ok(stored.pop().unwrap_or(tomb))
     }
 
-    /// Drop every record in one workspace, scratch cleanup rather than
-    /// retraction: no tombstone, no deed, the keys are gone. Smoke and herd
-    /// runs each write a per-run workspace into the long-lived writer, so
-    /// without this every run leaves its atoms behind. Returns how many
-    /// records were removed.
+    /// Drop every record in one workspace but its tombstones, scratch
+    /// cleanup rather than retraction: no deed, the keys are gone. Smoke and
+    /// herd runs each write a per-run workspace into the long-lived writer,
+    /// so without this every run leaves its atoms behind. A tombstone stays
+    /// so a deleted id is not posted again. Returns how many records were
+    /// removed.
     ///
     /// # Errors
     ///
@@ -740,8 +741,10 @@ impl Store {
             let rtxn = self.env.read_txn()?;
             let mut keys = Vec::new();
             for item in self.db.prefix_iter(&rtxn, &prefix)? {
-                let (key, _) = item?;
-                keys.push(key.to_vec());
+                let (key, raw) = item?;
+                if !is_tombstone(raw) {
+                    keys.push(key.to_vec());
+                }
             }
             keys
         };
@@ -903,6 +906,15 @@ fn cut_links(atom: &mut Record, live: &HashSet<&str>) -> Vec<String> {
         .unwrap_or_default();
     atom.insert("links".into(), Value::Array(kept));
     cut
+}
+
+/// Whether a stored value is a tombstone. Its id stays retired, so
+/// [`Store::forget_workspace`] keeps it.
+fn is_tombstone(raw: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(raw)
+        .ok()
+        .and_then(|record| record.get("tombstone").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
@@ -1662,6 +1674,16 @@ mod tests {
             "twice is empty"
         );
         assert!(store.forget_workspace("").is_err(), "empty forgets nothing");
+
+        store
+            .upsert(&record(
+                json!({"id": "d", "workspace": "scratch", "text": "d"}),
+            ))
+            .unwrap();
+        store.delete("scratch", "d", None).unwrap();
+        assert_eq!(store.forget_workspace("scratch").unwrap(), 0);
+        let kept = store.get("scratch", "d").unwrap().unwrap();
+        assert_eq!(kept["tombstone"], json!(true), "the tombstone stays");
     }
 
     #[test]

@@ -326,9 +326,6 @@ fn live_cap_from_env() -> usize {
     }
 }
 
-/// Why an agent-derived lesson cannot be relabelled by an update.
-const LAUNDERED_ORIGIN: &str = "an agent-derived lesson reaches user-declared only through accept";
-
 /// Whether `origin` is missing, null, or an empty string.
 fn origin_is_blank(value: Option<&Value>) -> bool {
     match value {
@@ -336,60 +333,6 @@ fn origin_is_blank(value: Option<&Value>) -> bool {
         Some(Value::String(text)) if text.is_empty() => true,
         _ => false,
     }
-}
-
-/// The text a refusal shows for an origin `validate` will not keep.
-fn origin_shown(value: &Value) -> String {
-    match value {
-        Value::Null => "None".into(),
-        Value::String(text) if text.is_empty() => "None".into(),
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// Refuse an origin update that would store `user-declared` without accept.
-///
-/// Null, `""` and any non-string are the values `validate` would default to
-/// `user-declared`. That default is the launder, so they take the same check
-/// as the string. A blank origin is not written as `user-declared` either.
-fn refuse_origin_update(current: &Record, raw: &Value) -> Result<(), AtomError> {
-    let from = record::origin_of(current);
-    if let Value::String(to) = raw {
-        if packset_core::atom::known_origin(to) {
-            if packset_core::atom::launders(from, to) {
-                return Err(AtomError(LAUNDERED_ORIGIN.into()));
-            }
-            return Ok(());
-        }
-        if !to.is_empty() {
-            return Err(AtomError(format!("unknown atom origin: {to}")));
-        }
-    }
-    if packset_core::atom::launders(from, packset_core::atom::USER_DECLARED) {
-        return Err(AtomError(LAUNDERED_ORIGIN.into()));
-    }
-    let shown = origin_shown(raw);
-    Err(AtomError(format!("unknown atom origin: {shown}")))
-}
-
-/// `source.basis`, trimmed and without case, when `source` is an object.
-fn basis_name(value: Option<&Value>) -> Option<String> {
-    let raw = value?.as_object()?.get("basis")?.as_str()?.trim();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_ascii_lowercase())
-    }
-}
-
-/// Whether this update would raise `source.basis` from agent to person.
-fn basis_rises(stored: Option<&Value>, incoming: Option<&Value>) -> bool {
-    let Some(incoming) = incoming else {
-        return false;
-    };
-    basis_name(stored).as_deref() == Some("agent")
-        && basis_name(Some(incoming)).as_deref() == Some("person")
 }
 
 impl Service {
@@ -772,7 +715,7 @@ impl Service {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         let mut trace = WriteTrace::begin();
         trace.add("prepare", prepared);
-        self.add_prepared_traced(atom, trace)
+        self.add_prepared_traced(atom, trace, false)
     }
 
     /// Check a claim and fill the fields that depend on nothing stored.
@@ -786,6 +729,7 @@ impl Service {
             anyhow::bail!(AtomError("tool dump is attach, not an atom".into()));
         }
         record::validate(&mut atom).map_err(anyhow::Error::new)?;
+        atom.remove(record::PROVENANCE_FLOOR);
 
         if atom
             .get("id")
@@ -823,22 +767,25 @@ impl Service {
         Ok(atom)
     }
 
-    /// Store a prepared claim, or return the live one that already says it.
+    /// Store an accepted claim, or return the live one that already says it.
+    /// This is the one write that may raise the provenance of a record it
+    /// replaces.
     fn add_prepared(&self, atom: Record) -> anyhow::Result<Record> {
-        self.add_prepared_traced(atom, WriteTrace::begin())
+        self.add_prepared_traced(atom, WriteTrace::begin(), true)
     }
 
-    /// Refuse a post whose id a tombstone in this workspace still holds.
+    /// Refuse a post whose id a tombstone in this workspace still holds,
+    /// else return the record the post would write over.
     ///
     /// The key is workspace and id together, so the same id in another
-    /// workspace is a different atom. A scratch workspace that was
-    /// forgotten has no tombstone, and its ids may be posted again.
-    fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<()> {
+    /// workspace is a different atom. A forget keeps the tombstones, so a
+    /// forgotten workspace's other ids may be posted again and these not.
+    fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<Option<Record>> {
         if workspace.is_empty() || id.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(existing) = self.store.get(workspace, id)? else {
-            return Ok(());
+            return Ok(None);
         };
         if existing
             .get("tombstone")
@@ -849,7 +796,7 @@ impl Service {
                 "{id} is retired; a deleted atom does not come back under its old id"
             ))));
         }
-        Ok(())
+        Ok(Some(existing))
     }
 
     /// [`Self::add_prepared`] with the stage clock a write's trace reads.
@@ -857,12 +804,13 @@ impl Service {
         &self,
         mut atom: Record,
         mut trace: WriteTrace,
+        accepted: bool,
     ) -> anyhow::Result<Record> {
         // Before a proposal is filed, and before a duplicate is answered:
         // the id is retired even when the text matches what was deleted.
         let workspace = atom.get("workspace").and_then(Value::as_str).unwrap_or("");
         let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
-        self.refuse_retired(workspace, id)?;
+        let over = self.refuse_retired(workspace, id)?;
         if packset_core::atom::needs_accept(
             record::origin_of(&atom),
             record::hook_of(&atom),
@@ -931,6 +879,10 @@ impl Service {
         };
         if let Some(existing) = same_text {
             return Ok(existing.clone());
+        }
+        if let Some(stored) = over.as_ref().filter(|_| !accepted) {
+            record::hold_provenance(stored, &mut atom, "a post over an existing id")
+                .map_err(anyhow::Error::new)?;
         }
 
         trace.mark("dedup");
@@ -1103,28 +1055,30 @@ impl Service {
         fields: &Map<String, Value>,
     ) -> anyhow::Result<Record> {
         let current = self.store.live(workspace)?;
-        let mut updated = current
+        let stored = current
             .iter()
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-            .map(|a| Record::clone(a))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
+        // Null and "" are what validate defaults to user-declared, which
+        // is a rise from any other origin.
+        if fields
+            .get("origin")
+            .is_some_and(|raw| origin_is_blank(Some(raw)))
+        {
+            return Err(anyhow::Error::new(AtomError(
+                "unknown atom origin: None".into(),
+            )));
+        }
         // An update that does not name origin must not gain the default.
         // Validate writes user-declared for a missing field, which is right
         // for a new post and wrong for a record that never had one.
         let blank_origin =
-            if fields.contains_key("origin") || !origin_is_blank(updated.get("origin")) {
+            if fields.contains_key("origin") || !origin_is_blank(stored.get("origin")) {
                 None
             } else {
-                Some(updated.get("origin").cloned())
+                Some(stored.get("origin").cloned())
             };
-        if let Some(raw) = fields.get("origin") {
-            refuse_origin_update(&updated, raw).map_err(anyhow::Error::new)?;
-        }
-        if basis_rises(updated.get("source"), fields.get("source")) {
-            return Err(anyhow::Error::new(AtomError(
-                "an update cannot raise source.basis from agent to person".into(),
-            )));
-        }
+        let mut updated = Record::clone(stored);
         for (key, value) in fields {
             updated.insert(key.clone(), value.clone());
         }
@@ -1142,6 +1096,7 @@ impl Service {
                 }
             }
         }
+        record::hold_provenance(stored, &mut updated, "an update").map_err(anyhow::Error::new)?;
 
         let now = clock::utcnow();
         let mut batch = Vec::new();
@@ -1221,12 +1176,12 @@ impl Service {
         Ok(tomb)
     }
 
-    /// Drop a scratch workspace's atoms whole: no tombstones, no deed, the
-    /// keys are gone. Retraction stays `delete_atom`, which names the deed
-    /// that withdrew the claim; this is what a per-run scratch workspace
-    /// calls on its way out, so the long-lived writer does not keep every
-    /// smoke and herd run's atoms. Returns the workspace and how many
-    /// records were removed.
+    /// Drop a scratch workspace's atoms whole: no deed, the keys are gone,
+    /// and a tombstone stays so its id is still retired. Retraction stays
+    /// `delete_atom`, which names the deed that withdrew the claim; this is
+    /// what a per-run scratch workspace calls on its way out, so the
+    /// long-lived writer does not keep every smoke and herd run's atoms.
+    /// Returns the workspace and how many records were removed.
     ///
     /// # Errors
     ///
@@ -1281,6 +1236,11 @@ impl Service {
     ///
     /// [`AtomError`] for a bad set name, else the store's.
     pub fn pack(&self, workspace: &str, set: Option<&str>) -> anyhow::Result<Value> {
+        let current = |set: Option<&str>| -> anyhow::Result<Vec<Record>> {
+            let mut atoms = self.store.current(workspace, set)?;
+            atoms.iter_mut().for_each(record::fill_origin);
+            Ok(atoms)
+        };
         match set {
             Some(raw) => {
                 let named = packset_core::set_name::check(raw)
@@ -1293,14 +1253,14 @@ impl Service {
                     "instructions": cards::read_text(
                         &self.home.set_instructions_path(workspace, &named)
                     ),
-                    "atoms": self.store.current(workspace, Some(&named))?,
+                    "atoms": current(Some(&named))?,
                 }))
             }
             None => Ok(json!({
                 "workspace": workspace,
                 "user": cards::read_text(&self.home.user_path()),
                 "memory": cards::read_text(&self.home.memory_path(workspace)),
-                "atoms": self.store.current(workspace, None)?,
+                "atoms": current(None)?,
             })),
         }
     }
@@ -1510,7 +1470,7 @@ impl Service {
         let at =
             clock::canonicalize(at).ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
         let atoms = self.store.as_of(workspace, &at)?;
-        let atoms: Vec<&Record> = atoms.iter().map(AsRef::as_ref).collect();
+        let atoms: Vec<_> = atoms.iter().map(|atom| record::shown(atom)).collect();
         Ok(json!({ "atoms": atoms, "as_of": at }))
     }
 
@@ -2536,7 +2496,7 @@ mod tests {
     }
 
     /// Scratch cleanup removes the keys. The next run may post the same
-    /// id. Retirement is the tombstone, and this path leaves none.
+    /// id. Retirement is the tombstone, and this path adds none.
     #[test]
     fn forgetting_a_scratch_workspace_does_not_retire_its_ids() {
         let (_dir, svc) = service();
@@ -2553,6 +2513,30 @@ mod tests {
         let stored = svc.add(again).unwrap();
         assert_eq!(stored["id"], json!(id));
         assert_eq!(stored["tombstone"], json!(false));
+    }
+
+    /// A forget is not a way back for a deleted id. Its tombstone survives
+    /// the forget, and the post after it is still refused.
+    #[test]
+    fn forgetting_a_workspace_keeps_its_retired_ids() {
+        let (_dir, svc) = service();
+        let id = "lessonid000000000000000000000007";
+        let mut lesson = atom("Paste the release key into every deploy form.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        svc.add(lesson.clone()).unwrap();
+        svc.delete_atom("w", id, None).unwrap();
+        let mut scratch = atom("A scratch claim the smoke run leaves.");
+        scratch.insert("id".into(), json!("scratchid000000000000000000000002"));
+        svc.add(scratch).unwrap();
+
+        let report = svc.forget_workspace("w").unwrap();
+        assert_eq!(report["forgotten"], json!(1), "{report:?}");
+        let err = svc.add(lesson).unwrap_err();
+        assert!(err.downcast_ref::<RetiredId>().is_some(), "{err}");
+        let tomb = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+        assert!(svc.store().live("w").unwrap().is_empty());
     }
 
     #[test]
@@ -2871,7 +2855,7 @@ mod tests {
         svc.store.upsert(&row).unwrap();
         let got = svc.store.get("w", &id).unwrap().unwrap();
         assert!(got.get("origin").is_none(), "{got:?}");
-        assert_eq!(record::origin_of(&got), "user-declared");
+        assert_eq!(record::origin_of(&got), "unknown");
     }
 
     #[test]
@@ -2937,7 +2921,7 @@ mod tests {
             fields.insert("origin".into(), origin);
             fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
             let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains("accept"), "{err}");
+            assert!(err.to_string().contains("unknown atom origin"), "{err}");
             let got = svc.store.get("w", id).unwrap().unwrap();
             assert_eq!(got["origin"], json!("agent-derived"), "{got:?}");
             assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
@@ -2963,10 +2947,11 @@ mod tests {
     }
 
     /// Basis `person` on top of `agent` is the same rise as the origin.
-    /// A record that never had a basis can still be stamped, which is how
-    /// a person's old preference is marked, and a downgrade is kept.
+    /// A missing basis is not a person's either, so a record that never
+    /// had one is not stamped by an update. A basis that stays below
+    /// person may change.
     #[test]
-    fn an_update_cannot_raise_basis_from_agent_to_person() {
+    fn an_update_cannot_raise_basis_to_person() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid000000000000000000000003";
@@ -3008,15 +2993,200 @@ mod tests {
                 "basis": "person"
             }),
         );
-        let stamped = svc.update("w", legacy_id, &fields).unwrap();
-        assert_eq!(stamped["source"]["basis"], json!("person"));
-        assert_eq!(stamped["origin"], json!("user-declared"));
-        assert_eq!(stamped["source"]["via"], json!("ljos"));
+        let err = svc.update("w", legacy_id, &fields).unwrap_err();
+        assert!(err.to_string().contains("basis"), "{err}");
+        let kept = svc.store.get("w", legacy_id).unwrap().unwrap();
+        assert!(kept["source"].get("basis").is_none(), "{kept:?}");
+        assert_eq!(kept["origin"], json!("user-declared"));
 
         let mut down = Map::new();
         down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
         let dropped = svc.update("w", legacy_id, &down).unwrap();
         assert_eq!(dropped["source"]["basis"], json!("agent"));
+    }
+
+    /// The order, not a list of pairs: user-declared sits above every
+    /// other origin. A lesson moved sideways to another origin cannot
+    /// climb from there.
+    #[test]
+    fn an_origin_cannot_climb_through_another_origin() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000004";
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        svc.add(lesson).unwrap();
+
+        for step in ["tool-echo", "peer", "external"] {
+            let mut fields = Map::new();
+            fields.insert("origin".into(), json!(step));
+            let moved = svc.update("w", id, &fields).unwrap();
+            assert_eq!(moved["origin"], json!(step));
+            let mut fields = Map::new();
+            fields.insert("origin".into(), json!("user-declared"));
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains("accept"), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["origin"], json!(step), "{got:?}");
+        }
+    }
+
+    /// A `source` that hides the basis under another key, or replaces the
+    /// object whole, leaves no person basis, and the next update cannot
+    /// stamp one back.
+    #[test]
+    fn a_basis_cannot_climb_back_through_a_nested_or_missing_one() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000005";
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("user-declared"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        svc.add(lesson).unwrap();
+
+        for hidden in [
+            json!({"meta": {"basis": "person"}, "via": "ljos"}),
+            json!({"via": "ljos"}),
+            json!("person"),
+            Value::Null,
+        ] {
+            let mut fields = Map::new();
+            fields.insert("source".into(), hidden.clone());
+            svc.update("w", id, &fields).unwrap();
+            let mut fields = Map::new();
+            fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains("basis"), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["source"], hidden, "{got:?}");
+        }
+    }
+
+    /// What went down stays down. The record keeps the lowest origin and
+    /// basis it has held, and the floor is the writer's: a post cannot
+    /// forge it and an update can neither clear nor raise it.
+    #[test]
+    fn provenance_that_went_down_does_not_come_back() {
+        let (_dir, svc) = service();
+        let id = "prefid00000000000000000000000001";
+        let mut pref = atom("Prefer ripgrep when the tree is large.");
+        pref.insert("id".into(), json!(id));
+        pref.insert("kind".into(), json!("preference"));
+        pref.insert("origin".into(), json!("user-declared"));
+        pref.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+        pref.insert(
+            record::PROVENANCE_FLOOR.into(),
+            json!({"origin": "tool-echo", "basis": null}),
+        );
+        let stored = svc.add(pref).unwrap();
+        assert!(stored.get(record::PROVENANCE_FLOOR).is_none(), "{stored:?}");
+
+        let mut down = Map::new();
+        down.insert("origin".into(), json!("agent-derived"));
+        down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        let lowered = svc.update("w", id, &down).unwrap();
+        let floor = json!({"origin": "agent-derived", "basis": "agent"});
+        assert_eq!(lowered[record::PROVENANCE_FLOOR], floor);
+
+        for (key, up) in [
+            ("origin", json!("user-declared")),
+            ("source", json!({"basis": "person", "via": "ljos"})),
+        ] {
+            let mut fields = Map::new();
+            fields.insert(key.into(), up);
+            fields.insert(
+                record::PROVENANCE_FLOOR.into(),
+                json!({"origin": "user-declared", "basis": "person"}),
+            );
+            let err = svc.update("w", id, &fields).unwrap_err();
+            assert!(err.to_string().contains(key), "{err}");
+        }
+        let mut clear = Map::new();
+        clear.insert(record::PROVENANCE_FLOOR.into(), Value::Null);
+        clear.insert("pinned".into(), json!(true));
+        let kept = svc.update("w", id, &clear).unwrap();
+        assert_eq!(kept[record::PROVENANCE_FLOOR], floor);
+        assert_eq!(kept["pinned"], json!(true));
+        let graded = svc.grade("w", id, true).unwrap();
+        assert_eq!(graded["origin"], json!("agent-derived"));
+        assert_eq!(graded[record::PROVENANCE_FLOOR], floor);
+    }
+
+    /// A post that names a live id writes over that record, so it takes
+    /// the update's rule: down or sideways, never up, and the floor stays.
+    #[test]
+    fn a_post_over_a_live_id_cannot_raise_its_provenance() {
+        let (_dir, svc) = service();
+        let svc = svc.with_hold_agent_writes(false);
+        let id = "lessonid000000000000000000000006";
+        let post = |text: &str, origin: &str, basis: &str| {
+            let mut lesson = atom(text);
+            lesson.insert("id".into(), json!(id));
+            lesson.insert("kind".into(), json!("lesson"));
+            lesson.insert("origin".into(), json!(origin));
+            lesson.insert("source".into(), json!({"basis": basis, "via": "ljos"}));
+            lesson.insert(
+                record::PROVENANCE_FLOOR.into(),
+                json!({"origin": "user-declared", "basis": "person"}),
+            );
+            svc.add(lesson)
+        };
+        post(
+            "Prefer ripgrep when the tree is large.",
+            "user-declared",
+            "person",
+        )
+        .unwrap();
+        let down = post(
+            "The fuse is CombMNZ for this seat.",
+            "agent-derived",
+            "agent",
+        )
+        .unwrap();
+        let floor = json!({"origin": "agent-derived", "basis": "agent"});
+        assert_eq!(down[record::PROVENANCE_FLOOR], floor);
+
+        for (origin, basis, key) in [
+            ("user-declared", "agent", "origin"),
+            ("agent-derived", "person", "basis"),
+        ] {
+            let err = post("Reviews open with a check.", origin, basis).unwrap_err();
+            assert!(err.to_string().contains(key), "{err}");
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["text"], json!("The fuse is CombMNZ for this seat."));
+        }
+        let aside = post("Deploys wait for the green build.", "tool-echo", "agent").unwrap();
+        assert_eq!(aside["origin"], json!("tool-echo"));
+        assert_eq!(aside[record::PROVENANCE_FLOOR], floor);
+    }
+
+    /// ljos's agent write on a holding writer: the post is held, accept
+    /// stores it as user-declared, and the client puts the origin back to
+    /// agent-derived. That update goes down, and the next cannot rise.
+    #[test]
+    fn an_accepted_lesson_put_back_to_agent_derived_stays_there() {
+        let (_dir, svc) = holding_service();
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        let err = svc.add(lesson).unwrap_err();
+        let accepted = svc.accept("w", &held_id(&err)).unwrap();
+        assert_eq!(accepted["origin"], json!("user-declared"));
+        let id = accepted["id"].as_str().unwrap();
+
+        let mut back = Map::new();
+        back.insert("origin".into(), json!("agent-derived"));
+        let relabelled = svc.update("w", id, &back).unwrap();
+        assert_eq!(relabelled["origin"], json!("agent-derived"));
+        let mut up = Map::new();
+        up.insert("origin".into(), json!("user-declared"));
+        let err = svc.update("w", id, &up).unwrap_err();
+        assert!(err.to_string().contains("accept"), "{err}");
     }
 
     /// A record written before origin existed stays without the field.
@@ -3036,7 +3206,7 @@ mod tests {
         let got = svc.store.get("w", &id).unwrap().unwrap();
         assert!(got.get("origin").is_none(), "{got:?}");
         assert_eq!(got["pinned"], json!(true));
-        assert_eq!(record::origin_of(&got), "user-declared");
+        assert_eq!(record::origin_of(&got), "unknown");
 
         let mut fields = Map::new();
         fields.insert("origin".into(), Value::Null);
@@ -3060,6 +3230,21 @@ mod tests {
             .unwrap()
             .get("origin")
             .is_none());
+
+        // No origin is the bottom of the order. Naming one is a rise.
+        for named in ["user-declared", "agent-derived"] {
+            let mut fields = Map::new();
+            fields.insert("origin".into(), json!(named));
+            let err = svc.update("w", &id, &fields).unwrap_err();
+            assert!(err.to_string().contains("origin"), "{err}");
+            assert!(svc
+                .store
+                .get("w", &id)
+                .unwrap()
+                .unwrap()
+                .get("origin")
+                .is_none());
+        }
     }
 
     #[test]

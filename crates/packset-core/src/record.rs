@@ -708,31 +708,165 @@ pub fn is_live_at(atom: &Map<String, Value>, at: &str) -> bool {
     )
 }
 
-/// The origin on a record. A missing or empty field reads as
-/// [`crate::atom::USER_DECLARED`] and the map is not written.
-#[must_use]
-pub fn origin_of(atom: &Map<String, Value>) -> &str {
-    match atom.get("origin").and_then(Value::as_str) {
-        Some(name) if !name.is_empty() => name,
-        _ => crate::atom::USER_DECLARED,
+/// Where the writer keeps the lowest origin and basis a record has held.
+pub const PROVENANCE_FLOOR: &str = "provenance_floor";
+
+/// The origin and `source.basis` a record stands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    /// A known origin, else [`crate::atom::UNKNOWN_ORIGIN`].
+    pub origin: String,
+    /// The basis, trimmed and lower case, when there is one.
+    pub basis: Option<String>,
+}
+
+impl Provenance {
+    fn read(origin: Option<&Value>, basis: Option<&Value>) -> Self {
+        let origin = origin
+            .and_then(Value::as_str)
+            .filter(|name| crate::atom::known_origin(name))
+            .unwrap_or(crate::atom::UNKNOWN_ORIGIN);
+        let basis = basis
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_ascii_lowercase);
+        Self {
+            origin: origin.to_string(),
+            basis,
+        }
+    }
+
+    /// What `atom` stands on now. A basis counts only as a string under
+    /// an object `source`.
+    #[must_use]
+    pub fn of(atom: &Map<String, Value>) -> Self {
+        let basis = atom
+            .get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("basis"));
+        Self::read(atom.get("origin"), basis)
+    }
+
+    /// The lowest `atom` has held: its [`PROVENANCE_FLOOR`] and what it
+    /// stands on now, whichever ranks lower in each part.
+    #[must_use]
+    pub fn floor(atom: &Map<String, Value>) -> Self {
+        let now = Self::of(atom);
+        match atom.get(PROVENANCE_FLOOR).and_then(Value::as_object) {
+            Some(kept) => Self::read(kept.get("origin"), kept.get("basis")).lower(&now),
+            None => now,
+        }
+    }
+
+    /// Each part from whichever side ranks lower. A tie keeps `self`.
+    #[must_use]
+    pub fn lower(&self, other: &Self) -> Self {
+        let origin =
+            if crate::atom::origin_rank(&other.origin) < crate::atom::origin_rank(&self.origin) {
+                other.origin.clone()
+            } else {
+                self.origin.clone()
+            };
+        let basis = if crate::atom::basis_rank(other.basis.as_deref())
+            < crate::atom::basis_rank(self.basis.as_deref())
+        {
+            other.basis.clone()
+        } else {
+            self.basis.clone()
+        };
+        Self { origin, basis }
+    }
+
+    fn ranks(&self) -> (u8, u8) {
+        (
+            crate::atom::origin_rank(&self.origin),
+            crate::atom::basis_rank(self.basis.as_deref()),
+        )
+    }
+
+    fn to_value(&self) -> Value {
+        serde_json::json!({"origin": self.origin, "basis": self.basis})
     }
 }
 
-/// Write the default origin onto a copy the caller is about to return.
+/// Refuse a write over `stored` that would leave `after` with a higher
+/// origin or basis than the lowest `stored` has held, and carry that
+/// lowest onto `after` as [`PROVENANCE_FLOOR`].
+///
+/// `what` names the write in the refusal. Accept is the one rise, and it
+/// does not come through here.
+///
+/// # Errors
+///
+/// [`AtomError`] when either part would rise.
+pub fn hold_provenance(
+    stored: &Map<String, Value>,
+    after: &mut Map<String, Value>,
+    what: &str,
+) -> Result<(), AtomError> {
+    let floor = Provenance::floor(stored);
+    let next = Provenance::of(after);
+    let (floor_origin, floor_basis) = floor.ranks();
+    let (next_origin, next_basis) = next.ranks();
+    if next_origin > floor_origin {
+        return Err(AtomError(format!(
+            "{what} cannot raise origin from {} to {}; only accept raises an origin",
+            floor.origin, next.origin
+        )));
+    }
+    if next_basis > floor_basis {
+        return Err(AtomError(format!(
+            "{what} cannot raise source.basis from {} to {}",
+            floor.basis.as_deref().unwrap_or("none"),
+            crate::atom::PERSON_BASIS
+        )));
+    }
+    if stored.contains_key(PROVENANCE_FLOOR) || next.ranks() != Provenance::of(stored).ranks() {
+        after.insert(PROVENANCE_FLOOR.into(), floor.lower(&next).to_value());
+    } else {
+        after.remove(PROVENANCE_FLOOR);
+    }
+    Ok(())
+}
+
+fn named_origin(atom: &Map<String, Value>) -> Option<&str> {
+    atom.get("origin")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// The origin on a record. A missing or blank field reads as
+/// [`crate::atom::UNKNOWN_ORIGIN`], never as the person's, and the map is
+/// not written.
+#[must_use]
+pub fn origin_of(atom: &Map<String, Value>) -> &str {
+    named_origin(atom).unwrap_or(crate::atom::UNKNOWN_ORIGIN)
+}
+
+/// Write [`origin_of`] onto a copy the caller is about to return.
 ///
 /// A stored record is left alone. Call this on the answer, not on the row
 /// the store handed back.
 pub fn fill_origin(atom: &mut Map<String, Value>) {
-    let missing = atom
-        .get("origin")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .is_empty();
-    if missing {
+    if named_origin(atom).is_none() {
         atom.insert(
             "origin".into(),
-            Value::String(crate::atom::USER_DECLARED.to_string()),
+            Value::String(crate::atom::UNKNOWN_ORIGIN.to_string()),
         );
+    }
+}
+
+/// `atom` as a client reads it: [`fill_origin`] on a copy when the
+/// origin is missing, else the record itself.
+#[must_use]
+pub fn shown(atom: &Map<String, Value>) -> std::borrow::Cow<'_, Map<String, Value>> {
+    if named_origin(atom).is_some() {
+        std::borrow::Cow::Borrowed(atom)
+    } else {
+        let mut copy = atom.clone();
+        fill_origin(&mut copy);
+        std::borrow::Cow::Owned(copy)
     }
 }
 
@@ -2125,7 +2259,7 @@ The build failed. Look at the log. It is the writer.";
     }
 
     #[test]
-    fn an_old_atom_reads_as_user_declared_and_stays_unwritten() {
+    fn an_old_atom_reads_as_unknown_and_stays_unwritten() {
         let stored = atom(json!({
             "id": "old",
             "kind": "lesson",
@@ -2133,12 +2267,17 @@ The build failed. Look at the log. It is the writer.";
             "workspace": "w"
         }));
         let before = stored.clone();
-        assert_eq!(origin_of(&stored), crate::atom::USER_DECLARED);
+        assert_eq!(origin_of(&stored), crate::atom::UNKNOWN_ORIGIN);
         assert_eq!(stored, before, "a read does not write the field back");
         let mut answered = stored.clone();
         fill_origin(&mut answered);
-        assert_eq!(answered["origin"], json!(crate::atom::USER_DECLARED));
+        assert_eq!(answered["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
+        assert_eq!(shown(&stored)["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
         assert!(!stored.contains_key("origin"));
+        let mut empty = stored.clone();
+        empty.insert("origin".into(), json!(""));
+        assert_eq!(origin_of(&empty), crate::atom::UNKNOWN_ORIGIN);
+        assert!(matches!(shown(&answered), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]
