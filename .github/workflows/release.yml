@@ -137,7 +137,7 @@ jobs:
           merge-multiple: true
       # A signed statement that this workflow built each archive, which
       # `gh attestation verify` and the ljos installer check.
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/*.tar.gz
       - name: Release notes from the changelog
