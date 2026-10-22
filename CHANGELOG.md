@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Fires and cues each have their own cap. They used to share one map
+  of 4096 keys, so a burst of cues pushed a fire out and the same
+  claims tightened their links a second time inside the hour.
+
 - Bodies waiting for a worker stay within one request, 64 MiB together.
   The queue of 128 could previously hold that many full transcripts at
   once, and that high-water mark stayed in the allocator.
