@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Bodies waiting for a worker stay within one request, 64 MiB together.
+  The queue of 128 could previously hold that many full transcripts at
+  once, and that high-water mark stayed in the allocator.
+
 - An attachment expires after an hour, and at most 64 workspaces hold
   one. A slot that was only peeked used to stay until the workspace
   was forgotten, with no cap on how many workspaces that was.
