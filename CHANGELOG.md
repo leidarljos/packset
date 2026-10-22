@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Shapes are kept per workspace. The same client id in two workspaces
+  no longer shares one token list, so a delete in one left the other
+  unable to see its own claim. A workspace larger than the shape cap
+  keeps the shapes it has. Dropping them and marking the workspace
+  unshaped rebuilt the whole pack on every later write.
+
 - Idle release of the database map is Linux only, and the heap return
   is glibc only. macOS `MADV_DONTNEED` can discard dirty pages, and
   musl has no `malloc_trim`, so on those the call does nothing and the
