@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `packset forget`'s usage text says it keeps a workspace's
+  tombstones. It still said "no tombstones" after the forget began
+  keeping them; a deleted id stays retired and a re-post is refused.
+
 - A rewrite in the same millisecond as a record's previous write
   updates the search index. The index compared write stamps, and a
   stamp is only a millisecond, so a second write in that millisecond

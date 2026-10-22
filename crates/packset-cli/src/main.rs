@@ -390,7 +390,7 @@ fn usage() -> String {
      \n\
          ensure                 start if down, then print the URL\n\
          sweep [WS]             lapse the reviews left due past twice their interval; the third miss forgets a never-recalled lesson\n\
-         forget WS              drop a scratch workspace's atoms whole, no tombstones; smoke and herd runs call this on the way out\n\
+         forget WS              drop a scratch workspace's live atoms, keep its tombstones; smoke and herd runs call this on the way out\n\
          start | stop\n\
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
@@ -889,8 +889,9 @@ fn sweep(given: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drop a scratch workspace's atoms whole: no tombstones, no deed. This is
-/// not retraction -- a retraction names the deed that withdrew the claim.
+/// Drop a scratch workspace's live atoms, no deed. Its tombstones stay, so a
+/// deleted id is not posted again; a live atom's id is free afterwards. This
+/// is not retraction -- a retraction names the deed that withdrew the claim.
 /// A per-run scratch workspace calls this on its way out, so the long-lived
 /// writer does not keep every smoke and herd run's atoms.
 fn forget(given: Option<&str>) -> anyhow::Result<()> {
