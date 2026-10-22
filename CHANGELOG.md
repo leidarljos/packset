@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Idle release of the database map is Linux only, and the heap return
+  is glibc only. macOS `MADV_DONTNEED` can discard dirty pages, and
+  musl has no `malloc_trim`, so on those the call does nothing and the
+  pages stay until the process ends. The write transaction taken
+  before the advice is dropped at once; it does not hold the writer
+  lock across the advice.
+
 - Health, status and the other cheap probes do not keep the writer
   busy. A herd of them used to move the idle clock on every request,
   so the release never ran.

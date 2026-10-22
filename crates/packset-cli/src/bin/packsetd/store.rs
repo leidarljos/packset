@@ -696,13 +696,18 @@ impl Store {
     }
 
     fn release_pages(&self) {
+        // Linux only. The same advice is not applied on macOS: there
+        // `MADV_DONTNEED` can discard dirty pages. Everywhere else this
+        // function is a no-op and the mapped file stays resident.
         #[cfg(target_os = "linux")]
         {
-            // Take the writer slot and drop it, so a commit already in
-            // progress finishes before pages leave the map. The map is a
-            // read-only shared view: LMDB writes with `write`, not
-            // `WRITEMAP`. Advising that view reloads the file. Advising the
-            // file descriptor does not, the pages stay mapped.
+            // Open a write transaction and drop it at once, so a commit
+            // already in progress finishes before pages leave the map.
+            // The lock is not held across the advice, and it does not
+            // need to be. The map is a read-only shared view: LMDB writes
+            // with `write`, not `WRITEMAP`. Advising that view reloads
+            // the file. Advising the file descriptor does not; the pages
+            // stay mapped.
             if self.env.write_txn().is_err() {
                 return;
             }
@@ -1551,7 +1556,9 @@ extern "C" {
 
 /// Ask glibc to return free arenas to the kernel. A burst allocates the
 /// high-water mark into per-thread arenas and, without this, holds it
-/// until the process ends.
+/// until the process ends. musl has no `malloc_trim`. macOS can relieve
+/// a zone, but that call is not exercised here, so on musl and on macOS
+/// this is a no-op and the high-water mark stays until the process ends.
 #[cfg(target_env = "gnu")]
 fn release_heap() {
     // SAFETY: trim does not move live allocations.
