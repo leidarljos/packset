@@ -1132,6 +1132,12 @@ for line in sys.stdin:
         assert_eq!(on_ids.len(), 2, "{:?}", on.body);
         assert_eq!(on_ids[0], off_ids[1], "{on_ids:?} vs {off_ids:?}");
         assert_eq!(on_ids[1], off_ids[0], "{on_ids:?} vs {off_ids:?}");
+        for hit in off.body["hits"].as_array().unwrap() {
+            assert!(hit["rerank_score"].is_null(), "{hit}");
+        }
+        let on_hits = on.body["hits"].as_array().unwrap();
+        assert_eq!(on_hits[0]["rerank_score"], json!(1.0), "{on_hits:?}");
+        assert_eq!(on_hits[1]["rerank_score"], json!(0.0), "{on_hits:?}");
     }
 
     #[test]

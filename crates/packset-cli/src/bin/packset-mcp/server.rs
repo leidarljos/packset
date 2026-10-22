@@ -28,6 +28,9 @@ pub struct AtomRow {
     pub kind: String,
     /// How well it matched, on the panel's scale.
     pub score: f64,
+    /// The cross-encoder score. Null when this hit was not reranked.
+    #[serde(default)]
+    pub rerank_score: Option<f64>,
 }
 
 /// What a pack is answering with, or why it is not.
@@ -116,6 +119,7 @@ impl PacksetServer {
                     text: hit.text,
                     kind: hit.kind,
                     score: hit.score,
+                    rerank_score: hit.rerank_score,
                 })
                 .collect(),
         ))
@@ -156,6 +160,7 @@ impl PacksetServer {
                         .unwrap_or_default()
                         .to_string(),
                     score: 0.0,
+                    rerank_score: None,
                 })
                 .collect(),
         ))
@@ -214,6 +219,7 @@ impl PacksetServer {
                         .unwrap_or_default()
                         .to_string(),
                     score: 0.0,
+                    rerank_score: None,
                 })
                 .collect(),
         ))

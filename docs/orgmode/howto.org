@@ -203,7 +203,9 @@ query with =packset search --rerank=, =GET /v1/search?rerank=1=, or set
 top 20. An absent or broken =packset-embed= leaves the first-stage
 order and reports =rerank: absent=. A lone hit reports =rerank:
 settled=: one candidate cannot be reordered, so the stage answers
-without a model call.
+without a model call. A hit the stage scored carries =rerank_score=,
+its cross-encoder number. The field is null when the stage did not
+score that hit, and the other fields are unchanged.
 
 #+begin_src console
 $ packset search --rerank --workspace seat fusion

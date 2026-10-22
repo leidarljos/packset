@@ -44,7 +44,8 @@ chooses the top k by lexical, BM25 and cosine. The fourteen-day half-life
 and the retrievability scale stay on the default, which is ``rank=fused``
 when it is named. The answer echoes ``rank``. ``GET /v1/status`` lists
 ``search.ranks``. An older writer omits ``search``, and a client keeps the
-default order then.
+default order then. A hit carries ``rerank_score``, the cross-encoder's
+number, or null when the stage did not score it.
 
 HTTP
 ====

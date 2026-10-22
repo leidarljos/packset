@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A search hit carries `rerank_score`, the cross-encoder's number,
+  or null when the stage did not score that hit. The second stage
+  used to reorder the head and drop the score, so a caller could not
+  tell a confident promotion from a tie. The other fields are
+  unchanged.
+
 - `GET /v1/search?rank=relevance` (and `packset search --rank relevance`,
   and the MCP search tool's `rank`) chooses the top k by lexical, BM25
   and cosine. The shipped order is unchanged: a lexical ballot still

@@ -859,13 +859,16 @@ fn search(args: &Args) -> anyhow::Result<()> {
         args.switch("--rerank"),
         args.value("--rank"),
     )? {
-        println!(
-            "{:.4}\t{}\t{}\t{}",
-            hit.score,
-            hit.kind,
-            hit.id.as_deref().unwrap_or("-"),
-            hit.text
-        );
+        let id = hit.id.as_deref().unwrap_or("-");
+        // The fifth column is the cross-encoder score, and only when the
+        // stage scored this hit. A search without it keeps the four columns.
+        match hit.rerank_score {
+            Some(rerank) => println!(
+                "{:.4}\t{}\t{}\t{}\t{:.4}",
+                hit.score, hit.kind, id, hit.text, rerank
+            ),
+            None => println!("{:.4}\t{}\t{}\t{}", hit.score, hit.kind, id, hit.text),
+        }
     }
     Ok(())
 }

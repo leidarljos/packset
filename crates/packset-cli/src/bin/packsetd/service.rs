@@ -1611,6 +1611,15 @@ impl Service {
             "off"
         };
         ranked.truncate(limit);
+        // The cross-encoder's own number, null when this hit was not scored.
+        // The other fields are the first stage's.
+        for hit in &mut ranked {
+            if let Some(object) = hit.as_object_mut() {
+                object
+                    .entry("rerank_score".to_string())
+                    .or_insert(Value::Null);
+            }
+        }
         if let Some(dense) = &meaning {
             packset_core::search::mark_dense(&mut ranked, dense);
         }
@@ -3575,6 +3584,7 @@ mod tests {
             .unwrap();
         assert_eq!(found["rerank"], json!("off"), "{found}");
         assert_eq!(found["hits"].as_array().map(Vec::len), Some(1));
+        assert!(found["hits"][0]["rerank_score"].is_null(), "{found}");
         let empty = svc
             .search("w", "", 8, None, &panel, None, true, None)
             .unwrap();

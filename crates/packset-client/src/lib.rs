@@ -278,6 +278,10 @@ pub struct Hit {
     pub ballots: Option<u32>,
     #[serde(default)]
     pub of: Option<u32>,
+    /// The cross-encoder score when the second stage scored this hit.
+    /// Absent, or null, when it did not.
+    #[serde(default)]
+    pub rerank_score: Option<f64>,
 }
 
 /// A refusal, carrying the reason the writer gave in its body.

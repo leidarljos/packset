@@ -776,8 +776,23 @@ pub fn apply_rerank(hits: &[Value], scores: &[f32]) -> Option<Vec<Value>> {
         .zip(hits[..depth].iter().cloned())
         .collect();
     head.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut out: Vec<Value> = head.into_iter().map(|(_, hit)| hit).collect();
-    out.extend_from_slice(&hits[depth..]);
+    let mut out: Vec<Value> = head
+        .into_iter()
+        .map(|(score, mut hit)| {
+            if let Some(object) = hit.as_object_mut() {
+                object.insert("rerank_score".into(), json!(score));
+            }
+            hit
+        })
+        .collect();
+    // The tail was not scored. The field is null there, same as a hit
+    // from a search that did not run the stage.
+    out.extend(hits[depth..].iter().cloned().map(|mut hit| {
+        if let Some(object) = hit.as_object_mut() {
+            object.insert("rerank_score".into(), Value::Null);
+        }
+        hit
+    }));
     Some(out)
 }
 
@@ -1273,6 +1288,10 @@ for line in sys.stdin:
         assert_eq!(ranked[20]["id"], json!("h20"));
         assert_eq!(ranked[21]["id"], json!("h21"));
         assert_eq!(ranked.len(), 22);
+        assert!((ranked[0]["rerank_score"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+        assert!((ranked[1]["rerank_score"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert!(ranked[20]["rerank_score"].is_null());
+        assert!(ranked[21]["rerank_score"].is_null());
     }
 
     #[test]
@@ -1281,6 +1300,8 @@ for line in sys.stdin:
         let ranked = apply_rerank(&hits, &[0.5, 0.5]).expect("length matches");
         assert_eq!(ranked[0]["id"], json!("first"));
         assert_eq!(ranked[1]["id"], json!("second"));
+        assert_eq!(ranked[0]["rerank_score"], json!(0.5));
+        assert_eq!(ranked[1]["rerank_score"], json!(0.5));
     }
 
     #[test]
