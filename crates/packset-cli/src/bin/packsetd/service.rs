@@ -1535,11 +1535,18 @@ impl Service {
     /// [`AtomError`] for a bad set name, else the store's.
     pub fn pack(&self, workspace: &str, set: Option<&str>) -> anyhow::Result<Value> {
         let current = |set: Option<&str>| -> anyhow::Result<Vec<Record>> {
-            let mut atoms = self.store.current(workspace, set)?;
-            let vectors = self.store.vectors(workspace);
+            let snap = self.store.live_versioned(workspace)?;
+            let mut atoms: Vec<Record> = snap
+                .atoms
+                .iter()
+                .filter(|atom| {
+                    set.is_none_or(|name| atom.get("set").and_then(Value::as_str) == Some(name))
+                })
+                .map(|atom| Record::clone(atom))
+                .collect();
             atoms.iter_mut().for_each(|atom| {
                 record::fill_origin(atom);
-                crate::store::restore_embedding(atom, &vectors);
+                crate::store::restore_embedding(atom, &snap.vectors);
             });
             Ok(atoms)
         };
@@ -1961,8 +1968,9 @@ impl Service {
         // A third ballot when this seat has an encoder. The two lexical
         // scorers both need the question and the atom to share words, and this
         // one does not, which is the gap it exists to close.
-        // The cache holds floats, not a JSON array per atom. A dated read
-        // has no side table, and the scorer reads the record instead.
+        // `vectors` is the snapshot these atoms were read with. A second
+        // cache lookup can miss the workspace and drop the ballot. A dated
+        // read has no side table, and the scorer reads the record instead.
         let embedded: Vec<Option<&[f32]>> = atoms
             .iter()
             .map(|atom| {

@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A listing, a recall, a pack and a search read an atom's record and its
+  vector from one snapshot. They used to be two cache lookups, so a
+  workspace that left the cache between them, or a scan a write raced,
+  answered `embedding: null` and dropped the dense ballot.
+
 - The field soak drives several clients at once, a fake 384-d encoder,
   more workspaces than the cache holds, set-scoped writes and
   attachments near the body cap. Idle release stays at its default

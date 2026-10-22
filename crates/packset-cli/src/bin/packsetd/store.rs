@@ -62,6 +62,17 @@ struct Snapshot {
 /// A workspace's live set, one `Arc` per record.
 pub type Live = Arc<Vec<Arc<Record>>>;
 
+/// Records and the vectors that belong to them, from one read.
+///
+/// A later lookup of the cache can miss the workspace: another reader
+/// evicted it, or the scan was not cached because a write landed while
+/// it ran. The vectors here are the ones lifted out of these records.
+pub struct LiveSnapshot {
+    pub atoms: Live,
+    pub vectors: Arc<HashMap<String, Arc<[f32]>>>,
+    pub generation: u64,
+}
+
 /// A workspace's index at one generation: the id and content hash of
 /// each atom the index was built over, in order, beside the index and
 /// its tokens. The atoms themselves are not held here, so the live set
@@ -801,7 +812,7 @@ impl Store {
     ///
     /// Fails when the scan does.
     pub fn live(&self, workspace: &str) -> anyhow::Result<Live> {
-        self.live_versioned(workspace).map(|(shown, _)| shown)
+        self.live_versioned(workspace).map(|snap| snap.atoms)
     }
 
     /// Status counts over one workspace, or over all of them: cached under
@@ -874,19 +885,28 @@ impl Store {
         (*seen == generation).then(|| found.clone())
     }
 
-    /// [`Self::live`] with the generation the set belongs to, for a cache
-    /// keyed on it.
+    /// [`Self::live`] with the generation the set belongs to, and the
+    /// vectors lifted out of that same set.
+    ///
+    /// The vectors are returned with the records even when the scan is
+    /// not cached. A reader that then asked the cache for them would
+    /// see an empty map: the workspace was evicted, or a write landed
+    /// while the scan ran and the snapshot was thrown away.
     ///
     /// # Errors
     ///
     /// Fails when the scan does.
-    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<(Live, u64)> {
+    pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.live.read() {
             if let Some(found) = cache.get(workspace) {
                 if found.generation == generation {
                     self.note_cached(workspace);
-                    return Ok((Arc::clone(&found.shown), generation));
+                    return Ok(LiveSnapshot {
+                        atoms: Arc::clone(&found.shown),
+                        vectors: Arc::clone(&found.vectors),
+                        generation,
+                    });
                 }
             }
         }
@@ -912,7 +932,10 @@ impl Store {
         }
         let (shown, dangling) = shown_from(&stored);
         let shared = Arc::new(shown);
-        // Cached only if nothing committed while the scan ran.
+        let vectors = Arc::new(vectors);
+        // Cached only if nothing committed while the scan ran. The caller
+        // still receives the vectors this scan lifted: they are not a
+        // second read of a cache that may not hold them.
         if self.generation.load(Ordering::Acquire) == generation {
             if let Ok(mut cache) = self.live.write() {
                 cache.insert(
@@ -922,19 +945,25 @@ impl Store {
                         stored,
                         shown: Arc::clone(&shared),
                         dangling,
-                        vectors: Arc::new(vectors),
+                        vectors: Arc::clone(&vectors),
                     },
                 );
                 self.note_cached(workspace);
                 self.evict_cached(&mut cache, workspace);
             }
         }
-        Ok((shared, generation))
+        Ok(LiveSnapshot {
+            atoms: shared,
+            vectors,
+            generation,
+        })
     }
 
     /// The vectors cached for `workspace`, one shared copy each. Empty when
-    /// the workspace is not parsed. The records from [`Self::live`] carry
-    /// `embedding: null` in their place.
+    /// the workspace is not parsed. A caller that also has the records
+    /// wants [`Self::live_versioned`]: this is a second read, and the
+    /// workspace may have left the cache since the records were taken.
+    /// The records from [`Self::live`] carry `embedding: null` in their place.
     pub fn vectors(&self, workspace: &str) -> Arc<HashMap<String, Arc<[f32]>>> {
         self.live
             .read()
@@ -966,7 +995,10 @@ impl Store {
         if let Some(found) = self.searchable_cached(workspace)? {
             return Ok(found);
         }
-        let (atoms, generation) = self.live_versioned(workspace)?;
+        let snap = self.live_versioned(workspace)?;
+        let atoms = snap.atoms;
+        let generation = snap.generation;
+        let vectors = snap.vectors;
         // The stale set is taken out of the cache, so this thread holds its
         // only reference and the index is edited rather than copied.
         let previous = self
@@ -1025,17 +1057,15 @@ impl Store {
             );
             self.evict_terms(&mut cache, workspace);
         }
-        // After the terms lock: taking `live` while holding `terms` inverts
-        // the lock order.
-        Ok((atoms, index, documents, self.vectors(workspace)))
+        Ok((atoms, index, documents, vectors))
     }
 
     /// The cached index when it matches the live set's generation.
     fn searchable_cached(&self, workspace: &str) -> anyhow::Result<Option<SearchSet>> {
-        let (atoms, generation) = self.live_versioned(workspace)?;
+        let snap = self.live_versioned(workspace)?;
         let cached = if let Ok(cache) = self.terms.read() {
             if let Some((seen, (_, index, documents))) = cache.get(workspace) {
-                if *seen == generation && atoms.len() == index.len() {
+                if *seen == snap.generation && snap.atoms.len() == index.len() {
                     Some((Arc::clone(index), Arc::clone(documents)))
                 } else {
                     None
@@ -1046,7 +1076,7 @@ impl Store {
         } else {
             None
         };
-        Ok(cached.map(|(index, documents)| (atoms, index, documents, self.vectors(workspace))))
+        Ok(cached.map(|(index, documents)| (snap.atoms, index, documents, snap.vectors)))
     }
 
     /// The atoms that were live at `at`, from a store scan since the snapshot
