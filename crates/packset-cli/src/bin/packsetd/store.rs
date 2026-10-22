@@ -649,11 +649,19 @@ impl Store {
     }
 
     /// Drop status counts the same way. The all-workspace entry stays: it
-    /// is one row, not a corpus.
-    fn evict_counts(&self, cache: &mut HashMap<Option<String>, (u64, Counts)>, keep: &str) {
+    /// is one row, not a corpus. The names that left are returned so the
+    /// caller can drop them from the use clock after this lock is gone.
+    /// A workspace that was only counted used to stay on that clock for
+    /// the life of the process.
+    fn evict_counts(
+        &self,
+        cache: &mut HashMap<Option<String>, (u64, Counts)>,
+        keep: &str,
+    ) -> Vec<String> {
+        let mut dropped = Vec::new();
         let cap = self.workspace_cache.load(Ordering::Relaxed);
         if cap == 0 {
-            return;
+            return dropped;
         }
         while cache.keys().filter(|key| key.is_some()).count() > cap {
             let coldest = {
@@ -671,7 +679,35 @@ impl Store {
             let Some(name) = coldest else {
                 break;
             };
-            cache.remove(&Some(name));
+            cache.remove(&Some(name.clone()));
+            dropped.push(name);
+        }
+        dropped
+    }
+
+    /// Take count-only names off the use clock. The counts lock is not
+    /// held. Live, then the search index, then the clock: a name still
+    /// parsed or indexed keeps its tick.
+    fn drop_count_only(&self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let live = match self.live.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let terms = match self.terms.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut used = match self.cache_used.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for name in names {
+            if !live.contains_key(name) && !terms.contains_key(name) {
+                used.remove(name);
+            }
         }
     }
 
@@ -684,6 +720,12 @@ impl Store {
     #[cfg(test)]
     pub fn cached_workspaces(&self) -> usize {
         self.live.read().map(|cache| cache.len()).unwrap_or(0)
+    }
+
+    /// How many workspaces the use clock still names.
+    #[cfg(test)]
+    fn cache_used_len(&self) -> usize {
+        self.cache_used.lock().map(|used| used.len()).unwrap_or(0)
     }
 
     /// Return free heap to the kernel and drop the database's cached pages.
@@ -809,13 +851,18 @@ impl Store {
                 *counts.expired.entry(kind).or_insert(0) += 1;
             }
         })?;
-        if let Ok(mut cache) = self.counts.write() {
+        let dropped = if let Ok(mut cache) = self.counts.write() {
             cache.insert(key, (generation, counts.clone()));
             if let Some(name) = workspace {
                 self.note_cached(name);
-                self.evict_counts(&mut cache, name);
+                self.evict_counts(&mut cache, name)
+            } else {
+                Vec::new()
             }
-        }
+        } else {
+            Vec::new()
+        };
+        self.drop_count_only(&dropped);
         Ok(counts)
     }
 
@@ -2226,6 +2273,23 @@ mod tests {
             }
         }
         rss
+    }
+
+    /// Counting a workspace notes it, and used to leave that note after
+    /// the counts row was evicted. Three counts into a cap of one stay
+    /// one entry on the clock.
+    #[test]
+    fn counting_a_workspace_does_not_keep_it_on_the_clock() {
+        let (_dir, store) = store();
+        store.set_workspace_cache(1);
+        for name in ["a", "b", "c"] {
+            store.counts(Some(name)).unwrap();
+        }
+        assert!(
+            store.cache_used_len() <= 1,
+            "count-only workspaces stayed on the clock: {}",
+            store.cache_used_len()
+        );
     }
 
     /// A cap of two keeps the workspaces just read and drops the cold one.

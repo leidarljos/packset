@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A workspace that was only counted is dropped from the cache clock
+  when its counts row is. The clock used to keep that name after the
+  row was gone, so a long list of status checks grew without a corpus
+  behind it.
+
 - Fires and cues each have their own cap. They used to share one map
   of 4096 keys, so a burst of cues pushed a fire out and the same
   claims tightened their links a second time inside the hour.
