@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A cached atom keeps its vector as one array of floats, not as a JSON
+  array on both copies of the record. With the default encoder that JSON
+  was about 55 KiB per atom, and a fire or an activate copied it again
+  with the live set. The file and the answers still carry the JSON array.
+  A rewrite that does not bring a vector keeps the one already stored.
+
 - A write in one set no longer drops the tokens of the workspace's other
   sets. Duplicate detection reads those tokens, so the same text stored
   again in the first set came back as a second claim. Shapes are

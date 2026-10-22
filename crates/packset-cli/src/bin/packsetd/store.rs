@@ -25,9 +25,10 @@ use serde_json::{Map, Value};
 pub const MAP_SIZE: usize = 1024 * 1024 * 1024;
 
 /// Parsed workspaces kept at once when `PACKSET_WORKSPACE_CACHE` is unset.
-/// Each one holds its live claims twice and the index over them. A seat
-/// that opens a checkout a day would otherwise keep every one of them
-/// until the process ends.
+/// Each one holds its live claims and the index over them. A dense vector
+/// is one copy of floats beside the record, not a JSON array on both
+/// copies. A seat that opens a checkout a day would otherwise keep every
+/// one of them until the process ends.
 pub const DEFAULT_WORKSPACE_CACHE: usize = 8;
 
 /// How many workspaces stay parsed. `off` and `none` keep them all, which
@@ -46,9 +47,17 @@ fn workspace_cache_from_env() -> usize {
 /// One atom record.
 pub type Record = Map<String, Value>;
 
-/// One workspace's live set at a write count: as stored (what a write folds
-/// into) and as shown (links narrowed to ids present).
-type Snapshot = (u64, Vec<Record>, Live, HashSet<String>);
+/// One workspace's live set at a write count. `stored` is what a write
+/// folds into. `shown` is that set with links narrowed to ids present.
+/// `vectors` is the one copy of each atom's embedding; the records here
+/// keep `embedding: null` in its place.
+struct Snapshot {
+    generation: u64,
+    stored: Vec<Record>,
+    shown: Live,
+    dangling: HashSet<String>,
+    vectors: Arc<HashMap<String, Arc<[f32]>>>,
+}
 
 /// A workspace's live set, one `Arc` per record.
 pub type Live = Arc<Vec<Arc<Record>>>;
@@ -200,9 +209,14 @@ fn restore_created(env: &Env, db: Database<Bytes, Bytes>) -> anyhow::Result<usiz
     Ok(fixed.len())
 }
 
-/// What a search runs over: the snapshot, the inverted index, and the tokens
-/// the index was built from, all shared.
-pub type SearchSet = (Live, Arc<Index>, Arc<Vec<Vec<String>>>);
+/// What a search runs over: the snapshot, the inverted index, the tokens
+/// the index was built from, and each atom's vector, all shared.
+pub type SearchSet = (
+    Live,
+    Arc<Index>,
+    Arc<Vec<Vec<String>>>,
+    Arc<HashMap<String, Arc<[f32]>>>,
+);
 
 /// The key for one atom.
 #[must_use]
@@ -468,6 +482,10 @@ impl Store {
                     _ => None,
                 });
             stamp_write(&mut payload, stored.as_ref(), now);
+            // A fire or a grade rewrites the record from the cache, and the
+            // cache does not carry the vector. Keep the array already stored
+            // so the file stays the row that was written.
+            keep_stored_embedding(&mut payload, stored.as_ref());
             let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
             self.db.put(&mut wtxn, &key, &blob)?;
             written.push(payload);
@@ -484,39 +502,71 @@ impl Store {
     /// Only cached workspaces are patched; the result equals a fresh scan.
     fn patch_live(&self, written: &[Record], generation: u64) {
         let now = packset_core::clock::utcnow();
+        let parked: Vec<Parked> = written.iter().map(park).collect();
         let Ok(mut cache) = self.live.write() else {
             return;
         };
-        for (workspace, (seen, stored, shown, dangling)) in cache.iter_mut() {
+        for (workspace, snap) in cache.iter_mut() {
             // One behind is this write; anything else raced and the snapshot
             // is not a base this write can be added to.
-            if *seen + 1 != generation {
+            if snap.generation + 1 != generation {
                 continue;
             }
             let mut touched = false;
-            for record in written {
-                if record.get("workspace").and_then(Value::as_str) != Some(workspace.as_str()) {
-                    continue;
-                }
-                touched = true;
-                let Some(id) = record.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let visible = shown_at(record, &now);
-                let at = stored
-                    .iter()
-                    .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
-                match (at, visible) {
-                    (Some(i), true) => stored[i] = record.clone(),
-                    (Some(i), false) => {
-                        stored.remove(i);
+            let mut lean_written = Vec::new();
+            {
+                let vectors = Arc::make_mut(&mut snap.vectors);
+                for item in &parked {
+                    if item.lean.get("workspace").and_then(Value::as_str)
+                        != Some(workspace.as_str())
+                    {
+                        continue;
                     }
-                    (None, true) => stored.push(record.clone()),
-                    (None, false) => {}
+                    touched = true;
+                    let Some(id) = item.lean.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    match &item.vector {
+                        Some(vector) => {
+                            let same = vectors
+                                .get(id)
+                                .is_some_and(|old| old.as_ref() == vector.as_ref());
+                            if !same {
+                                vectors.insert(id.to_string(), Arc::clone(vector));
+                            }
+                        }
+                        None if item.named => {
+                            vectors.remove(id);
+                        }
+                        None => {}
+                    }
+                    let visible = shown_at(&item.lean, &now);
+                    let at = snap
+                        .stored
+                        .iter()
+                        .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
+                    match (at, visible) {
+                        (Some(i), true) => snap.stored[i] = item.lean.clone(),
+                        (Some(i), false) => {
+                            snap.stored.remove(i);
+                            vectors.remove(id);
+                        }
+                        (None, true) => snap.stored.push(item.lean.clone()),
+                        (None, false) => {
+                            vectors.remove(id);
+                        }
+                    }
+                    lean_written.push(item.lean.clone());
                 }
             }
-            *seen = generation;
-            patch_shown(shown, stored, written, &now, dangling);
+            snap.generation = generation;
+            patch_shown(
+                &mut snap.shown,
+                &snap.stored,
+                &lean_written,
+                &now,
+                &mut snap.dangling,
+            );
             if touched {
                 self.note_cached(workspace);
             }
@@ -781,21 +831,33 @@ impl Store {
     pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<(Live, u64)> {
         let generation = self.generation.load(Ordering::Acquire);
         if let Ok(cache) = self.live.read() {
-            if let Some((seen, _stored, shown, _dangling)) = cache.get(workspace) {
-                if *seen == generation {
+            if let Some(found) = cache.get(workspace) {
+                if found.generation == generation {
                     self.note_cached(workspace);
-                    return Ok((Arc::clone(shown), generation));
+                    return Ok((Arc::clone(&found.shown), generation));
                 }
             }
         }
         // Built outside the write lock, so a slow parse does not hold up a
-        // reader whose own workspace is current.
+        // reader whose own workspace is current. The vector is lifted out
+        // of the record here, once, and the cached copies keep a null.
         let now = packset_core::clock::utcnow();
-        let stored: Vec<Record> = self
+        let scanned: Vec<Record> = self
             .scan(Some(workspace))?
             .into_iter()
             .filter(|atom| shown_at(atom, &now))
             .collect();
+        let mut vectors = HashMap::with_capacity(scanned.len());
+        let mut stored = Vec::with_capacity(scanned.len());
+        for record in scanned {
+            let parked = park(&record);
+            if let Some(id) = parked.lean.get("id").and_then(Value::as_str) {
+                if let Some(vector) = parked.vector {
+                    vectors.insert(id.to_string(), vector);
+                }
+            }
+            stored.push(parked.lean);
+        }
         let (shown, dangling) = shown_from(&stored);
         let shared = Arc::new(shown);
         // Cached only if nothing committed while the scan ran.
@@ -803,13 +865,30 @@ impl Store {
             if let Ok(mut cache) = self.live.write() {
                 cache.insert(
                     workspace.to_string(),
-                    (generation, stored, Arc::clone(&shared), dangling),
+                    Snapshot {
+                        generation,
+                        stored,
+                        shown: Arc::clone(&shared),
+                        dangling,
+                        vectors: Arc::new(vectors),
+                    },
                 );
                 self.note_cached(workspace);
                 self.evict_cached(&mut cache, workspace);
             }
         }
         Ok((shared, generation))
+    }
+
+    /// The vectors cached for `workspace`, one shared copy each. Empty when
+    /// the workspace is not parsed. The records from [`Self::live`] carry
+    /// `embedding: null` in their place.
+    pub fn vectors(&self, workspace: &str) -> Arc<HashMap<String, Arc<[f32]>>> {
+        self.live
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(workspace).map(|snap| Arc::clone(&snap.vectors)))
+            .unwrap_or_else(|| Arc::new(HashMap::new()))
     }
 
     /// One workspace's live atoms and the index over them, as a matched pair;
@@ -894,20 +973,28 @@ impl Store {
             );
             self.evict_terms(&mut cache, workspace);
         }
-        Ok((atoms, index, documents))
+        // After the terms lock: taking `live` while holding `terms` inverts
+        // the lock order.
+        Ok((atoms, index, documents, self.vectors(workspace)))
     }
 
     /// The cached index when it matches the live set's generation.
     fn searchable_cached(&self, workspace: &str) -> anyhow::Result<Option<SearchSet>> {
         let (atoms, generation) = self.live_versioned(workspace)?;
-        if let Ok(cache) = self.terms.read() {
+        let cached = if let Ok(cache) = self.terms.read() {
             if let Some((seen, (_, index, documents))) = cache.get(workspace) {
                 if *seen == generation && atoms.len() == index.len() {
-                    return Ok(Some((atoms, Arc::clone(index), Arc::clone(documents))));
+                    Some((Arc::clone(index), Arc::clone(documents)))
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
-        Ok(None)
+        } else {
+            None
+        };
+        Ok(cached.map(|(index, documents)| (atoms, index, documents, self.vectors(workspace))))
     }
 
     /// The atoms that were live at `at`, from a store scan since the snapshot
@@ -1186,6 +1273,92 @@ fn is_tombstone(raw: &[u8]) -> bool {
         .ok()
         .and_then(|record| record.get("tombstone").and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+/// A record as the cache keeps it, and the vector that left it.
+struct Parked {
+    lean: Record,
+    vector: Option<Arc<[f32]>>,
+    /// The write named `embedding`, so a null clears a vector the cache held.
+    named: bool,
+}
+
+/// Lift `embedding` out of a clone of `record`. An array of numbers becomes
+/// floats and the clone keeps null. Anything else stays on the clone.
+fn park(record: &Record) -> Parked {
+    let mut lean = record.clone();
+    let named = lean.contains_key("embedding");
+    let vector = match lean.remove("embedding") {
+        Some(Value::Array(items)) if !items.is_empty() => match floats_of(&items) {
+            Some(parsed) => {
+                lean.insert("embedding".into(), Value::Null);
+                Some(Arc::from(parsed))
+            }
+            None => {
+                lean.insert("embedding".into(), Value::Array(items));
+                None
+            }
+        },
+        Some(other) => {
+            lean.insert("embedding".into(), other);
+            None
+        }
+        None => None,
+    };
+    Parked {
+        lean,
+        vector,
+        named,
+    }
+}
+
+fn floats_of(items: &[Value]) -> Option<Box<[f32]>> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(item.as_f64()? as f32);
+    }
+    Some(out.into_boxed_slice())
+}
+
+/// The JSON array a client reads. Built for one answer, not kept in the cache.
+pub(crate) fn embedding_json(vector: &[f32]) -> Value {
+    Value::Array(
+        vector
+            .iter()
+            .map(|n| serde_json::Number::from_f64(f64::from(*n)).map_or(Value::Null, Value::Number))
+            .collect(),
+    )
+}
+
+/// Put `workspace`'s cached vector back on `atom` for an answer. A record
+/// with no cached vector is left as it is, null included.
+pub(crate) fn restore_embedding(atom: &mut Record, vectors: &HashMap<String, Arc<[f32]>>) {
+    let Some(id) = atom.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(vector) = vectors.get(id) else {
+        return;
+    };
+    atom.insert("embedding".into(), embedding_json(vector));
+}
+
+/// A rewrite that did not bring a vector keeps the array already stored.
+/// The cache hands back null, and dropping that null would erase the vector
+/// from the file.
+fn keep_stored_embedding(payload: &mut Record, stored: Option<&Record>) {
+    if payload
+        .get("embedding")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return;
+    }
+    let Some(existing) = stored.and_then(|row| row.get("embedding")) else {
+        return;
+    };
+    if existing.as_array().is_some_and(|items| !items.is_empty()) {
+        payload.insert("embedding".into(), existing.clone());
+    }
 }
 
 fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
@@ -1946,6 +2119,50 @@ mod tests {
         assert_eq!(store.counted.load(Ordering::SeqCst) - before, 1);
     }
 
+    /// The cache holds one float vector. The file keeps the JSON array, and
+    /// a rewrite that does not send the array does not erase it.
+    #[test]
+    fn a_cached_atom_keeps_its_vector_once_as_floats() {
+        let (_dir, store) = store();
+        let embedding: Vec<f64> = (0..384).map(|i| f64::from(i) / 384.0).collect();
+        store
+            .upsert(&record(json!({
+                "id": "a",
+                "workspace": "w",
+                "text": "a lesson about vectors",
+                "embedding": embedding,
+            })))
+            .unwrap();
+        let live = store.live("w").unwrap();
+        assert!(
+            live[0].get("embedding").unwrap().is_null(),
+            "the cache kept the JSON array"
+        );
+        let cached = store.vectors("w");
+        let got = cached.get("a").expect("the vector was dropped");
+        assert_eq!(got.len(), 384);
+        assert!((got[1] - (1.0 / 384.0)).abs() < 1e-6);
+        let disk = store.get("w", "a").unwrap().unwrap();
+        assert_eq!(disk["embedding"].as_array().unwrap().len(), 384);
+        store
+            .upsert(&record(json!({
+                "id": "a",
+                "workspace": "w",
+                "text": "a lesson about vectors revised",
+            })))
+            .unwrap();
+        let disk = store.get("w", "a").unwrap().unwrap();
+        assert_eq!(disk["text"], json!("a lesson about vectors revised"));
+        assert_eq!(disk["embedding"].as_array().unwrap().len(), 384);
+        assert_eq!(store.vectors("w").get("a").unwrap().len(), 384);
+        assert!(store.live("w").unwrap()[0]
+            .get("embedding")
+            .unwrap()
+            .is_null());
+        // The second write reused the float buffer when the numbers matched.
+        assert!(Arc::ptr_eq(got, store.vectors("w").get("a").unwrap()));
+    }
+
     /// Advising the database cold and trimming the heap leaves a claim readable.
     #[test]
     fn releasing_idle_memory_leaves_the_claim_readable() {
@@ -2302,7 +2519,7 @@ mod snapshot_tests {
     /// The index served after a write scores every term as an index built
     /// from scratch over the same atoms would.
     fn assert_index_matches_a_fresh_build(store: &Store, workspace: &str) {
-        let (atoms, index, documents) = store.searchable(workspace).unwrap();
+        let (atoms, index, documents, _vectors) = store.searchable(workspace).unwrap();
         let fresh_docs: Vec<Vec<String>> = atoms
             .iter()
             .map(|atom| packset_core::search::atom_tokens(atom))

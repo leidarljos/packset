@@ -1483,7 +1483,11 @@ impl Service {
     pub fn pack(&self, workspace: &str, set: Option<&str>) -> anyhow::Result<Value> {
         let current = |set: Option<&str>| -> anyhow::Result<Vec<Record>> {
             let mut atoms = self.store.current(workspace, set)?;
-            atoms.iter_mut().for_each(record::fill_origin);
+            let vectors = self.store.vectors(workspace);
+            atoms.iter_mut().for_each(|atom| {
+                record::fill_origin(atom);
+                crate::store::restore_embedding(atom, &vectors);
+            });
             Ok(atoms)
         };
         match set {
@@ -1806,7 +1810,7 @@ impl Service {
         };
         let now = as_of.clone().unwrap_or_else(clock::utcnow);
         let dated = as_of.as_deref().map(|at| self.store.as_of(workspace, at));
-        let (atoms, index, documents) = match dated {
+        let (atoms, index, documents, vectors) = match dated {
             Some(scan) => {
                 let atoms: crate::store::Live = std::sync::Arc::new(scan?);
                 let documents: std::sync::Arc<Vec<Vec<String>>> = std::sync::Arc::new(
@@ -1818,7 +1822,8 @@ impl Service {
                 let index = std::sync::Arc::new(packset_core::bm25::Index::build(
                     documents.iter().map(Vec::as_slice),
                 ));
-                (atoms, index, documents)
+                // A dated read is not cached. Its vectors stay on the records.
+                (atoms, index, documents, Arc::new(HashMap::new()))
             }
             None => self.store.searchable(workspace)?,
         };
@@ -1872,8 +1877,18 @@ impl Service {
         // A third ballot when this seat has an encoder. The two lexical
         // scorers both need the question and the atom to share words, and this
         // one does not, which is the gap it exists to close.
+        // The cache holds floats, not a JSON array per atom. A dated read
+        // has no side table, and the scorer reads the record instead.
+        let embedded: Vec<Option<&[f32]>> = atoms
+            .iter()
+            .map(|atom| {
+                atom.get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| vectors.get(id).map(AsRef::as_ref))
+            })
+            .collect();
         let ranked_meaning = crate::embed::encode_query(query)
-            .map(|vector| packset_core::search::search_dense(&ask, &vector))
+            .map(|vector| packset_core::search::search_dense_at(&ask, &vector, &embedded))
             .filter(|hits| !hits.is_empty());
         let meaning = ranked_meaning.clone();
 
@@ -2724,6 +2739,45 @@ mod tests {
             })
             .count();
         assert_eq!(copies, 1, "the second write stored another copy of T");
+    }
+
+    /// Firing rewrites the claims from the cache, which does not carry the
+    /// vector. The array on disk has to survive that rewrite.
+    #[test]
+    fn firing_keeps_the_stored_vector() {
+        let (_dir, svc) = service();
+        let embedding = json!([0.2, 0.4, 0.6]);
+        for (id, links) in [("a", json!(["b"])), ("b", json!(["a"]))] {
+            svc.store
+                .upsert(
+                    json!({
+                        "id": id,
+                        "workspace": "w",
+                        "text": format!("claim {id} stands"),
+                        "kind": "lesson",
+                        "embedding": embedding,
+                        "links": links,
+                        "tombstone": false,
+                    })
+                    .as_object()
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        assert!(svc.store.live("w").unwrap()[0]
+            .get("embedding")
+            .unwrap()
+            .is_null());
+        svc.fire("w", &["a".into(), "b".into()]).unwrap();
+        for id in ["a", "b"] {
+            let disk = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(
+                disk["embedding"].as_array().map(Vec::len),
+                Some(3),
+                "{id} lost its vector: {disk:?}"
+            );
+        }
+        assert_eq!(svc.store.vectors("w").len(), 2);
     }
 
     /// A deleted claim leaves no shape, and a third workspace does not keep
