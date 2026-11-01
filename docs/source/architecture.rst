@@ -1,0 +1,56 @@
+.. title:: packset architecture
+
+:description: One writer on loopback. Cards are files. Atoms are LMDB. Every agent is an HTTP client.
+
+One writer on loopback. Cards are files. Atoms are LMDB.
+milli is a projection. Every agent is an HTTP client.
+
+Contract
+========
+
+-  URL: ``PACKSET_URL`` (``INSIDE_MEMORY_URL`` alias); unset, ``http://127.0.0.1:8761``; ``off`` means no pack
+-  Host: ``127.0.0.1`` only. Never ``localhost``.
+-  Port: ``8761`` (``PACKSET_PORT``)
+-  Health: ``packsetd ok``
+
+Split
+=====
+
+================== =============================================================================
+Crate              Role
+================== =============================================================================
+``packsetd``       writer (Rust, source in ``packset-cli``, shipped by the ``packset`` crate)
+``packset-core``   named fuse/diversify/decay panel
+``packset-client`` HTTP
+``packset-embed``  optional dense encoder
+================== =============================================================================
+
+Host panel env: ``PACKSET_FUSE`` ``PACKSET_DIVERSIFY`` ``PACKSET_DECAY``.
+Default ``combmnz`` / ``mmr`` / ``fsrs``. Unknown names fail closed.
+Cross-encoder second stage: ``PACKSET_RERANK`` or ``/v1/search?rerank=1``,
+off by default.
+
+Clients do not open the LMDB.
+
+Entities, and the one that is a citation
+========================================
+
+An entity is a free-form name and nothing checks it. The exception is an entity
+opening ``deed-`` or ``sha256:``, which names a product in a deed store, and there
+the shape is checked where the atom is written rather than found later by a
+reader. A bare prefix and a separator that would split the entity into two are
+both refused; whether the deed exists is a question the pack cannot ask and does
+not try to.
+
+The rule lives in ``packset_core::atom`` (``check_entity`` and ``is_accession``).
+The daemon inherits that copy. There is no Python writer.
+
+.. code:: console
+
+   $ packset accessions git:github.com/leidarljos/packset
+   deed-patch-overlay
+   sha256:aabbccdd
+
+That is the pack's half of the two checks a citation is worth: pipe it into
+``deedar evidence -`` for whether the bytes are intact, or ``deedar current -`` for
+whether the thing cited is still the tip.

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Run this checkout's `packset`, wherever the build put it.
+#
+# A seat wires one stable path and does not track whether the last build was a
+# debug or a release one. Everything the command does lives in the binary.
+
+set -euo pipefail
+
+self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+root="$(cd "$(dirname "$self")/.." && pwd)"
+
+for candidate in "${PACKSET_CLI:-}" \
+                 "$root/target/release/packset" \
+                 "$root/target/debug/packset"; do
+    [ -n "$candidate" ] || continue
+    [ -x "$candidate" ] && exec "$candidate" "$@"
+done
+
+echo "packset: no packset binary; cargo build --release -p packset-cli" >&2
+exit 1

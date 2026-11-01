@@ -1,0 +1,56 @@
+{%- if "sphinxext.opengraph" not in _sphinx_extensions -%}
+  <meta property="og:type" content="website"/>
+  {%- if pageurl %}
+  <meta property="og:url" content="{{ pageurl|e }}"/>
+  {% endif -%}
+  {%- set og_title = title|striptags -%}
+  {%- if pagename != root_doc -%}
+    {%- set og_title = og_title ~ " - " ~ docstitle|striptags -%}
+  {%- endif -%}
+  <meta property="og:title" content="{{ og_title|e }}"/>
+  {%- if meta and meta.cover -%}
+  <meta property="og:image" content="{{ meta.cover|e }}"/>
+  {%- elif meta and meta.image -%}
+  <meta property="og:image" content="{{ meta.image|e }}"/>
+  {%- elif theme_og_image_url %}
+  <meta property="og:image" content="{{ theme_og_image_url|e }}"/>
+  {%- elif logo_url and logo_url.startswith('https://') %}
+  <meta property="og:image" content="{{ logo_url|e }}"/>
+  {%- endif %}
+  {%- set og_image = "" -%}
+  {%- if meta and meta.cover -%}
+    {%- set og_image = meta.cover -%}
+  {%- elif meta and meta.image -%}
+    {%- set og_image = meta.image -%}
+  {%- elif theme_og_image_url -%}
+    {%- set og_image = theme_og_image_url -%}
+  {%- endif -%}
+  {%- if og_image -%}
+  <meta property="og:image:type" content="image/png"/>
+  <meta property="og:image:width" content="1200"/>
+  <meta property="og:image:height" content="630"/>
+  <meta property="og:image:alt" content="packset"/>
+  <meta name="twitter:image" content="{{ og_image|e }}"/>
+  <meta name="twitter:title" content="{{ og_title|e }}"/>
+  {%- endif -%}
+  {%- if meta and meta.description %}
+    <meta name="description" content="{{ meta.description|replace('\n', ' ')|e }}"/>
+    <meta property="og:description" content="{{ meta.description|replace('\n', ' ')|e }}"/>
+    <meta name="twitter:description" content="{{ meta.description|replace('\n', ' ')|e }}"/>
+  {%- endif %}
+  {%- if og_image -%}
+    <meta name="twitter:card" content="summary_large_image"/>
+  {%- else %}
+    <meta name="twitter:card" content="summary"/>
+  {%- endif -%}
+{%- elif metatags -%}
+  {{ metatags }}
+{%- endif -%}
+
+{%- if theme_twitter_creator %}
+<meta name="twitter:creator" content="@{{ theme_twitter_creator }}"/>
+{%- endif %}
+
+{%- if theme_twitter_site %}
+<meta name="twitter:site" content="@{{ theme_twitter_site }}"/>
+{%- endif %}

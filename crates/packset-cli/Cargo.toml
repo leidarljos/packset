@@ -1,0 +1,55 @@
+[package]
+name = "packset"
+version.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Standing memory: Remember and Prefer only. Installs packset, packsetd and packset-mcp."
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target }.tar.gz"
+bin-dir = "packset-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+# cargo-quickinstall only ships the crate's default bin (`packset`). The
+# GitHub tarball has packset, packsetd and packset-mcp. Without a tarball
+# for the target, binstall builds from source: this crate links no native
+# runtime, so that build needs nothing beyond a Rust toolchain.
+disabled-strategies = ["quick-install"]
+
+[[bin]]
+name = "packset"
+path = "src/main.rs"
+
+# The writer and the MCP surface are built from their source trees in the
+# workspace, so one published crate installs the three binaries and the
+# internals publish nothing.
+[[bin]]
+name = "packsetd"
+path = "src/bin/packsetd/bin_root.rs"
+
+[[bin]]
+name = "packset-mcp"
+path = "src/bin/packset-mcp/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+libc = "0.2"
+packset-client = { path = "../packset-client", version = "0.17.3" }
+serde.workspace = true
+serde_json.workspace = true
+packset-core = { path = "../packset-core", version = "0.17.3" }
+# The writer's: the LMDB store and the proposal log's ordered map.
+heed = "0.20"
+indexmap = "2"
+# The MCP surface's.
+rmcp = { version = "3.2", features = ["server", "transport-io", "transport-async-rw", "macros"] }
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
+
+[dev-dependencies]
+tempfile = "3"
+ureq = { version = "2", default-features = false, features = ["json"] }

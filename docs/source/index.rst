@@ -1,0 +1,86 @@
+.. title:: packset
+
+:description: A pack of written claims with a review clock, not a transcript with an index.
+
+.. raw:: html
+
+   <div class="vi-hero">
+     <div class="vi-hero-brand">
+       <img class="vi-hero-mark" src="_static/mark.svg" width="64" height="64" alt="" />
+       <div>
+         <p class="vi-hero-name">packset</p>
+         <p class="vi-hero-tag">What does this seat know, standing?</p>
+       </div>
+     </div>
+     <p class="vi-hero-tagline">A pack of written claims with a review clock, not a transcript with an index.</p>
+     <div class="vi-hero-pills">
+       <span>Remember / Prefer only</span>
+       <span>LMDB, one writer</span>
+       <span>CLI + HTTP + MCP</span>
+     </div>
+     <div class="vi-hero-actions">
+       <a class="vi-btn vi-btn-gold" href="getting-started.html">Get started</a>
+       <a class="vi-btn vi-btn-ghost" href="reference.html">Reference</a>
+     </div>
+   </div>
+
+A pack is what a seat has decided to keep: one claim per atom, written on
+purpose, never mined from a transcript. Search ranks the claims by a
+measured panel of scorers. A review clock brings each claim back before it
+is forgotten, and a claim that is not reviewed decays in the ranking. The
+writer is one daemon over one Lightning Memory-Mapped Database (LMDB) file,
+and every other tool is a client.
+
+Install
+=======
+
+.. code:: console
+
+   $ cargo binstall --locked packset          # packset, packsetd and packset-mcp
+   $ packset ensure
+
+First minute
+============
+
+.. code:: console
+
+   $ packset remember --workspace demo "The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25."
+   ee17d2a07cbf1569e54e0d80496fdecf    lesson  due 2026-09-28T16:52:09.119Z
+   $ packset prefer --workspace demo "CombMNZ over RRF for fusing two ballots."
+   63df91bbea2b5e4e146866db0a85b4c6    preference  due 2026-09-28T16:52:09.149Z
+   $ packset search --workspace demo which fusion
+   packset: workspace demo
+   2.0000  preference  63df91bbea2b5e4e146866db0a85b4c6    CombMNZ over RRF for fusing two ballots.
+   1.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf    The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
+
+Two claims, written on purpose, each with a review date a day out. A search
+lists the standing choice first, then the lesson. The :doc:`tutorial <getting-started>`
+goes on from these two claims to review and handover.
+
+``packset ensure`` starts the writer when it is down. With nothing set, every
+client uses that writer on the default port. The dense scorer is a separate
+binary, ``packset-embed``, built against Open Neural Network Exchange (ONNX)
+Runtime compiled from source.
+The pack answers without it, and a sitting's recall stays lexical.
+
+Measured
+========
+
+LongMemEval\ :sub:`S`, 470 answerable questions, session-level retrieval.
+BM25+ alone is 0.914 recall@5. CombMNZ of BM25+ and e5-large-v2
+is 0.949 recall@5 (0.889 hit@1, 0.981 recall at 10). QA on the same 470
+with a local 7B reader is 0.549 against a labelled-session ceiling of
+0.634. Writes only on Remember: and Prefer:. The :doc:`explanation <explanation>`
+is the source for those rows.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Guides
+   :hidden:
+
+   getting-started
+   howto
+   reference
+   explanation
+   architecture
+   seat

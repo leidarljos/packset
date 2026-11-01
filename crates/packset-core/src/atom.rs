@@ -1,0 +1,420 @@
+//! `inside.atom/v1` predicates. No I/O.
+
+/// Schema name for a pack atom.
+pub const SCHEMA: &str = "inside.atom/v1";
+
+/// Live at `at`: not a tombstone, `valid_from` missing or already started,
+/// and `valid_to` missing or still open. The window is half-open `[from, to)`.
+pub fn is_live_at(
+    tombstone: bool,
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+    at: &str,
+) -> bool {
+    if tombstone {
+        return false;
+    }
+    if let Some(from) = valid_from {
+        if !from.is_empty() && from > at {
+            return false;
+        }
+    }
+    match valid_to {
+        None | Some("") => true,
+        Some(until) => until > at,
+    }
+}
+
+/// Live now: the `valid_to` half of [`is_live_at`], with no start bound.
+pub fn is_live(tombstone: bool, valid_to: Option<&str>, now: &str) -> bool {
+    is_live_at(tombstone, None, valid_to, now)
+}
+
+/// Review clock. Missing `due_at` is not due. Independent of `valid_to`.
+pub fn is_due(due_at: Option<&str>, now: &str) -> bool {
+    match due_at {
+        None | Some("") => false,
+        Some(due) => due <= now,
+    }
+}
+
+/// Prefixes a deed accession can open with.
+///
+/// deedar mints `deed-<kind>-<slug>` and answers `get` for a `sha256:` of the
+/// canonical deed or of one product path. Those two forms are the whole
+/// vocabulary, and the tracker refuses anything else where a citation is
+/// written, so a pack that accepts a typo leaves a citation nothing resolves.
+pub const ACCESSION_PREFIXES: &[&str] = &["deed-", "sha256:"];
+
+/// Why an entity that opens like a deed accession is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityRefusal {
+    /// The entity is empty or only whitespace.
+    Empty,
+    /// A bare `deed-` or `sha256:` that names nothing.
+    BarePrefix,
+    /// A separator that would split the entity into two.
+    Separator(char),
+}
+
+/// Check one entity, returning it trimmed.
+///
+/// An entity is otherwise a free-form name, so only the accession shape is
+/// checked: the pack cannot ask whether a deed exists, and does not try to.
+/// What it can catch is the citation nothing will ever resolve, at the moment
+/// somebody writes it rather than later from `deedar evidence -`.
+///
+/// # Errors
+///
+/// Returns the reason when the entity opens with an accession prefix and is
+/// not a well-formed accession.
+pub fn check_entity(value: &str) -> Result<&str, EntityRefusal> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Err(EntityRefusal::Empty);
+    }
+    let Some(prefix) = ACCESSION_PREFIXES.iter().find(|p| text.starts_with(**p)) else {
+        return Ok(text);
+    };
+    let rest = &text[prefix.len()..];
+    if rest.is_empty() {
+        return Err(EntityRefusal::BarePrefix);
+    }
+    // The search projection joins entities with a space and the documented
+    // sweep splits them on a comma, so a separator inside one silently becomes
+    // two entities, neither of which resolves.
+    if let Some(bad) = rest.chars().find(|c| c.is_whitespace() || *c == ',') {
+        return Err(EntityRefusal::Separator(bad));
+    }
+    Ok(text)
+}
+
+/// Whether an entity names a deed rather than a free-form thing.
+///
+/// The reader's half of [`check_entity`]: a sweep over a workspace keeps the
+/// entities that are citations and ignores the rest.
+#[must_use]
+pub fn is_accession(value: &str) -> bool {
+    let text = value.trim();
+    ACCESSION_PREFIXES
+        .iter()
+        .any(|p| text.strip_prefix(*p).is_some_and(|rest| !rest.is_empty()))
+        && !text.contains(|c: char| c.is_whitespace() || c == ',')
+}
+
+/// Where an atom came from. Admission reads this, not the wording.
+pub const ORIGINS: &[&str] = &[
+    "user-declared",
+    "agent-derived",
+    "tool-echo",
+    "external",
+    "peer",
+];
+
+/// The person's origin, and the one a new write that names none is given.
+pub const USER_DECLARED: &str = "user-declared";
+
+/// What a record whose origin is missing or empty reads as, and the rank
+/// of any origin not one of [`ORIGINS`]. A writer may not store it.
+pub const UNKNOWN_ORIGIN: &str = "unknown";
+
+/// The `source.basis` that names the person standing behind a claim.
+pub const PERSON_BASIS: &str = "person";
+
+/// Content the writer typed as fact. It cannot outrank a lower origin.
+pub const CONTENT_AUTHORITATIVE: &str = "authoritative";
+
+/// Whether `origin` is one of [`ORIGINS`].
+#[must_use]
+pub fn known_origin(origin: &str) -> bool {
+    ORIGINS.contains(&origin)
+}
+
+/// Trust ceiling for content typed [`CONTENT_AUTHORITATIVE`].
+///
+/// `None` means the declared trust stands. A tool echo and an external
+/// atom stop at their own level.
+#[must_use]
+pub fn authority_ceiling(origin: &str) -> Option<f64> {
+    match origin {
+        "tool-echo" => Some(0.2),
+        "external" => Some(0.4),
+        _ => None,
+    }
+}
+
+/// `min(origin, content)` for a numeric trust.
+///
+/// The cap applies only when the content is typed authoritative and the
+/// origin is a tool echo or external. Every other atom keeps `declared`.
+#[must_use]
+pub fn capped_trust(origin: &str, content: Option<&str>, declared: f64) -> f64 {
+    if content == Some(CONTENT_AUTHORITATIVE) {
+        if let Some(cap) = authority_ceiling(origin) {
+            return declared.min(cap);
+        }
+    }
+    declared
+}
+
+/// The horizon a recalled review may write.
+///
+/// Authoritative content on a tool echo or an external atom promotes to
+/// that origin. Anything else still becomes `standing`.
+#[must_use]
+pub fn promotion_horizon(origin: &str, content: Option<&str>) -> &'static str {
+    if content == Some(CONTENT_AUTHORITATIVE) {
+        match origin {
+            "tool-echo" => return "tool-echo",
+            "external" => return "external",
+            _ => {}
+        }
+    }
+    "standing"
+}
+
+/// Whether this write is held as a proposal instead of stored.
+///
+/// An agent writes its own memories: an `agent-derived` lesson and a hook
+/// write are live at once, keep their origin, and are reviewed and pruned
+/// afterwards. `hold` is the writer's opt-in (`PACKSET_HOLD_AGENT_WRITES=1`)
+/// to file them as proposals that wait for an accept instead.
+#[must_use]
+pub fn needs_accept(origin: &str, hook: bool, hold: bool) -> bool {
+    hold && (hook || origin == "agent-derived")
+}
+
+/// Whether this writer holds agent and hook writes as proposals: only when
+/// `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`.
+#[must_use]
+pub fn hold_agent_writes() -> bool {
+    std::env::var("PACKSET_HOLD_AGENT_WRITES")
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+/// Where an origin sits in the one order a write may only move down:
+/// [`USER_DECLARED`] above every other origin, and a missing or unknown
+/// one below them all. The other origins share a step, so a move between
+/// them is not a rise.
+#[must_use]
+pub fn origin_rank(origin: &str) -> u8 {
+    if origin == USER_DECLARED {
+        2
+    } else if known_origin(origin) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Where a `source.basis` sits: [`PERSON_BASIS`], read trimmed and
+/// without case, above everything else. A missing basis is not a person.
+#[must_use]
+pub fn basis_rank(basis: Option<&str>) -> u8 {
+    u8::from(basis.is_some_and(|b| b.trim().eq_ignore_ascii_case(PERSON_BASIS)))
+}
+
+/// Whether `to` ranks above `from` in [`origin_rank`]: a rise only an
+/// accept may make.
+#[must_use]
+pub fn launders(from: &str, to: &str) -> bool {
+    origin_rank(to) > origin_rank(from)
+}
+
+/// Jaccard on entity sets. Empty intersection is 0.
+pub fn entity_jaccard<'a, I, J>(left: I, right: J) -> f64
+where
+    I: IntoIterator<Item = &'a str>,
+    J: IntoIterator<Item = &'a str>,
+{
+    use std::collections::HashSet;
+    let a: HashSet<&str> = left.into_iter().collect();
+    let b: HashSet<&str> = right.into_iter().collect();
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(&b).count() as f64;
+    let union = a.union(&b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_open_valid_to() {
+        assert!(is_live(false, None, "2026-08-20T00:00:00Z"));
+        assert!(is_live(
+            false,
+            Some("2099-01-01T00:00:00Z"),
+            "2026-08-20T00:00:00Z"
+        ));
+        assert!(!is_live(
+            false,
+            Some("2000-01-01T00:00:00Z"),
+            "2026-08-20T00:00:00Z"
+        ));
+        assert!(!is_live(true, None, "2026-08-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn live_at_reads_both_ends_of_the_window() {
+        let at = "2026-08-20T00:00:00Z";
+        assert!(is_live_at(false, None, None, at));
+        assert!(is_live_at(
+            false,
+            Some("2026-01-01T00:00:00Z"),
+            Some("2099-01-01T00:00:00Z"),
+            at
+        ));
+        assert!(!is_live_at(false, Some("2026-09-01T00:00:00Z"), None, at));
+        assert!(!is_live_at(
+            false,
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-08-20T00:00:00Z"),
+            at
+        ));
+        assert!(!is_live_at(true, Some("2026-01-01T00:00:00Z"), None, at));
+    }
+
+    #[test]
+    fn due_independent_of_live() {
+        let now = "2026-08-20T00:00:00Z";
+        assert!(!is_due(None, now));
+        assert!(!is_due(Some(""), now));
+        assert!(!is_due(Some("2026-08-21T00:00:00Z"), now));
+        assert!(is_due(Some("2026-08-19T00:00:00Z"), now));
+        assert!(is_due(Some(now), now));
+        assert!(is_live(false, Some("2099-01-01T00:00:00Z"), now));
+        assert!(is_due(Some("2026-08-19T00:00:00Z"), now));
+        assert!(!is_live(false, Some("2000-01-01T00:00:00Z"), now));
+        assert!(is_due(Some("2026-08-19T00:00:00Z"), now));
+    }
+
+    #[test]
+    fn a_free_form_entity_passes_untouched() {
+        assert_eq!(check_entity("  JOSS  "), Ok("JOSS"));
+        assert_eq!(check_entity("a whole phrase"), Ok("a whole phrase"));
+        assert!(!is_accession("JOSS"));
+    }
+
+    #[test]
+    fn a_well_formed_accession_is_kept() {
+        assert_eq!(check_entity("deed-patch-overlay"), Ok("deed-patch-overlay"));
+        assert!(is_accession("deed-patch-overlay"));
+        assert!(is_accession("sha256:aabbccdd"));
+    }
+
+    #[test]
+    fn a_bare_prefix_names_no_deed() {
+        assert_eq!(check_entity("deed-"), Err(EntityRefusal::BarePrefix));
+        assert_eq!(check_entity("sha256:"), Err(EntityRefusal::BarePrefix));
+        assert!(!is_accession("deed-"));
+    }
+
+    #[test]
+    fn a_separator_inside_an_accession_would_split_it() {
+        assert_eq!(
+            check_entity("deed-patch overlay"),
+            Err(EntityRefusal::Separator(' '))
+        );
+        assert_eq!(check_entity("deed-a,b"), Err(EntityRefusal::Separator(',')));
+        assert!(!is_accession("deed-a,b"));
+    }
+
+    #[test]
+    fn the_shape_is_checked_and_the_store_is_not() {
+        // The pack cannot ask whether a deed exists: a plausible accession for
+        // a deed nobody minted is accepted here and caught later by
+        // `deedar evidence -`.
+        assert_eq!(
+            check_entity("deed-patch-nobody-minted-this"),
+            Ok("deed-patch-nobody-minted-this")
+        );
+    }
+
+    #[test]
+    fn an_empty_entity_is_refused() {
+        assert_eq!(check_entity("   "), Err(EntityRefusal::Empty));
+    }
+
+    #[test]
+    fn jaccard_overlap() {
+        let v = entity_jaccard(["ljos", "pack"], ["pack", "seat"]);
+        assert!((v - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_authoritative_tool_echo_stops_at_its_origin() {
+        assert_eq!(
+            capped_trust("tool-echo", Some(CONTENT_AUTHORITATIVE), 1.0),
+            0.2
+        );
+        assert_eq!(
+            capped_trust("external", Some(CONTENT_AUTHORITATIVE), 9.0),
+            0.4
+        );
+        assert_eq!(
+            capped_trust("user-declared", Some(CONTENT_AUTHORITATIVE), 1.0),
+            1.0
+        );
+        assert_eq!(capped_trust("tool-echo", None, 1.0), 1.0);
+        assert_eq!(capped_trust("peer", Some(CONTENT_AUTHORITATIVE), 1.0), 1.0);
+        assert_eq!(
+            promotion_horizon("tool-echo", Some(CONTENT_AUTHORITATIVE)),
+            "tool-echo"
+        );
+        assert_eq!(
+            promotion_horizon("external", Some(CONTENT_AUTHORITATIVE)),
+            "external"
+        );
+        assert_eq!(
+            promotion_horizon("user-declared", Some(CONTENT_AUTHORITATIVE)),
+            "standing"
+        );
+        assert_eq!(promotion_horizon("tool-echo", None), "standing");
+    }
+
+    #[test]
+    fn an_agent_derived_write_is_live_unless_the_writer_holds() {
+        assert!(!needs_accept("agent-derived", false, false));
+        assert!(!needs_accept("user-declared", true, false));
+        assert!(needs_accept("agent-derived", false, true));
+        assert!(needs_accept("user-declared", true, true));
+        assert!(!needs_accept("user-declared", false, true));
+        assert!(!needs_accept("peer", false, true));
+        assert!(!needs_accept("tool-echo", false, true));
+        assert!(!needs_accept("external", false, true));
+        assert!(ORIGINS.iter().all(|name| known_origin(name)));
+        assert!(!known_origin("forged"));
+        assert!(!known_origin(UNKNOWN_ORIGIN));
+    }
+
+    #[test]
+    fn user_declared_is_above_every_origin_and_unknown_below_them() {
+        for other in ORIGINS.iter().filter(|o| **o != USER_DECLARED) {
+            assert!(launders(other, USER_DECLARED), "{other}");
+            assert!(!launders(USER_DECLARED, other), "{other}");
+            assert!(launders(UNKNOWN_ORIGIN, other), "{other}");
+            assert!(launders("", other), "{other}");
+            assert!(!launders(other, "agent-derived"), "{other}");
+        }
+        assert!(!launders(USER_DECLARED, USER_DECLARED));
+        assert!(launders("forged", USER_DECLARED));
+        assert!(!launders(" user-declared", UNKNOWN_ORIGIN));
+    }
+
+    #[test]
+    fn only_a_person_basis_ranks_above_the_rest() {
+        assert_eq!(basis_rank(Some(PERSON_BASIS)), 1);
+        assert_eq!(basis_rank(Some(" Person ")), 1);
+        for below in [None, Some(""), Some("agent"), Some("persons"), Some("tool")] {
+            assert_eq!(basis_rank(below), 0, "{below:?}");
+        }
+    }
+}

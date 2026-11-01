@@ -1,0 +1,51 @@
+# Licenses the workspace is allowed to depend on.
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "NCSA",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = [
+    # The manifest says LGPL-2.0, which is not an SPDX identifier. The
+    # crate ships no license file. 2.0-only is the identifier that string
+    # used to mean, and it is accepted only for this crate.
+    { allow = ["LGPL-2.0-only"], crate = "concat-arrays" },
+]
+
+[[licenses.clarify]]
+crate = "concat-arrays"
+expression = "LGPL-2.0-only"
+license-files = [{ path = "Cargo.toml.orig", hash = 0xd75a34b2 }]
+
+# milli 0.41.3 is a git workspace. The license is the MIT text at the
+# repository root; the member manifests do not repeat it.
+[[licenses.clarify]]
+crate = "milli"
+expression = "MIT"
+license-files = [{ path = "../LICENSE", hash = 0xa8b3d205 }]
+
+[[licenses.clarify]]
+crate = "filter-parser"
+expression = "MIT"
+license-files = [{ path = "../LICENSE", hash = 0xa8b3d205 }]
+
+[[licenses.clarify]]
+crate = "flatten-serde-json"
+expression = "MIT"
+license-files = [{ path = "../LICENSE", hash = 0xa8b3d205 }]
+
+[[licenses.clarify]]
+crate = "json-depth-checker"
+expression = "MIT"
+license-files = [{ path = "../LICENSE", hash = 0xa8b3d205 }]

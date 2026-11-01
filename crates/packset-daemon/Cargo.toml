@@ -1,0 +1,41 @@
+[package]
+name = "packset-daemon"
+version.workspace = true
+readme = "../../README.md"
+edition.workspace = true
+license.workspace = true
+# The writer's library and its examples. The `packsetd` binary ships in
+# the `packset` crate, which builds `src/bin_root.rs`; nothing here is
+# published on its own.
+publish = false
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "The loopback pack writer: one process, every client"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/packset-v{ version }-{ target }.tar.gz"
+bin-dir = "packset-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+# The daemon source lives in packset-cli so the published packset crate
+# carries packsetd; this unpublished crate keeps the library for examples.
+[lib]
+name = "packset_daemon"
+path = "../packset-cli/src/bin/packsetd/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+heed = "0.20"
+# serde_json carries preserve_order, so its map type is the one to keep a
+# proposal log in insertion order without a second sort.
+indexmap = "2"
+packset-core = { path = "../packset-core", version = "0.17.3" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+libc = "0.2"
+tempfile = "3"
+packset-client = { path = "../packset-client", version = "0.17.3" }
+ureq = { version = "2", default-features = false, features = ["json"] }

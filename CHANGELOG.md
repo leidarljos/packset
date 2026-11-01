@@ -1,0 +1,1073 @@
+# Changelog
+
+Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
+
+## 0.17.3 (2026-11-01)
+
+- The writer gives free heap back after a write, at most once every 50
+  ms. The release after a parse of the log did not reach the steady
+  soak, whose listing is served from the cache a write patches in place;
+  glibc kept what the writes freed in the worker's arena, 1.8 MiB a
+  window of 256 rewrites on 0.16.1 through 0.17.2, and an idle release
+  run before the sample flattened the curve to 12.7, 13.0, 12.9 MiB.
+
+## 0.17.2 (2026-11-01)
+
+- The writer gives the heap back after each parse of the log. The log
+  holds every rewrite, so parsing it peaked higher after each window of
+  writes and glibc kept the peak: a constant corpus of 256 claims grew
+  the writer by 1.8 MiB per rewrite, the same on 0.16.1, 0.17.0 and
+  0.17.1.
+- A search whose lexical projection finds nothing rebuilds the
+  projection once per atom set, not on every such query. A
+  conversational prompt shares no word with most packs, so each one
+  spawned a second child and upserted the whole pack: 30 ms of the 50
+  a one-word miss took on a 29-atom pack.
+
+## 0.17.1 (2026-11-01)
+
+- A search runs the milli projection's child while the encoder encodes
+  the query, instead of after it: the two read nothing of each other,
+  and the child's 13 to 22 ms were paid in series on every search.
+- A release tag publishes its docs. The github-pages environment admits
+  the main branch only, so the docs workflow's deploy on a tag was
+  refused on every release since 0.16.0; the tag's build is now
+  published by a second workflow that runs on the default branch and
+  checks out the tagged commit.
+
+## 0.17.0 (2026-10-31)
+
+- The MMR diversify step meets each pair of candidates once. It
+  recomputed the Jaccard from every remaining candidate to every
+  selected item on every round, over hash sets of strings, which on a
+  search that fused eighty candidates was three quarters of the
+  writer's search time. Each candidate keeps the Jaccard to its nearest
+  selected item and the sets meet as sorted slices. The order is the
+  definition's, checked against the direct computation.
+
+- `packset-embed` bounds the ONNX Runtime threads one forward pass
+  uses: four for the dense, sparse and late encoders, eight for the
+  cross-encoder, fewer on a smaller machine, and `PACKSET_EMBED_THREADS`
+  names another count. A dozen-token query over twelve threads spent
+  85% of its samples spinning between the model's small matrix products
+  and took 31 ms with a tail to 86; four threads answer it in 19 ms.
+
+## 0.16.1 (2026-10-22)
+
+- The cached-vector RSS check measures a child process. It reads
+  anonymous memory for the whole test process, so a neighbour running
+  in parallel could push a small float cache over the limit.
+
+- Idle page advice stays Linux-only because the database map is
+  read-only, not because macOS would discard dirty pages. Clean
+  file-backed pages are already outside that footprint. Heap return
+  calls `malloc_trim` only for glibc on Linux. musl and macOS return
+  large freed regions on their own; small-allocation fragmentation
+  is what remains. windows-gnu is not given the symbol.
+
+- The constant-corpus soak rewrites one set of claims and gives each
+  window a new vector. The field soak grows the corpus and returns one
+  constant, so a cache that still stores the JSON arrays passed it.
+  This one fails when that set costs more anonymous memory than the
+  float cache does.
+
+- An answer returns a client-supplied vector as it was stored. Scoring
+  still uses f32. Rebuilding the JSON from those floats turned 0.1 into
+  its approximation and an out-of-range value into null.
+
+- A write that sends `embedding: null` or `[]` clears the stored vector,
+  and an update that changes the text drops the old vector unless it
+  sends a new one. A rewrite that does not name the field, such as a
+  fire, still keeps the array. The cache omits the key where it holds
+  a vector, so that null is not mistaken for a clear.
+
+- A listing, a recall, a pack and a search read an atom's record and its
+  vector from one snapshot. They used to be two cache lookups, so a
+  workspace that left the cache between them, or a scan a write raced,
+  answered `embedding: null` and dropped the dense ballot.
+
+## 0.16.0 (2026-10-22)
+
+- The field soak drives several clients at once, a fake 384-d encoder,
+  more workspaces than the cache holds, set-scoped writes and
+  attachments near the body cap. Idle release stays at its default
+  minute. It fails when anonymous memory is still climbing after the
+  warm-up. The earlier soak remains the check that the workspace
+  cache itself stops the climb.
+
+- A workspace that was only counted is dropped from the cache clock
+  when its counts row is. The clock used to keep that name after the
+  row was gone, so a long list of status checks grew without a corpus
+  behind it.
+
+- Fires and cues each have their own cap. They used to share one map
+  of 4096 keys, so a burst of cues pushed a fire out and the same
+  claims tightened their links a second time inside the hour.
+
+- Bodies waiting for a worker stay within one request, 64 MiB together.
+  The queue of 128 could previously hold that many full transcripts at
+  once, and that high-water mark stayed in the allocator.
+
+- An attachment expires after an hour, and at most 64 workspaces hold
+  one. A slot that was only peeked used to stay until the workspace
+  was forgotten, with no cap on how many workspaces that was.
+
+- Shapes are kept per workspace. The same client id in two workspaces
+  no longer shares one token list, so a delete in one left the other
+  unable to see its own claim. A workspace larger than the shape cap
+  keeps the shapes it has. Dropping them and marking the workspace
+  unshaped rebuilt the whole pack on every later write.
+
+- Idle release of the database map is Linux only, and the heap return
+  is glibc only. macOS `MADV_DONTNEED` can discard dirty pages, and
+  musl has no `malloc_trim`, so on those the call does nothing and the
+  pages stay until the process ends. The write transaction taken
+  before the advice is dropped at once; it does not hold the writer
+  lock across the advice.
+
+- Health, status and the other cheap probes do not keep the writer
+  busy. A herd of them used to move the idle clock on every request,
+  so the release never ran.
+
+- A cached atom keeps its vector as one array of floats, not as a JSON
+  array on both copies of the record. With the default encoder that JSON
+  was about 55 KiB per atom, and a fire or an activate copied it again
+  with the live set. The file and the answers still carry the JSON array.
+  A rewrite that does not bring a vector keeps the one already stored.
+
+- A write in one set no longer drops the tokens of the workspace's other
+  sets. Duplicate detection reads those tokens, so the same text stored
+  again in the first set came back as a second claim. Shapes are
+  reconciled from the whole live workspace, and the first write in a
+  process shapes that whole workspace.
+
+- Idle release advises the database mapping. Advising the file leaves
+  pages that are still mapped, so a quiet writer kept the database
+  resident. The mapping stays open and the next read faults the pages
+  it needs.
+
+- A soak of the writer fails when resident memory keeps climbing after
+  the workspace cache is full. It drives a real packsetd across more
+  checkouts than the cache holds, waits out the idle release, and
+  compares anonymous RSS. `scripts/soak-rss.py` is the same mix, run
+  longer, and prints the sample a field report can be set beside.
+
+- After a quiet minute the writer returns free heap to the kernel and
+  drops cached pages of the database. `PACKSET_IDLE_TRIM` is that
+  wait in seconds (default 60, `off` to keep the pages). glibc holds
+  the high-water mark of a burst in per-thread arenas, and the mapped
+  database stays resident, so a laptop that had been idle still had
+  the whole working set in swap. The next request faults the pages it
+  needs. The mapping itself stays open.
+
+- The set-backfill memory stays bounded. `PACKSET_BACKFILL_CAP`
+  (default 1024, `off` for no cap) is how many set names one process
+  remembers having uploaded into the search index. A set that falls
+  out is uploaded once more on its next scoped search. A writer that
+  minted a new set per run used to keep every name until it exited.
+
+- The fire-hold map stays bounded. `PACKSET_FIRE_CAP` (default 4096,
+  `off` for no cap) is how many recent fires and cues are remembered
+  for the hour. A cue used to be inserted without dropping the expired
+  ones, so every distinct prompt stayed until some later fire cleaned
+  the map.
+
+- Shapes and the posting lists built from them stay bounded.
+  `PACKSET_SHAPE_CAP` (default 65536, `off` for no cap) is how many
+  claims keep their tokens in the process. A claim that is deleted,
+  forgotten or no longer live drops its shape. Before, every id ever
+  written kept one until the process ended.
+
+- Parsed workspaces stay bounded. `PACKSET_WORKSPACE_CACHE` (default 8,
+  `off` for no cap) is how many keep a live snapshot, an inverted index
+  and status counts. A seat that opens another checkout used to keep
+  every one of those until the process ended, and the cold ones sat in
+  swap. A workspace that falls out is read from the database again.
+
+- The reference's `origin` row says an `agent-derived` write and a
+  hook write are live at once, and are held as proposals only when
+  `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`. It said they
+  were always proposals until an accept.
+
+- `POST /v1/proposals/accept`, `POST /v1/atoms/delete` and
+  `POST /v1/grade` answer a record with no origin as `unknown`, like
+  the other writes. They returned the stored row as it was, so the
+  field was absent. Their answer also leaves out the vector now.
+
+- `packset forget`'s usage text says it keeps a workspace's
+  tombstones. It still said "no tombstones" after the forget began
+  keeping them; a deleted id stays retired and a re-post is refused.
+
+- A rewrite in the same millisecond as a record's previous write
+  updates the search index. The index compared write stamps, and a
+  stamp is only a millisecond, so a second write in that millisecond
+  kept the first write's tokens. The index now follows a hash of the
+  text and entities it indexes.
+
+- `POST /v1/forget` (and `packset forget`) keeps a workspace's
+  tombstones. It removed every key, so after a forget a deleted id
+  could be posted again, and a lesson a person had withdrawn came
+  back under the id a rule still named. The other records go as
+  before, so a scratch run's live ids are free for the next run.
+
+- A record with no origin reads as `unknown` in every answer: search,
+  `GET /v1/atoms` (with `kind`, `embedding=omit` or `as_of`),
+  `GET /v1/atoms/<id>`, the pack, recall, and the record a write
+  returns. Every path but the index's read it as `user-declared`, the
+  person's origin. The stored row stays without the field, and a post
+  that names no origin is still stored as `user-declared`.
+
+- `POST /v1/atoms` with the id of a live record takes the update's
+  rule. The post writes over that record, so it was a second way to
+  relabel a lesson the person's: send the same id with
+  `user-declared` or a `person` basis and the record was replaced.
+  Such a post may lower the origin or basis, or keep them, and
+  carries `provenance_floor`; a rise is refused. Accept is still the
+  one way up.
+
+- A record keeps the lowest origin and basis it has held, as
+  `provenance_floor`, and an update is checked against that as well
+  as the pair it carries now. The writer sets it on the first update
+  that lowers either. A post's value is dropped, and an update cannot
+  clear or raise it.
+
+- An update is checked on the record it would leave. A record written
+  before `origin` existed ranks below every origin, so an update
+  cannot name one for it; an update of its other fields still leaves
+  the field unset. Before, the missing field was read as
+  `user-declared` for the check, and any origin could be written
+  over it.
+
+- An update cannot raise an origin or a basis by a detour. Origins
+  now sit in one order with `user-declared` above the rest, so a
+  lesson moved to `tool-echo`, `peer` or `external` is not relabelled
+  the person's from there, and null or `""` is refused as an origin
+  on any record. `person` sits above every other `source.basis`, and
+  a missing basis is not a person's: a `source` that dropped the
+  basis, or hid it under another key, is not stamped `person` again,
+  and neither is an old preference that never had one. Accept is
+  still the one way up.
+
+- A search hit from the index carries the atom's stored origin. The
+  projection has none, and the filter copied the source without it,
+  so a missing field was read as `user-declared`. The hit copies the
+  stored string, and a record with no origin is marked `unknown`. An
+  origin the index invented does not survive.
+
+- An update cannot turn an agent-derived lesson into the person's by
+  sending `origin` null, `""` or a non-string. Those values skipped
+  the check and validate stored `user-declared`, which only an accept
+  may do. A blank origin is refused, and an update that does not
+  name origin leaves a missing one unset. `source.basis` cannot rise
+  from agent to person on an update either.
+
+- A client-chosen id that was deleted stays retired. `POST /v1/atoms`
+  with that id in the same workspace answers 409, and the tombstone
+  keeps its text and its origin. Before, the post wrote a new live
+  atom over the tombstone, so a lesson a person had withdrawn came
+  back under the id a rule still named. The same id in another
+  workspace is a different atom. Forgetting a scratch workspace
+  still removes its other keys, and a later post may use them.
+
+- A search hit carries `rerank_score`, the cross-encoder's number,
+  or null when the stage did not score that hit. The second stage
+  used to reorder the head and drop the score, so a caller could not
+  tell a confident promotion from a tie. The other fields are
+  unchanged.
+
+- `GET /v1/search?rank=relevance` (and `packset search --rank relevance`,
+  and the MCP search tool's `rank`) chooses the top k by lexical, BM25
+  and cosine. The shipped order is unchanged: a lexical ballot still
+  adds the fourteen-day half-life, and the fuse still scales by
+  retrievability, so a lesson from January sat behind fresher
+  lookalikes that share its words and the cut at k dropped it. The
+  answer echoes `rank`. `GET /v1/status` lists `search.ranks`. An
+  older writer omits `search`, which is how a client falls back.
+
+- A sentence cut no longer panics when a note holds "vs." near
+  char 160. The stop is rewritten to U+2024, three bytes, and the
+  next slice took byte 161 from inside that character, so `ljos
+  note` exited 101 on a note of about 266 characters. The same
+  cut panicked when é, an emoji or a CJK ideograph sat on the
+  index. The slice now stops on the previous character boundary.
+
+- The dense ballot orders by cosine plus a tenth of trust. Age is
+  not in that score. A client reads `dense_rank` as the encoder's
+  order, and one day of the fourteen-day half-life moves the score
+  by about 0.05, the usual gap between the first cosine and the
+  fifth. On held-out packs aged across 0 to 90 days the gold memory
+  ranked first in 2 of 48, 2 of 80 and 2 of 128 cases, against 18,
+  26 and 39 when the same packs were fresh; leaving age out restored
+  those counts and left a fresh pack unchanged. The lexical scores
+  still add the half-life, and the fuse reads them.
+
+- `measurements/forgetting.txt` records the stdout of
+  `cargo run --release -p packset-daemon --example forgetting`. The
+  explanation page cites those retrieval rates, and the example
+  reproduces them, but the run was not in the tree.
+
+- Each release archive gets a GitHub build attestation from the release workflow, so `gh attestation verify` and the ljos installer can check that this repository built it. Releases before this one have none, and the installer counts them as not published.
+
+## 0.15.3 (2026-10-18)
+
+- The README and the reference say that `packset-daemon` has been unpublished since 0.10.0 and that crates.io stops at 0.9.21; `cargo binstall packset` installs `packsetd`. The architecture page put the writer's source in `packset-daemon`; it is in `packset-cli`, and `packset-daemon` only builds it as a library for the examples.
+- No rewrite moves an atom's `ts`, the time it was first written. A link rewrite, a review clock, a fired claim, a closed window, consolidation, an update and a tombstone each put the time of the rewrite there, so all four notes on one ljos ticket read the same second and recall could not tell the newest. Every write now stamps `updated` instead, and status reports that as `last_write_ts`. A pack written before this gets `updated` at open, set to the old `ts`, and `ts` goes back to an earlier `valid_from`, or to an earlier `source.at` when there is no such `valid_from`. Consolidation reads `ts` as the order claims were written, and search recency reads it as their age, so neither now treats a rewritten claim as new.
+
+## 0.15.2 (2026-10-18)
+
+- A new atom kind, `note`, keeps a line from an issue's logbook so recall on that issue finds it. A note must name its `issue`. The one-claim rules (at most two sentences, no sentence of 30 words or more) do not apply to it, and a readability grade or adverb ratio past the ceiling is a `prose.warning` on the answer instead of a refusal. `ljos note` wrote a `summary` atom, and the pack refused three-sentence notes and one 38-word note, so those tickets had no memory copy. Every other kind keeps the gate it had.
+- A write whose text matches a live claim but names another `issue`, `agent`, `about`, `from`, `to` or `name` is stored as a new claim. Before, packsetd answered with the claim already held, so four `ljos note` calls on four tickets with the same words all printed one id and three tickets had no memory of their own. The same text with the same fields is still the claim already held.
+
+## 0.15.1 (2026-10-17)
+
+- A memory store keeps the pages it has used. The map is still 1 GiB, so the file can grow, and a store that already fills that map opens and is cut back to those pages. Before, the file was extended to the whole map at open and came back fully allocated: `ls -ls` reported 1048580 blocks, a gibibyte, for one or two claims. A `lock.mdb` reader from another process, `mdb_stat` included, keeps the file at its present length until that process leaves.
+- An `agent-derived` write and a hook write are live at once, keep their origin, and are reviewed and pruned afterwards. Before, the writer answered `held as proposal ID` and kept them out of search until an accept. `PACKSET_HOLD_AGENT_WRITES=1` holds them as proposals again. An accept still raises origin to `user-declared`, and an update cannot.
+- The sentence count reads a full stop inside a name or a code span as part of it. `.DS_Store`, `foo.rs`, `v0.29.1`, `e.g.`, `i.e.` and a stop between backticks no longer end a sentence, so "Delete `.DS_Store` before you commit. The hook refuses it otherwise." is two sentences, not four, and the pack keeps it.
+- The readability grade reads a name as one unit. An acronym, a hyphenated or mixed-case token, and a piece of a path, variable, version or code span count at most six letters. "gvfsd reads XDG_DATA_HOME when it starts, so set the scratch folder before starting it." and lessons like it pass, and long plain words still count in full.
+
+## 0.15.0 (2026-10-13)
+
+- A search hit the encoder named carries `dense_rank`, its place on the dense ballot from 1, and `cosine`, its plain cosine with the question. The fuse keeps the first ballot's copy of a hit, so a client could not tell a hit the encoder ranked first from one it barely named. On a 20-memory set, the ljos prompt hook dropped 5 paraphrased prompts whose memory shared no word with them, though the encoder ranked 3 of those memories first. The cosine leaves out the trust and recency the score adds, so a client can set one floor on it. A hit the encoder did not name, or any hit from a seat with no encoder, carries neither field.
+- A person's write is stored as written when it reads hard, and the answer carries the reason the prose check gave as `prose.warning`. "The payments service retries webhooks three times with exponential backoff starting at 2 seconds" was refused at readability grade 14.78, and so was a memory of three short sentences, so the person's own words were lost. A claim an agent proposes (origin `agent-derived`) or a hook writes still meets the gate, and is refused as before.
+
+## 0.14.0 (2026-10-11)
+
+- With no encoder, packsetd searches with the pack's own scorers and leaves the milli projection out unless `PACKSET_MILLI` names the binary. Through packsetd on LoCoMo with no encoder, hit@1 was 0.019 with milli as shipped and 0.342 without it. Search through milli now drops the commonest word first when no claim holds every word, not the last one, which kept a question's opening and lost its subject (hit@1 0.267 with milli named).
+- A write (`POST /v1/atoms` and `/v1/atoms/update`) answers without the claim's embedding. The 384 floats were most of every reply and no client read them. The store still keeps them.
+- packsetd logs once when the encoder stops answering, and status then reports the reranker unavailable too. An encoder that could not load ONNX Runtime left search lexical with nothing in the log, while status said the reranker was available.
+- `packset migrate-home` refuses while any writer holds the old home, whatever port it listens on. It checked only the default port. An empty `~/.local/share/packset` no longer hides a full old home, and `packsetd --home DIR` no longer prints the notice about the old home.
+- A preference no longer retires an earlier preference that opens with the same words. `Never force push to main.` and `Never force push to a release branch.` are two rules, and the second used to close the first. A rewrite, a correction or an explicit `supersedes` still closes it.
+- packsetd creates its home with mode 0700 and narrows one it finds open to other users. The LMDB files were already 0600, but the cards and `proposals.jsonl` were written 0644 inside 0755 directories, so another local user could read them without the owner token.
+- The client keeps the owner token home when another user's process listens on the writer's loopback port. Anyone could answer `/health` first and collect the token from the next request. Linux only; elsewhere the token goes as before.
+- The README's LongMemEval_S figure says what it measures: session retrieval over 470 answerable questions, 0.889 hit@1 and 0.949 recall@5 for BM25+ fused with e5-large-v2. It is not answer accuracy, which is 0.549 with a local seven-billion-parameter reader. The run and its method are on the explanation page.
+- packset-embed fetches no model while `LJOS_OFFLINE` or `HF_HUB_OFFLINE` is set. The rerank, late interaction and learned sparse models used to be fetched on first use even with `HF_HUB_OFFLINE=1`. A model already in the hub cache still loads. `LJOS_OFFLINE` is the seat-wide switch that ljos reads too.
+- `cargo binstall packset` builds from source on a target with no release tarball. The `compile` strategy was off, so binstall failed on every target the release does not build, x86_64 macOS, aarch64 Linux and Windows among them. The packset crate links no native runtime, so that build needs only a Rust toolchain. `packset-embed` still takes the release tarball or nothing, since its source build needs ONNX Runtime first. cargo-quickinstall stays off.
+- The install lines say `cargo binstall --locked`, which binstall passes to that source build so it takes the versions in `Cargo.lock`.
+- A source build of `packset-embed` with no ONNX Runtime in reach stops within the first minute and prints the recipe: build the runtime with `build-onnxruntime.sh`, then point `ORT_LIB_PATH` at it. Before, `cargo install packset-embed` compiled for minutes and failed at the linker with an error that never named the runtime. The check looks where `ort` does: either feature, `ORT_LIB_PATH` or `ORT_LIB_LOCATION`, or a `libonnxruntime` of 1.24 or newer that pkg-config sees. `PACKSET_EMBED_NO_ORT_CHECK=1` skips it.
+- packsetd answers its owner only. At start it keeps a random token in `{home}/token`, mode 0600, and answers 401 to any request but `GET /health` that does not send it as `Authorization: Bearer TOKEN`. Before, any local user could read the pack and write a preference the prompt hook would inject. `packset-client` reads the token from the same home (`PACKSET_TOKEN_FILE`, `PACKSET_HOME`, or the default home) or from `PACKSET_TOKEN`, and a 401 names the likely cause. `PACKSET_AUTH=off` drops the check for a client that cannot send the token. ljos up to 0.28 sends none, so it needs a release with this client.
+- The default pack home is now `$XDG_DATA_HOME/packset` (`~/.local/share/packset`). A seat that has `~/.ljos/memory` and not the new path keeps using the old one, and packsetd says so at start. `packset migrate-home` moves the old home to the new path with the writer stopped and leaves a link at the old name, so a client that still looks there finds the token. A home named by `PACKSET_HOME` is never moved.
+
+- The listing without vectors, the one a status line reads, keeps the worker that health, status and the workspace list keep. Under the hammer's cross-encoder load it answered 158 of 158 asks within 300 ms, against 3 of 67 before.
+- Searches and writes that a worker has read but cannot yet run wait in a queue of at most `PACKSET_QUEUE`. One past that gets 503 without running.
+- A write made while a search holds the live set copies pointers, not claims. With sixteen hammer clients writing into one workspace, the upsert stage traced 5.4 ms at p95 against 15.6.
+- Statuses that overlap after a write count the workspace once.
+- `packset-client` asks a busy writer again. The waits are 50, 150 and 450 ms, inside the request's timeout.
+- A missing encoder or index binary is looked for again after five seconds. A found one is kept.
+- The reference lists `PACKSET_TIMEOUT_MS`, `PACKSET_WORKERS` and `PACKSET_QUEUE`.
+- `packset-core`'s `Ask`, its search functions, `due_hits`, `recall` and `Graph::from_atoms` take any slice that lends a `Record`, so the writer passes its shared live set without a copy. A caller that passes an empty slice now names its element type.
+- `-h` or `--help` on any verb prints that verb's usage and runs nothing. Before, `packset forget --help` forgot a workspace called `--help`, and `packset stop --help` stopped the writer. A flag a verb does not take is refused, extra arguments are refused, and `--` ends the flags, so `packset forget -- -odd` names a workspace that starts with a dash. `packset-mcp --help` prints a line instead of starting the server.
+
+## 0.13.0 (2026-10-10)
+
+- An `agent-derived` write and a hook write are one open proposal for that text. The proposal keeps the atom. Accept stores that atom, records the acceptance by raising its origin to `user-declared`, and a second accept returns the same atom. A mined proposal is still a derived lesson.
+- Every atom carries an `origin`: `user-declared`, `agent-derived`, `tool-echo`, `external` or `peer`. A stored atom with none reads as `user-declared` and is left as stored. An `agent-derived` write and a hook write are proposals until an accept. Content typed `authoritative` on a tool echo or an external atom ranks and promotes at that origin.
+- Seat mail is stored as atoms. A `message` is one letter and a `receipt` is one read. A `group` atom is one membership change. The two-sentence cap does not apply; the text stops at 500 characters. A later mail atom does not close an earlier one, and a repeat is kept. Search and recall leave mail out unless `kind` names it.
+- `packset-embed` links a system or source-built Open Neural Network Exchange (ONNX) Runtime. The prebuilt runtime from cdn.pyke.io is the `download-binaries` feature. A hub checkout at `PACKSET_EMBED_MODEL_PATH`, or under the cache at `user/<model>/`, is the model, so a seeded directory is not fetched. An absent encoder leaves a sitting on the lexical ballots; doctor still reads `embedder.available`.
+- The explanation names Zep's graph, which records when a fact became true and when the store learned it, and names A-MEM beside agentic memory. The measured rows are unchanged.
+
+## 0.12.1 (2026-10-09)
+
+- `snapper-fmt` is the published 0.11.9. A git branch cannot be published.
+- The pinned toolchain installs rustfmt and clippy.
+
+## 0.12.0 (2026-10-09)
+
+- The writer keeps accepting after the process runs out of descriptors.
+  Under `tiny_http` every connection held a thread and two descriptors,
+  and the first `Too many open files` ended the accept loop for good. Two
+  hundred clients that gave up after 300 ms did it, and so did 1100 held
+  connections under a 1024-descriptor limit. The same loads now leave the
+  writer answering.
+
+- A request waits in a queue of `PACKSET_QUEUE` connections (default
+  128). Past that it is answered 503 with `Retry-After: 1`; `/health`
+  still answers. A client that has gone is not served. A request that
+  panics gets a 500, and its worker takes the next.
+
+- A write no longer copies the pack or waits for the search index.
+  Narrowing its peers copied every claim in its scope once any claim held
+  a `set`, as persona lessons do, and its index update queued behind the
+  indexer run. On the hammer's sixteen clients writing into one
+  workspace, whose claims hold no set, a write traced 32 ms at p95
+  against 37.
+
+
+- Finding the encoder and search binaries no longer walks the
+  filesystem on every call: `packset-embed` and `packset-milli`
+  discovery (the binary beside the writer, the tree candidates, the
+  `PATH` scan) runs once per process and is kept, while an explicit
+  `PACKSET_EMBED` or `PACKSET_MILLI` still answers fresh from the
+  variable every time. A burst of searches used to pay several
+  `current_exe` reads and a full `PATH` scan per request -- per
+  encode, per batch, per rerank, per flush -- for binaries that do not
+  move under a running writer; lexical-only seats paid it too, on every
+  request, for an encoder they never had. Pinned by
+  `an_explicit_encoder_beats_any_cached_discovery`,
+  `discovery_finds_an_encoder_on_the_path`, and the two `milli`
+  mirrors.
+- A document batch leaves one slot free while a query waits: writes are
+  background work and searches are interactive, so when the pump holds
+  a query behind a document batch the documents spread over one slot
+  fewer (`spread_slots`). With no query waiting they spend the whole
+  pool, queries always spread, and single-slot hosts never consult the
+  queue at all. The peek is advisory -- a query arriving just after
+  costs one chunk, the same as today. Pinned by
+  `document_batches_leave_a_slot_for_a_waiting_query`.
+- A pooled dense batch spreads over the free encoders instead of
+  queueing whole behind slot zero: the pump still coalesces arrivals
+  into one batch, but `run_group` now cuts it into one chunk per live
+  slot and encodes the chunks at once (`encode_spread`), reassembled in
+  order. Before, the single pump thread held one slot for the whole
+  batch, so a second model neither answered nor warmed -- the first
+  burst paid every model load in series on the first slot. A one-chunk
+  batch encodes exactly as before, so single-slot hosts and lone texts
+  never pay for a thread, and a failed chunk fails the batch the way
+  one `encode_now` would: a partial answer would silently thin the
+  panel. Pinned by `a_batch_spreads_over_at_most_one_chunk_per_slot`
+  (the planner) and `a_batch_encodes_on_one_child_per_free_slot`
+  (four texts, two workers, two stub children).
+- A pooled dense wait takes whichever encoder frees first instead of
+  queueing behind slot zero: `query_slot` used to hand every waiter the
+  first slot when all were busy, so a freed second encoder idled while
+  searches still lined up. The encode path now polls the pool a
+  millisecond at a time (`lock_dense`) and holds the first free slot.
+  Single-slot hosts block on their one child exactly as before, and
+  neither path takes a deadline -- a dense ballot that gave up under
+  load would silently thin the panel. Pinned by
+  `waiters_take_whichever_pool_slot_is_free`. The reference also said
+  `PACKSET_EMBED_QUERY_WORKERS` defaulted to 2; the code moved 2 to 1
+  in an earlier memory fix but the docs never followed, so they now
+  say 1.
+- A requested rerank over a lone hit reports `settled` and never
+  reaches the model: one candidate cannot be reordered, so the forward
+  pass would only return the same order. The default hook path asks for
+  the rerank on every prompt, so a small seat paid a cross-encoder
+  call per single-hit search for nothing; those calls are gone, and
+  contended bursts no longer queue them behind the single slot's
+  400 ms patience. Pinned by
+  `a_lone_hit_settles_the_rerank_without_a_model_call` (the stub's
+  sentinel file proves no invocation). A broken reranker still shows
+  as `absent` on the next multi-hit query.
+- `packset forget WORKSPACE` (`POST /v1/forget`) drops a scratch
+  workspace's atoms whole -- no tombstones, no deed, the keys are gone.
+  Retraction stays `packset atoms/delete`, which names the deed that
+  withdrew the claim; this is what a per-run scratch workspace calls on
+  its way out. Smoke and herd runs each write a per-run workspace into
+  the long-lived writer, so without it every run left its atoms behind;
+  both scripts now forget theirs on exit. Pinned by
+  `forgetting_a_workspace_drops_only_its_keys` and
+  `forgetting_a_scratch_workspace_leaves_the_seat`.
+- `PACKSET_URL=off` is no pack, not the loopback writer: data commands
+  refuse with "no pack on purpose" instead of silently falling back to
+  the port, which wrote to a writer the seat had turned off. The seat
+  already honored `off` this way (`ljos` refuses with "no pack on
+  purpose"); the CLI now matches it, and the port parameters its data
+  commands no longer needed are gone. Pinned by
+  `off_is_no_pack_not_the_loopback_writer`; verified live that search
+  and status refuse under `off` and work without it.
+- The two `packset-client` workspace tests hold a lock around their
+  environment rewrites: they mutate process-global `HOME` and
+  `PACKSET_WORKSPACE` in parallel test threads, and one run in five
+  read the other's value and failed. Fifteen consecutive runs green
+  since.
+- The `packset` CLI honors a named `PACKSET_URL` (`INSIDE_MEMORY_URL`
+  is its alias) on data commands: it used to ignore the URL and talk
+  to the loopback port, silently writing to the wrong store, while the
+  library client and the seat honored it. Data commands now resolve
+  exactly like `PacksetClient::from_env`; `status` health-checks the
+  named writer instead of gating on the port, and writer management
+  (`ensure`, `start`, `stop`) stays port-pinned on purpose. Verified
+  live: status, remember, and search through a named URL against a
+  scratch writer, with the port fallback and management path
+  unchanged.
+
+- Every DOI the explanation cites resolves to the cited work (Crossref
+  titles, doi.org redirects, Semantic Scholar second witness): the two
+  records Crossref's metadata API 500s on -- Anderson and Schooler's
+  environment statistics (doi:10.1111/j.1467-9280.1991.tb00174.x) and
+  the Ebbinghaus replication (doi:10.1371/journal.pone.0120644) --
+  confirmed title, authors, and year against the records. No citation
+  changes needed.
+
+- `status` no longer re-parses the pack on every call: counts live in a per-generation cache beside the live set, so ten thousand atoms answer in about a millisecond warm instead of eighty. Measured on a 10k-lesson workspace (80ms to 1.1ms p50); a write moves the generation and the next status recounts, pinned by `status_counts_follow_writes`.
+
+- `rust-toolchain.toml` pins 1.89.0: the default 1.83 cannot parse a dependency manifest in the tree (a fuzz helper's edition-2024).
+- The explanation positions the pack against the write-path systems: Letta/sleep-time, A-MEM, MemoryBank and Generative Agents, against the no-model-writes rule.
+
+- `/health`, `/v1/status` and `/v1/workspaces` answer on a worker that a
+  search or a write is not holding. The pool stays four, and eight at
+  most. With one worker, that worker runs every request in turn.
+
+- The explanation names who writes in Letta, agentic memory, MemoryBank,
+  Generative Agents and HippoRAG. The measured rows are unchanged.
+  Sleep-time compute is a model thinking before the question. It is not
+  a reorganisation of this store.
+
+- A trust row scoped by its entities does not close the unscoped row of
+  the same voters. An empty entity list and a missing one are the same
+  unscoped row.
+
+- A kind: `outcome`, the option an issue closed on (`issue`, `choice`).
+  The issue's ballots and its outcome say which voters were right, so a
+  settle can discount voters who err together. `add` starts no review
+  clock for an outcome, as for a trust row or a persona, and the sweep
+  never forgets one.
+
+- A rewrite needs the same `from`, `to`, `about`, `agent`, `issue`, and
+  `name`. Two trust rows to two different voters at the same weight share
+  five of their seven tokens, so the second replaced the first. A seat
+  that wrote five rows kept one; a panel of five forecasts kept one, so
+  the surprisingly popular reading never ran.
+
+- A `/`, `_`, `*` or `+` no longer holds a sentence open. snapper reads
+  them as Org emphasis marks, so text that cited two DOIs or named two
+  paths read as one long sentence. The text scored a high reading grade,
+  and an atom could be refused as very hard.
+
+## 0.11.0 (2026-09-29)
+
+- A search that finds the cross-encoder busy waits 400 ms, then keeps its
+  first-stage order and reports the stage absent, instead of queueing
+  behind every other search. The cross-encoder reads at most 192 tokens a
+  pair (`PACKSET_RERANK_MAX_LENGTH`).
+
+- A recalled review promotes the claim to `horizon:standing`.
+  Consolidation does the same for the claim that replaced an earlier
+  one. A lapse leaves the horizon as it was.
+
+- A write refuses a private key block, an age secret key, GitHub, Slack
+  and AWS tokens and a JSON Web Token, and text that tells the model
+  reading it to ignore its instructions. The refusal names the kind it
+  found; the generic key-assignment refusal reads as before.
+
+- A claim that was fired counts a use in its review record, and the sweep
+  no longer forgets a used claim by neglect; it still lapses. Before this a
+  lesson nobody graded was tombstoned after three missed reviews, however
+  often a sitting fired it.
+
+- A search hit carries the `source` of the claim it names on both engines,
+  and a milli hit returns the claim's entities as a list from the pack's
+  record rather than the index's joined string.
+
+- A search waits for a projection flush already running, so two searches a
+  moment apart rank on the same engine. `packset stop` returns once the
+  port is free, so `packset ensure` straight after it starts a writer.
+
+- `GET /v1/atoms?embedding=omit` lists atoms without their vectors, and the
+  client reads them that way. An encoder that did not answer is reported
+  unavailable in status.
+
+- The landing page shows the first command and what it answers.
+
+- MemoryAgentBench protocol run covers all four competencies. Writes
+  are Remember / Prefer / Accept; a raw unit is a refusal, then kept as
+  `Remember: ` of the same words. Retrieval is over admitted claims.
+  The table names every competency and a refusal row; an un-run split
+  prints `—`. Replay: `cargo run --release -p packset-daemon --example
+  memoryagentbench -- data/mab`. The fixture
+  `data/mab_protocol.jsonl` is the rerun test.
+
+- `packset search --as-of TS` ranks the claims whose `valid_from` /
+  `valid_to` window contained TS, the same window `GET /v1/search?as_of=`
+  and `packset atoms --as-of` already read. A stamp the pack will not
+  parse is refused. Live-now search still drops a closed claim.
+
+- `packset search --rerank` runs the measured cross-encoder second stage
+  over the top 20, the same stage `GET /v1/search?rerank=1` and
+  `PACKSET_RERANK=1` on the writer already request. Off by default. An
+  absent or broken child leaves the first-stage order and reports
+  `rerank: absent`. The locomo report prints the second-stage wall.
+
+- A refused Remember says why and how to fix it: which sentence reads very
+  hard, its word count, the limit, and to split it at a conjunction. The
+  grade and adverb refusals name their fix too. `ljos remember` and
+  `ljos finish --lesson` print the text unchanged.
+
+- The 0.9.16 fill note quoted 236 s. Round-15 close on the build host
+  was 127.3 s at 10000 claims (`hook-scale-15900`). What still grows
+  per write is the linear id map (`by_id` collect) and the snapshot
+  patch (`patch_live` / `patch_shown` position scans, `Arc::make_mut`
+  under a concurrent search). At live=9999 the write trace is snapshot
+  0.0 ms, dedup 11.2 ms, upsert 17.5 ms (`hook-scale-writes-15900`):
+  snapshot plus dedup do not dominate, so the leftover stays those
+  linear maps with small constants. Measure it with
+  `PACKSET_TRACE_WRITES` plus `HAMMER_SHARED`, not by growing herd
+  occupancy smoke.
+
+## 0.10.1 (2026-09-20)
+
+- `cargo binstall packset` takes the GitHub tarball (packset, packsetd,
+  packset-mcp) and skips cargo-quickinstall, which only had the default
+  binary.
+
+## 0.10.0 (2026-09-20)
+
+- One crate installs the tool: `cargo install packset` (or `cargo binstall
+  packset`) gives `packset`, `packsetd` and `packset-mcp`. The writer and
+  the MCP surface are built by the `packset` crate from their source trees;
+  `packset-daemon` is a library in the workspace and `packset-mcp` a source
+  tree, neither published. `packset-core`, `packset-client` and
+  `packset-embed` stay published: two are libraries other tools depend on,
+  the third is the optional encoder. Nothing already on crates.io is
+  yanked.
+
+## 0.9.21 (2026-09-20)
+
+- The reference lists `packset sweep`, `POST /v1/sweep`, the `forgotten`
+  field and its reasons, `PACKSET_LIVE_CAP`, `PACKSET_TRACE_WRITES`, the
+  status rows `live_cap` and `forgotten_by_reason`, and every field an
+  activation answers with (`weak`, `held`, `as`).
+- Every crate page carries the README.
+- `just milli` and `just embed` gate on `PACKSET_BUILDER=1` in the
+  builder's environment rather than on its host name; the identity tests
+  use `example.com` remotes.
+
+## 0.9.20 (2026-09-20)
+
+- A persona's lens over the shared graph: `GET /v1/activate` and `POST
+  /v1/fire` take `as=NAME`, the weights a persona fires are written under
+  `link_weights_by[NAME]` and read back only through that lens. Nodes and
+  links stay the pack's; several personas walking one island each
+  tighten the paths they walked and the seat's graph moves only when the
+  seat fires. `PacksetClient::activate_as`, `fire_as`, `atoms_in_set`.
+
+## 0.9.19 (2026-09-20)
+
+- The cue that fired an island holds it for the hour as the claims do:
+  a closing that remembered a lesson first grew the island by one and
+  the next closing fired a new set for the same title. Eight closings on
+  one title now fire once; seven read `held`.
+
+## 0.9.18 (2026-09-20)
+
+- An island fires once an hour: a second fire of the same claims within
+  the hour is held and says so (`held: true` on `/v1/fire` and
+  `/v1/activate`). Several seats, or several personas, closing sittings
+  on one issue tighten its links one step, not one step each.
+
+## 0.9.17 (2026-09-19)
+
+- `GET /v1/atoms?kind=persona` answers one kind; `PacksetClient::
+  atoms_of_kind` asks for it. A roster of a dozen personas no longer
+  reads every lesson's embedding.
+- Status counts the forgotten by reason (`forgotten_by_reason`: the
+  live cap, neglect, or the reason a forget gave).
+- The hammer's herd arm (`HAMMER_SHARED=1`) writes every client into one
+  workspace, each stamping its seat, with token-distinct claims, and ends
+  by counting live plus closed against the writes: 800, 3200 and 6400
+  written, none lost, on the build host at 4, 16 and 32 clients.
+- Under a herd the overlap candidates come from the shortest posting
+  lists (a claim carrying six tenths of the tokens sits in one of them),
+  and the search index is rebuilt once per stale set under a lock and
+  cached under the set's own generation; readers that arrive during a
+  build wait for it, and a build finished after a further write is kept
+  and patched from. Shared-workspace throughput at 16 and 32 clients
+  went from 64 and 49 requests a second to 91 and 66 on a loaded node.
+
+## 0.9.16 (2026-09-19)
+
+- The write path stops reading the pack per write. The search index is
+  projected in batches: a write queues its documents and returns, one
+  indexer run lands the batch when the burst pauses (200 ms quiet, at
+  most three seconds or 512 documents), and a read of the index flushes
+  the queue first so a search sees its own writes. The replacement rule
+  compares against the claims sharing a token, a head word or an entity
+  with the new claim, read from postings over the shaped pack, not
+  against every live claim: a candidate carries six tenths of the new
+  claim's tokens (the overlap rule's jaccard 0.6), or opens with the
+  same three words (the head rule), or shares an entity (the correction
+  rule), or is named in `supersedes`; the duplicate check runs over the
+  same candidates. The index cache keys on ids and stamps so the live
+  set stays unshared between writes and is patched in place; a patch
+  re-derives links only when an id departs or an arrival is one a cut
+  link named. The pack is shaped once per process and each write shapes
+  what it wrote. A fill of 10000 claims on the build host went from
+  1224 s to 236 s, the hook on a prompt at 10000 from 0.18 s to 0.12 s
+  cold and 0.07 s warm.
+- `PACKSET_TRACE_WRITES=FILE` writes one stage-clock line per write
+  (prepare, snapshot, dedup, replace, links, upsert, project, cap, in
+  milliseconds, with the live count), which is how the growth above was
+  found and is what to read when a fill slows with the pack.
+
+## 0.9.15 (2026-09-19)
+
+- An entity `seat:<name>` names the seat that wrote a claim and is not a
+  topic: it links and matches nothing. Every write carries one, so a
+  pack written by one seat had every claim sharing an entity with every
+  other and the link step read the whole pack on each write. The peers
+  that can qualify are handed to the link step borrowed, not cloned.
+- The inverted index follows a write in place: a record rewritten at its
+  position is re-indexed under its ordinal, an appended record is
+  pushed, and only a set whose order moved is rebuilt. The first hook
+  after a write no longer tokenises and indexes the whole pack.
+
+## 0.9.14 (2026-09-19)
+
+- Neglect reads the recalls a claim ever had, a counter no lapse resets,
+  where it read the run since the last lapse; a lesson recalled and then
+  missed is lapsed, not forgotten. A review block written before the
+  counter reads its `reps`.
+- A tombstone is never in the live set, whatever review clock it kept
+  from before it was forgotten; a forgotten claim is not recalled as due.
+- A write folds itself into the shown live set in place instead of
+  cloning every live record and refiltering every link; a fill of 10000
+  claims was quadratic. A link cut because its target was absent returns
+  when the target arrives.
+- Forgetting by neglect: a review left due past twice its interval is
+  lapsed as a missed review would be, its stability halved and the miss
+  counted; a never-recalled forgettable claim missed three times is
+  tombstoned, `forgotten: neglect`. Preferences, rules, readings, goals,
+  trust rows and personas lapse but are never forgotten this way. The
+  writer sweeps a workspace on the first write of a day; `POST
+  /v1/sweep` and `packset sweep` run it on demand.
+- The writer keeps one shape per claim, the tokens, head words and
+  entities the replacement and linking rules read, and linking reads only
+  the peers that share an entity with the new claim, closed under their
+  links. A write no longer tokenises the pack.
+
+## 0.9.13 (2026-09-19)
+
+- Recall: with a cue in hand the due queue takes at most a quarter of the
+  budget and only claims that touch the cue; a hint matches an atom on
+  half its tokens rather than one; within a tier retrievability comes
+  before the write time. A pack a herd leaves with hundreds of due claims
+  no longer answers every cue with them.
+- `examples/forgetting.rs` ranks LRU and the recall path's due-first
+  order beside the decay slots and writes the table as JSON with
+  `FORGETTING_JSON`; the keep-testing order is a review order, not a
+  retrieval ranking (kept claim first 0.000 against 0.947 for
+  retrievability).
+- `scripts/terra/forgetting.sbatch` and `scripts/terra/hammer.sbatch`.
+
+## 0.9.12 (2026-09-19)
+
+- A live cap: past `PACKSET_LIVE_CAP` live claims in a workspace (twenty
+  thousand when unset, `off` for none) the write that crossed it forgets
+  the least retrievable forgettable claims, tombstoned with
+  `forgotten: the live cap`; preferences, rules, readings, goals, trust
+  rows and personas are never forgotten this way. The write's answer
+  says `forgot: N`; `/v1/status` says `live_cap`. A herd of seats writing
+  into one pack cannot grow it without bound.
+- Search hits carry the atom's `entities`, so a reader can see which seat
+  wrote a claim (`seat:<name>`), which persona holds it, which habit it
+  reads.
+
+## 0.9.11 (2026-09-19)
+
+- Many seats may run `packset ensure` at once: a spawned writer that
+  exits on the port or the store lock waits for the sibling's writer
+  within the startup budget and reports it, and `ensure` waits for
+  `/health` to answer as packsetd before printing the URL.
+- Clippy with warnings denied is clean again: the stated MSRV is the
+  one the code needs (1.88), two unused encoder helpers are gone, one
+  test attribute on the workers test.
+- `scripts/terra/stack.sbatch` builds the pack's binaries on the build
+  host.
+- `cargo install packset` installs `packset` and `packsetd`.
+- `packset-mcp` loads `~/.config/ljos/env` and uses that
+  `PACKSET_WORKSPACE`, else `seat`. It no longer defaults to `default`,
+  which is how its search missed the workspace `ljos` remembers into.
+
+## 0.9.9 (2026-09-15)
+
+- Concurrent encodes share one forward pass: waiting query lines are
+  batched to the single embed child.
+
+## 0.9.8 (2026-09-15)
+
+- One `packset-embed` child encodes query and document. The prefix is
+  per line. Concurrent HTTP searches share that child. Extra models
+  still cost `PACKSET_EMBED_QUERY_WORKERS`.
+
+## 0.9.7 (2026-09-15)
+
+- packsetd no longer warms a pool of encoder children at start. Default
+  query workers is 1. HTTP workers default to 4 (cap 8), not core count.
+  Status counts atoms without collecting them.
+- `paper_a_live` example: write-policy table on published LongMemEval_S
+  and MemoryAgentBench json. Measured, not fixture. Live rows in
+  =docs/orgmode/results/paper-a-live.org=.
+
+## 0.9.6 (2026-09-15)
+
+- Paper A fixture table: LongMemEval_S, MemoryAgentBench, MemConflict.
+  Writes go through `admit_seat_write`. The table is a fixture, not SOTA.
+- `admit_seat_write`: Remember / Prefer / Accept only. Raw context
+  refuses. MemoryAgentBench write-policy gate.
+- `ProtocolReport` names the four competencies and prints `—` when a
+  split was not run. Refusal is a row, not a zero hit rate.
+
+## 0.9.5 (2026-09-15)
+
+- Bare `packset search` and `atoms` load `~/.config/ljos/env` so they
+  speak the same workspace `ljos doctor` prints. `status` counts that
+  workspace. `status --all` is the old global count.
+
+## 0.9.4 (2026-09-15)
+
+- Search no longer prepends the review clock. Due personas were still
+  occupying half of every result list. `ljos due` is the clock.
+
+## 0.9.3 (2026-09-15)
+
+- A due atom with no query overlap is on the clock, not in search.
+  Due personas were filling every query at score 3.1.
+
+## 0.9.2 (2026-09-14)
+
+- `packset-mcp --version` prints and exits so `ljos doctor` can
+  version it with the rest of the set.
+
+## 0.9.1 (2026-09-14)
+
+- The GitHub release tarball includes `packset-embed`. Without it the
+  writer reports `embedder.available: false` and search stays lexical.
+
+- An island seeded by hits fewer than two scorers agreed on is reported
+  `weak` and is not fired: activation from weak seeds flows to the
+  best-connected cluster whatever the cue, and firing it wires the wrong
+  links tighter. The answer carries `agreed_seeds` and whether the dense
+  ballot ran (`dense`).
+- `GET /v1/islands` returns communities by modularity (the Louvain
+  method) with the partition's modularity and a structural signature per
+  island (Weisfeiler-Lehman refinement over the links), and reports label
+  propagation's count and modularity beside them.
+- `consolidate` buckets only by the entities a claim carries and its
+  first words, and passes over a bucket of more than 64: the entities
+  read off a text made one bucket of every claim and a pass over every
+  pair, 2.7 s at a thousand claims.
+- The writer reads `PACKSET_HOME` for its home, the name the pack's other
+  variables share; the older names still answer. Two writers on one host
+  with different homes no longer open the same store, and each writes
+  its own log (`packsetd-PORT.log`).
+- A network arm: with `PACKSET_MAB_GNN` naming a directory of inferred
+  edges (one JSON a record, from a graph neural network trained to tell
+  the record's own edges from non-edges), the second hop is the facts the
+  network believes the first hop's facts link to.
+- The two-hop arm keeps the first hop's five strongest facts ahead of
+  the second hop's, so a single-hop question keeps its answer in front.
+- A saddle arm: with `PACKSET_MAB_SURVEY` naming a directory of
+  landscape surveys (one JSON a record: cores with members, saddles with
+  bridges), the second hop is the facts nearest the saddles out of the
+  cores the first hop's facts descended into.
+- The two-hop arm measured on conflict resolution, same job and reader:
+  0.576 against 0.535 for the live facts alone (+0.041, interval +0.014
+  to +0.070); multi-hop rows 0.21 to 0.40 against 0.06 to 0.31; single-hop
+  rows give back one to nine points to the second hop's facts.
+- A two-hop arm on the MemoryAgentBench fact lists: the objects of the
+  strongest live facts become second queries, and the second hop's live
+  facts follow the first's, so a multi-hop question sees the bridge and
+  the fact it leads to with every superseded fact already closed.
+
+## 0.9.0 (2026-09-13)
+
+- MemoryAgentBench accurate retrieval measured (2000 questions, ten
+  chunks, 7B reader): the fused panel 0.675 of the questions, lexical
+  0.674, five chunks 0.649; averaged by source 0.644 and 0.642, against
+  the published BM25 0.605 and HippoRAG-v2 0.651 with a GPT-4o-mini
+  reader.
+- The reading lists the days between every pair of retrieved sessions,
+  by default: over the same 350 questions the raw prompt answers 0.431,
+  the marked distances 0.420, the listed gaps 0.460 (temporal reasoning
+  0.315 to 0.386, knowledge-update 0.792 to 0.819). The store does the
+  date arithmetic; the reader places the events.
+- MemoryAgentBench conflict resolution measured (800 questions, ten
+  facts, 7B reader): the fused panel 0.33 to 0.55 single-hop; the same
+  hits with superseded facts closed by the replacement rule 0.76 to 0.86
+  single-hop, 0.480 over the split; multi-hop stays under 0.3 for every
+  arm, as it does for every published system.
+- Test-time learning on LoCoMo measured (1540 questions, ten turns): the
+  baseline 0.584; the review clock moved by the judge's verdict 0.445;
+  moved by the gold evidence 0.544. Retrievability that decays every
+  unreviewed turn from the start loses more than confirmed turns gain,
+  on a benchmark whose every question asks about something not yet
+  asked. The review clock is for what a seat returns to, not for a
+  haystack read once.
+- `--bench mab` reads a dump without the dataset's words: the positional
+  dataset argument is the directory of split files, and questions and
+  answers come back by split, row and index.
+
+## 0.8.0 (2026-09-12)
+
+- The timeline reading measured against the raw prompt (350 questions,
+  four types, 7B reader): 0.420 against 0.431 overall, temporal reasoning
+  0.339 against 0.315, multi-session 0.331 against 0.372. Within noise and
+  not a lever for this reader; kept as an option.
+- Test-time learning on LoCoMo: the dump carries the fused list with
+  scores, and `scripts/longmemeval_qa.py --learn fsrs` answers each
+  conversation's questions in order, grades the turns the reader was
+  handed by the judge's verdict, and reweighs the next question's hits by
+  the review clock (the FSRS update in packset-core); `--learn oracle`
+  grades by the gold evidence, `--learn none` is the baseline. The review
+  clock measured on public data, moved by feedback rather than labels.
+- `POST /v1/consolidate`: the write-time replacement rule run over the
+  live set in the order it was written, so a pack written before the
+  rule, or filled by import, closes what it should have; `apply` false
+  reports the pairs and writes nothing. Pairs are drawn from claims that
+  open with the same three words or share an entity, so the count stays
+  cheap on a large pack.
+- A claim replaces an earlier one of the same kind when the two share a
+  head and differ in the object (`The default fuse is Borda` to `The
+  default fuse is CombMNZ`; `Roy Rogers is married to Dale Evans` to
+  `... John McVie`, which a set measure missed), and a claim without
+  entities is read by its text: the seat's own lessons name none, so the
+  pack had never closed one. Entities on both sides still have to meet.
+  The MemoryAgentBench live arm uses this rule.
+- Every fused hit says how many ballots named it (`ballots`) out of how
+  many ran (`of`), so a reader can keep to what the scorers agree on.
+- A MemoryAgentBench harness (`examples/memoryagentbench.rs`): the
+  accurate-retrieval and conflict-resolution records chunked as the
+  benchmark chunks them (facts one a document), lexical, dense and fused
+  arms, and for fact lists a latest-first arm and a live arm in which a
+  later fact with the same head closes the earlier one, the pack's
+  supersession stated as a rule. `scripts/longmemeval_qa.py --bench mab`
+  reads the dump with positions marked and scores by substring match, the
+  LongMemEval rows by their judge.
+- The LongMemEval harness gains an island arm: sessions link to their five
+  nearest by dense cosine, the fused top ten seed the writer's own
+  spreading activation over that graph, and the cluster is ranked. The
+  island the seat reads at a sitting, measured on the benchmark, and a
+  measured negative as a ranking: hit@1 0.377 against the fused 0.889 over
+  470 questions, recall@10 unchanged at 0.981. Activation follows the
+  graph's degree, not the question; the island is orientation beside the
+  hits, which is where the seat prints it, not a ranking in their place.
+
+## 0.7.2 (2026-09-12)
+
+- The lockfile follows the version bump. The release builds of v0.7.0 and
+  v0.7.1 refused `--locked`: the crates' path dependencies still required
+  0.6.0, so the lock could not move. They now require the workspace
+  version.
+
+## 0.7.1 (2026-09-12)
+
+- The version bump alone; its release build was refused (see 0.7.2).
+
+## 0.7.0 (2026-09-12)
+
+- Search hits and island rows carry `ts`, when the memory was written, so
+  a reader can lay what it recalls on a timeline; a hit from the index
+  projection takes its stamp, kind and review date from the pack's record.
+- LoCoMo answer accuracy, 1540 questions, 7B reader and judge, dated
+  turns: labelled evidence 0.747, fused panel 0.637 at twenty turns and
+  0.577 at ten, lexical 0.488 at ten. Fused over lexical by nine points at
+  the same depth; depth buys most on multi-hop questions.
+- The full answer-accuracy run, 470 questions, top five sessions, 7B
+  reader and judge: labelled sessions 0.634, fused panel 0.549, lexical
+  0.532; fused leads where retrieval decides, the reader decides the rest.
+- The window arm measured: fifteen of 470 questions name a time the parser
+  reads; on temporal reasoning hit@1 0.811 to 0.835, recall@5 0.899 to
+  0.878, the rest unchanged.
+- A window arm on LongMemEval: the time a question names (a date, a month,
+  a count of units ago, last week or month) read into a window over the
+  sessions and those inside scored twice, a filter the question asks for
+  rather than a decay.
+- The answer-accuracy script hands the reader the seat's reading of time:
+  every session marked with its distance in days before the question and
+  the rule that a later session supersedes an earlier one on the same fact
+  (`--no-timeline` for the benchmark's raw prompt); `--types` runs a subset.
+
+## 0.6.0 (2026-09-12)
+
+- The writer keeps two query encoders (`PACKSET_EMBED_QUERY_WORKERS`), so
+  agents asking at once are answered side by side instead of one behind
+  the other; eight concurrent hooks took 281 ms wall on one encoder and
+  243 ms on two once warm. The pool is warmed at start, since the first
+  use of a cold second encoder cost 770 ms.
+- LoCoMo at turn granularity, 1986 questions: the fused panel finds an
+  evidence turn first 0.414 of the time and within ten 0.759, against
+  0.318 and 0.647 for the lexical ballot.
+- A recency arm on LongMemEval, measured as a negative: scaling the fused
+  score by the fourteen-day temporal slot for the session's age at the
+  question falls from 0.889 to 0.551 hit@1 and loses on every type but
+  temporal reasoning, knowledge-update included. Forgetting by age alone
+  throws away what a question needs.
+- LongMemEval_S over every answerable question: the fused panel reaches
+  0.889 hit@1, 0.949 recall@5, 0.981 recall@10 at session granularity,
+  against 0.855, 0.914, 0.952 for the lexical ballot.
+- `packset hubs` and `GET /v1/hubs`: the claims the link graph turns on,
+  a weighted PageRank over the links.
+- Two kinds: `prediction` (a voter's forecast on an issue, for the
+  surprisingly popular rule) and `rule` (a pattern with a verdict, argv law
+  kept in the pack and exported with the rest).
+
+## 0.5.1 (2026-09-12)
+
+- Two panel tests were red at 0.5.0: `Panel::parse` still filled the decay
+  slot with `off`, and a test read the default as `off`.
+- The first answer-accuracy row: with Qwen2.5-7B-Instruct Q5_K_M as
+  reader and judge and LongMemEval's own prompts, the fused panel answers
+  0.630 of the first hundred questions, the lexical ballot 0.570, the
+  labelled sessions 0.690.
+- A cross-encoder rerank arm on LongMemEval (`PACKSET_LME_RERANK=1`),
+  measured and kept opt-in: bge-reranker-base over the windows of the fused
+  top sessions falls from 0.920 to 0.780 hit@1 on the first hundred
+  questions.
+- `examples/locomo_dump` and `scripts/longmemeval_qa.py --bench locomo`:
+  the same retrieval dump and answer-accuracy seam for LoCoMo.
+
+## 0.5.0 (2026-09-12)
+
+- LongMemEval_S with an encoder: the fused panel over session documents
+  reaches 0.920 hit@1 and 0.968 recall@5 on the first hundred questions,
+  against 0.840 and 0.904 for the lexical ballot alone.
+- `examples/longmemeval` writes the sessions each arm retrieved to
+  `PACKSET_LME_DUMP`, and `scripts/longmemeval_qa.py` turns that into
+  LongMemEval answer accuracy with the benchmark's reading and judge
+  prompts over any OpenAI-compatible reader and judge.
+- The writer reads `PACKSET_FUSE`, `PACKSET_DIVERSIFY` and `PACKSET_DECAY`
+  when the flag of the same name is absent. It read only the flags, so a
+  writer started with `PACKSET_DECAY=fsrs` in its environment ran with
+  decay off and `status` said so.
+- The decay slot defaults to `fsrs`: retrievability from the review clock,
+  floored at 0.25, cards exempt. `PACKSET_DECAY=off` turns it off. On a
+  corpus with no review history the slot changes nothing.
+
+## 0.4.0 (2026-09-12)
+
+- `PacksetClient::with_workspace` pins the workspace ahead of
+  `PACKSET_WORKSPACE` and the working directory, so a seat can be one memory
+  across every repository it works in.
+
+- The client finds the writer at `http://127.0.0.1:8761` when `PACKSET_URL`
+  is unset (`PACKSET_PORT` moves the port), the same default the command
+  line and the MCP server use, so a seat needs no variable set.
+  `PACKSET_URL=off` is the one way to have no pack.
+
+## 0.3.0 (2026-09-12)
+
+What a user gets:
+
+- A review clock on every claim: written claims are due after one day,
+  `grade` moves them, `due` lists what is about to be forgotten. With
+  `PACKSET_DECAY=fsrs` the FSRS retrievability curve scales search scores,
+  so unreviewed claims fade without vanishing.
+- Memory islands: `islands` lists the link graph's clusters, `island CUE`
+  returns the memories a task activates by spreading activation, and `fire`
+  (or `island --fire`) strengthens the links of claims used together, with a
+  forgetting term so weights stay bounded.
+- Trust rows: a `trust` atom is one weighted edge of an influence graph, with
+  a validity window like any claim, exported with the rest.
+- The pack's own command line: `remember`, `prefer`, `search`, `due`,
+  `grade`, `islands`, `island`, `fire`, beside `ensure`, `status`, `export`.
+- A hit's `score` is the panel's fused weight, one scale across ballots; the
+  ballot's own score sits beside it as `ballot_score`.
+- BM25+ replaces BM25 as the lexical default; passage windows measured; the
+  retrieval table names every arm and what lost.
+- LongMemEval_S session retrieval and a many-clients hammer are examples
+  with their tables in the README.
+- One logical write at a time under many clients; the encoder runs before
+  the write lock and is warmed at start; the index is rebuilt from cached
+  tokens after a write.
+- `packset-embed` caches models under `$XDG_CACHE_HOME/packset/embed`, never
+  the working directory.
+- A sentence boundary needs whitespace after the full stop, so `0.9.3`,
+  `127.0.0.1` and `Cargo.lock` no longer count as sentence ends.
+- Client requests time out after thirty seconds, settable with
+  `PACKSET_TIMEOUT_MS`; refusals carry the daemon's one-line reason.
+- A documentation site at https://leidarljos.github.io/packset/.
+
+## 0.2.0
+
+The Rust writer: LMDB store, HTTP surface, the panel of fusers and
+diversifiers, the dense encoder as a child process, export for handovers.

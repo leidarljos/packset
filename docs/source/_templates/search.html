@@ -1,0 +1,10 @@
+{%- extends "basic/search.html" %}
+
+{% block searchbox %}
+  <form class="searchform" action="" method="get" role="search">
+    <label class="ll-clip" for="packset-search-page-q">{{ _('Search') }}</label>
+    <input id="packset-search-page-q" type="text" name="q" aria-labelledby="search-documentation" value="" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+    <button type="submit">{{ _('search') }}</button>
+  </form>
+  <p><span id="search-progress"></span></p>
+{% endblock %}

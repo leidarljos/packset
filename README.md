@@ -1,0 +1,90 @@
+# packset
+
+What does this seat know, standing? A pack of written claims with a review
+clock: one claim per atom, written on purpose, never mined from a
+transcript; ranked by a measured panel of scorers; reviewed before it is
+forgotten; faded when it is not; retracted with the deed that showed it
+wrong. One daemon owns one LMDB file and every tool is a client.
+
+Docs: https://leidarljos.github.io/packset/
+
+| Page | What it answers |
+|---|---|
+| [Getting started](https://leidarljos.github.io/packset/getting-started.html) | A scratch pack that remembers two claims and ranks them |
+| [How-to](https://leidarljos.github.io/packset/howto.html) | Review, island, handover, one writer |
+| [Reference](https://leidarljos.github.io/packset/reference.html) | Verbs, atoms, the daemon |
+| [Explanation](https://leidarljos.github.io/packset/explanation.html) | Why write on purpose, and what was measured |
+
+The seat that sits on this pack is documented at https://leidarljos.github.io.
+
+## Install
+
+```console
+$ cargo binstall --locked packset
+# or: cargo install --locked packset
+$ packset ensure
+```
+
+That installs `packset`, the writer `packsetd` and the read-only MCP
+surface `packset-mcp`. The `packset-daemon` crate on crates.io stops at
+0.9.21, from before `packset` carried `packsetd`; do not install it. `packset-embed`, the optional dense encoder, is its
+own crate and links a source-built or system Open Neural Network Exchange
+(ONNX) Runtime. The prebuilt
+runtime from cdn.pyke.io is the `download-binaries` feature. The pack
+answers without the encoder, and search stays lexical.
+
+## First minute
+
+```console
+$ packset remember "BM25+ is the default lexical scorer. It beat BM25 by two points."
+3f9c...	lesson	due 2026-09-13T08:54:37.394Z
+$ packset search lexical scorer
+7.0000	lesson	3f9c...	BM25+ is the default lexical scorer. It beat BM25 by two points.
+$ packset due            # tomorrow: what to review
+$ packset island fusing two ballots     # the memories a task activates
+```
+
+## What holds
+
+- Writes are `remember` and `prefer`, two sentences at most, stored as given. Nothing is extracted from a transcript.
+- Every claim has a validity window and a review clock (FSRS). Retrievability scales search; on a longitudinal corpus it ranks a recalled claim first 0.947 of the time against 0.230 for words alone.
+- A later claim closes the earlier one it rewrites; the closed one keeps its window for an as-of read (`packset search --as-of TS`, `packset atoms --as-of TS`). `consolidate` runs the rule over what is held.
+- Search fuses a prefix scan, BM25+ and a dense ballot. The default top k adds a fourteen-day half-life and retrievability. `packset search --rank relevance` (or `/v1/search?rank=relevance`) selects that top k by lexical, BM25 and cosine alone; `GET /v1/status` lists `search.ranks`, and an older writer omits `search`. `packset search --rerank` (or `PACKSET_RERANK=1` / `/v1/search?rerank=1`) runs the measured cross-encoder over the top 20 and returns its score as `rerank_score` (null when the stage did not score the hit); off by default. LongMemEval_S session retrieval, 470 answerable questions: 0.889 hit@1 and 0.949 recall@5 for BM25+ fused with e5-large-v2. hit@1 counts a question whose top result is a session holding its evidence; recall@5 is the share of evidence sessions in the top five, averaged over questions. These numbers score retrieval; answer accuracy on the same 470 is 0.549 (explanation page). MemoryAgentBench, scored per source as its paper scores it, with a seven-billion-parameter reader: lexical retrieval answers 0.568 of the accurate-retrieval questions (95% CI 0.530 to 0.605), below the published BM25 row of 0.605 with a hosted reader, and the replacement rule answers 0.395 of the conflict-resolution questions at 262K.
+- A workspace holds at most `PACKSET_LIVE_CAP` live claims (twenty thousand); past it the least retrievable lessons are forgotten as tombstones. Every claim carries the seat that wrote it.
+- Forgetting by neglect: a review left due past twice its interval lapses as a missed review would, and a never-recalled lesson missed three times is forgotten. The writer sweeps once a day; `packset sweep` runs it now.
+- Claims link by shared names; links carry weights that use strengthens; `island` returns the cluster a task activates.
+- One writer, one LMDB file. Zero errors at 32 clients, and a herd of 32 writing 6400 distinct claims into one workspace loses none of them. A second host is a second pack; a signed handover crosses. The hammer rerun, 200 operations a client, measured:
+
+  | Clients | Requests | Wall | Rate | Errors | Workspace |
+  |---:|---:|---:|---:|---:|---|
+  | 1 | 600 | 9.89 s | 61 req/s | 0 | separate |
+  | 4 | 2400 | 20.89 s | 115 req/s | 0 | separate |
+  | 16 | 9600 | 86.18 s | 111 req/s | 0 | separate |
+  | 32 | 19200 | 131.55 s | 146 req/s | 0 | separate |
+  | 4 | 2400 | 15.55 s | 154 req/s | 0 | shared, 799 live + 1 closed of 800 |
+  | 16 | 9600 | 105.97 s | 91 req/s | 0 | shared, 3192 live + 8 closed of 3200 |
+  | 32 | 19200 | 292.56 s | 66 req/s | 0 | shared, 6382 live + 18 closed of 6400 |
+  | 32 | 19200 | 826.18 s | 23 req/s | 0 | shared, 6382 live + 18 closed of 6400 (rerun 2026-10-08; slower container, same counts) |
+- Trust rows and personas live in the pack and reach the seat's consensus.
+- `origin` and `source.basis` say who stood behind a claim, and the pack keeps them from rising: `user-declared` ranks above every other origin and `person` above every other basis. An update, or a post over a live id, may keep or lower them; only an accept raises one, and a record with no origin reads as `unknown`. The pack does not decide who may create. A client that posts a new atom can still say `user-declared` and `person`, and the pack stores what it was told. Who may write as the person is the seat's call ([ljos](https://leidarljos.github.io)), not the pack's.
+
+The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html). The MemoryAgentBench scorer and verdict files are private; I share them on request.
+
+## Crates
+
+| Crate | Carries |
+|---|---|
+| `packset-core` | the atom, the prose limit, BM25+, the panel, decay, islands, the review clock |
+| `packset-daemon` | `packsetd`: LMDB store, HTTP, the encoder child; a library in the workspace, its binary ships in `packset`. Unpublished since 0.10.0, so crates.io stops at 0.9.21 |
+| `packset-client` | the HTTP client every tool uses |
+| `packset-cli` | the `packset` crate: `packset`, `packsetd`, `packset-mcp` |
+| `packset-mcp` | the read-only MCP surface, built by `packset` from its source tree |
+| `packset-embed` | dense, late, sparse and cross-encoder models as one child |
+
+The retrieval, forgetting, islands, trust, many-clients and benchmark
+sections that used to sit here are on the site's explanation page, with
+every arm that lost.
+
+## License
+
+MIT.

@@ -1,0 +1,5 @@
+{"bench":"LongMemEval_S","write":"Remember: the user's dog is named Rex","question":"What is the dog named?","answers":["Rex"]}
+{"bench":"MemoryAgentBench","write":"The user lives in Berlin.","question":"Where does the user live?","answers":["Berlin"]}
+{"bench":"MemoryAgentBench","write":"Remember: the user lives in Berlin now","question":"Where does the user live?","answers":["Berlin"]}
+{"bench":"MemConflict","write":"Remember: the capital of Germany is Berlin now","question":"What is the capital of Germany?","answers":["Berlin"]}
+{"bench":"MemConflict","write":"Roy Rogers is married to John McVie.","question":"Who is Roy Rogers married to?","answers":["Dale Evans"]}

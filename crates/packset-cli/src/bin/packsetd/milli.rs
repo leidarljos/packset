@@ -1,0 +1,1093 @@
+//! The search projection, driven as a separate process.
+//!
+//! The index is a projection and never the store: everything in it is
+//! derivable from the atoms, so a corrupt or missing index costs ranking
+//! quality and nothing else. Every failure here falls back to the linear
+//! scorer rather than answering with a partial index, because a wrong answer
+//! that looks complete is worse than a slower one that is.
+
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use packset_core::record;
+use serde_json::{json, Value};
+
+use crate::store::Record;
+
+/// Environment variables naming the search binary.
+pub const BIN_VARS: &[&str] = &["PACKSET_MILLI", "INSIDE_MILLI", "LJOS_INSIDE_MILLI"];
+
+/// Whether a variable in [`BIN_VARS`] names the binary. A binary found only
+/// on PATH is not a request to search with it when no encoder answers.
+#[must_use]
+pub fn named() -> bool {
+    BIN_VARS
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
+}
+
+/// Sets already backfilled into an index by this process, oldest first.
+struct Backfill {
+    order: std::collections::VecDeque<(PathBuf, String)>,
+    seen: std::collections::HashSet<(PathBuf, String)>,
+}
+
+/// How many set backfills one process remembers. `off` remembers all of
+/// them. A set that falls out is uploaded once more on its next scoped
+/// search, which is the same work the first search did.
+pub const DEFAULT_BACKFILL_CAP: usize = 1024;
+
+fn backfill_cap() -> usize {
+    match std::env::var("PACKSET_BACKFILL_CAP") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_BACKFILL_CAP,
+            "off" | "none" => 0,
+            n => n.parse().unwrap_or(DEFAULT_BACKFILL_CAP),
+        },
+        Err(_) => DEFAULT_BACKFILL_CAP,
+    }
+}
+
+/// Sets already backfilled into an index by this process.
+///
+/// The backfill exists for a projection written before atoms carried a `set`,
+/// and one pass over the set fixes that for good: every write since keeps the
+/// field current. Doing it per query instead re-uploads the whole set on every
+/// scoped search, which is the difference between a search and an indexing
+/// job. The set of names is capped: a writer that minted a new set per run
+/// would otherwise keep every name until it exited.
+fn backfilled() -> &'static std::sync::Mutex<Backfill> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Backfill>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| {
+        std::sync::Mutex::new(Backfill {
+            order: std::collections::VecDeque::new(),
+            seen: std::collections::HashSet::new(),
+        })
+    })
+}
+
+/// Record `key` and drop the oldest past `cap`. Zero keeps them all.
+fn remember_backfill(fill: &mut Backfill, key: (PathBuf, String), cap: usize) {
+    if !fill.seen.insert(key.clone()) {
+        return;
+    }
+    fill.order.push_back(key);
+    if cap == 0 {
+        return;
+    }
+    while fill.order.len() > cap {
+        if let Some(old) = fill.order.pop_front() {
+            fill.seen.remove(&old);
+        }
+    }
+}
+
+/// Forget what was backfilled into `dir`, because the index is being rebuilt.
+fn forget_backfill(dir: &Path) {
+    if let Ok(mut fill) = backfilled().lock() {
+        fill.order.retain(|(indexed, _)| indexed != dir);
+        fill.seen.retain(|(indexed, _)| indexed != dir);
+    }
+}
+
+/// The search binary, if this seat has one.
+///
+/// Absent is the normal case, not an error: the linear scorer answers the same
+/// question without it. An explicit variable always wins over the kept
+/// discovery below, so a seat or test that names a binary never sees
+/// the cache.
+#[must_use]
+pub fn binary() -> Option<PathBuf> {
+    for var in BIN_VARS {
+        if let Some(raw) = std::env::var_os(var) {
+            let path = PathBuf::from(raw);
+            if is_executable(&path) {
+                return Some(path);
+            }
+        }
+    }
+    found_binary()
+}
+
+/// The discovery every call used to repeat: the tree candidates and the
+/// names on `PATH`. A binary found there does not move under a running
+/// writer, so it is kept for good and a burst of searches and flushes does
+/// not walk the filesystem per request. A miss is kept for
+/// [`crate::embed::LOOK_AGAIN`]: a binary can be installed after the
+/// writer starts.
+fn found_binary() -> Option<PathBuf> {
+    static FOUND: crate::embed::Kept = crate::embed::Kept::new(crate::embed::LOOK_AGAIN);
+    FOUND.get(discover)
+}
+
+/// Where the binary lives when no variable names it.
+fn discover() -> Option<PathBuf> {
+    // The same three places the writer being replaced looks, relative to the
+    // tree root. The workspace target directory is deliberately not among
+    // them: neither writer searches it, and a seat that builds there names the
+    // binary with PACKSET_MILLI.
+    let here = std::env::current_exe().ok()?;
+    let root = here.parent()?.parent()?.parent()?;
+    for candidate in [
+        root.join("bin/packset-milli"),
+        root.join("crates/packset-milli/target/release/packset-milli"),
+        root.join("bin/inside-milli"),
+    ] {
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    for name in ["packset-milli", "inside-milli"] {
+        if let Some(found) = which(name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    true
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Run the binary, or nothing when it is absent or unhappy.
+fn run(argv: &[String], stdin: Option<&str>) -> Option<Value> {
+    let binary = binary()?;
+    let mut child = Command::new(binary)
+        .args(argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    if let Some(text) = stdin {
+        child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+    } else {
+        drop(child.stdin.take());
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let value: Value = serde_json::from_str(raw.trim()).ok()?;
+    value.is_object().then_some(value)
+}
+
+/// The primary key for one document.
+///
+/// The index accepts `[A-Za-z0-9_-]` only, and a workspace name carries
+/// neither, so the workspace card's key is a digest of the name rather than
+/// the name.
+#[must_use]
+pub fn document_id(field: &str, workspace: &str, atom_id: &str) -> String {
+    match field {
+        "user" => "user".into(),
+        "memory" => format!("memory_{}", short_digest(workspace)),
+        _ => atom_id.to_string(),
+    }
+}
+
+/// The first sixteen hex characters of the SHA-256 of `text`.
+fn short_digest(text: &str) -> String {
+    let digest = sha256(text.as_bytes());
+    digest
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+/// SHA-256, so the workspace card keeps the key the other writer gave it.
+fn sha256(message: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+    let mut data = message.to_vec();
+    let bits = (message.len() as u64) * 8;
+    data.push(0x80);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&bits.to_be_bytes());
+
+    let (blocks, _) = data.as_chunks::<64>();
+    for block in blocks {
+        let mut w = [0u32; 64];
+        let (words, _) = block.as_chunks::<4>();
+        for (i, chunk) in words.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*chunk);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (slot, value) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// The document for one atom.
+#[must_use]
+pub fn atom_document(atom: &Record) -> Value {
+    let entities: Vec<String> = atom
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|i| i.as_str().map_or_else(|| i.to_string(), str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
+    json!({
+        "id": document_id("atom", "", id),
+        "field": "atom",
+        "kind": atom.get("kind").and_then(Value::as_str).unwrap_or("atom"),
+        "text": atom.get("text").and_then(Value::as_str).unwrap_or(""),
+        "entities": entities.join(" "),
+        "workspace": atom.get("workspace").and_then(Value::as_str).unwrap_or(""),
+        "set": atom.get("set").and_then(Value::as_str).unwrap_or(""),
+        "trust": packset_core::record::rank_trust(atom, 1.0),
+    })
+}
+
+/// Every document a workspace projects: the two cards and its live atoms.
+#[must_use]
+pub fn pack_documents<R: Borrow<Record>>(
+    workspace: &str,
+    user: &str,
+    memory: &str,
+    atoms: &[R],
+) -> Vec<Value> {
+    let mut docs = Vec::new();
+    if !user.is_empty() {
+        docs.push(json!({
+            "id": document_id("user", workspace, ""),
+            "field": "user", "kind": "user", "text": user, "entities": "",
+            "workspace": workspace, "trust": 1.5,
+        }));
+    }
+    if !memory.is_empty() {
+        docs.push(json!({
+            "id": document_id("memory", workspace, ""),
+            "field": "memory", "kind": "memory", "text": memory, "entities": "",
+            "workspace": workspace, "trust": 1.25,
+        }));
+    }
+    let now = packset_core::clock::utcnow();
+    for atom in atoms {
+        let atom: &Record = atom.borrow();
+        if record::is_live(atom, &now) || record::is_due(atom, &now) {
+            docs.push(atom_document(atom));
+        }
+    }
+    docs
+}
+
+fn jsonl(docs: &[Value]) -> String {
+    let mut out = String::new();
+    for doc in docs {
+        if let Ok(line) = serde_json::to_string(doc) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Add or replace documents. An empty batch is a success.
+#[must_use]
+pub fn upsert(docs: &[Value], index_dir: &Path) -> bool {
+    if docs.is_empty() {
+        return true;
+    }
+    let argv = vec![
+        "index".into(),
+        "--index".into(),
+        index_dir.display().to_string(),
+    ];
+    run(&argv, Some(&jsonl(docs))).is_some()
+}
+
+/// Drop documents by id.
+#[must_use]
+pub fn delete(ids: &[String], index_dir: &Path) -> bool {
+    if ids.is_empty() {
+        return true;
+    }
+    let argv = vec![
+        "delete".into(),
+        "--index".into(),
+        index_dir.display().to_string(),
+    ];
+    let payload = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
+    run(&argv, Some(&payload)).is_some()
+}
+
+/// The pack a projection is built from or searched against.
+///
+/// The four travel together everywhere, and separating them is how a set's
+/// cards end up written as a workspace's.
+#[derive(Debug, Clone, Copy)]
+pub struct Corpus<'a> {
+    /// The workspace being projected.
+    pub workspace: &'a str,
+    /// The seat card, or a set's stand-in for it.
+    pub user: &'a str,
+    /// The workspace card, or a set's stand-in for it.
+    pub memory: &'a str,
+    /// The live atoms.
+    pub atoms: &'a [std::sync::Arc<Record>],
+}
+
+/// Rebuild the projection from a whole workspace.
+///
+/// Never called with a set's cards: they would become the workspace's prose
+/// documents and every unscoped search would then answer with them.
+#[must_use]
+pub fn replace(corpus: Corpus<'_>, dir: &Path) -> bool {
+    forget_backfill(dir);
+    let docs = pack_documents(corpus.workspace, corpus.user, corpus.memory, corpus.atoms);
+    let argv = vec![
+        "index".into(),
+        "--index".into(),
+        dir.display().to_string(),
+        "--replace".into(),
+    ];
+    run(&argv, Some(&jsonl(&docs))).is_some()
+}
+
+/// Upsert the live atoms only, leaving the prose documents alone.
+#[must_use]
+pub fn reindex_atoms<R: Borrow<Record>>(atoms: &[R], dir: &Path) -> bool {
+    let now = packset_core::clock::utcnow();
+    let docs: Vec<Value> = atoms
+        .iter()
+        .map(|a| -> &Record { a.borrow() })
+        .filter(|a| {
+            a.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+                && (record::is_live(a, &now) || record::is_due(a, &now))
+        })
+        .map(atom_document)
+        .collect();
+    upsert(&docs, dir)
+}
+
+/// Whether the projection exists on disk.
+#[must_use]
+pub fn index_ready(dir: &Path) -> bool {
+    dir.join("data.mdb").exists()
+}
+
+/// Keep the atom hits the pack still says are live and in scope.
+///
+/// The pack decides membership, not the index: a stale projection that
+/// predates the `set` field still scopes correctly after this, and a hit for
+/// an atom that has since been tombstoned never reaches a reader. Prose hits
+/// from the index are dropped because prose always comes from the pack.
+/// Each kept hit carries the atom's stored origin. A record with no origin
+/// is marked `unknown`, so a missing field is not read as `user-declared`.
+#[must_use]
+pub fn filter_atom_hits<R: Borrow<Record>>(
+    hits: &[Value],
+    live: &[R],
+    set: Option<&str>,
+    kind: Option<&str>,
+) -> Vec<Value> {
+    let by_id: BTreeMap<&str, &Record> = live
+        .iter()
+        .map(|a| -> &Record { a.borrow() })
+        .filter_map(|a| a.get("id").and_then(Value::as_str).map(|id| (id, a)))
+        .collect();
+    hits.iter()
+        .filter(|hit| !matches!(hit["field"].as_str(), Some("user" | "memory")))
+        .filter_map(|hit| {
+            let id = hit["id"].as_str()?;
+            let atom = by_id.get(id)?;
+            if let Some(name) = set {
+                if atom.get("set").and_then(Value::as_str) != Some(name) {
+                    return None;
+                }
+            }
+            if !record::in_memory(atom.get("kind").and_then(Value::as_str).unwrap_or(""), kind) {
+                return None;
+            }
+            // The index stores what it scores; the stamp, the kind, the
+            // review date and the claim's source come from the pack's own
+            // record, and so do its entities, which the index holds joined.
+            let mut hit = hit.clone();
+            for key in ["ts", "kind", "due_at", "source"] {
+                if hit.get(key).is_none_or(Value::is_null) {
+                    if let Some(value) = atom.get(key).filter(|v| !v.is_null()) {
+                        hit[key] = value.clone();
+                    }
+                }
+            }
+            if let Some(entities) = atom.get("entities").filter(|v| v.is_array()) {
+                hit["entities"] = entities.clone();
+            }
+            // Origin is not a scored field, so the index does not have it.
+            // The stored record's is written over whatever the index said.
+            hit["origin"] = Value::String(record::origin_of(atom).to_string());
+            Some(hit)
+        })
+        .collect()
+}
+
+/// What the index needs before this query can be trusted.
+fn ensure_atoms(corpus: Corpus<'_>, dir: &Path, set: Option<&str>) -> bool {
+    let atoms = corpus.atoms;
+    if !index_ready(dir) {
+        // A set-scoped call must never full-replace: its cards are not the
+        // workspace's, and writing them as such poisons every other search.
+        if set.is_some() {
+            return reindex_atoms(atoms, dir);
+        }
+        return replace(corpus, dir);
+    }
+    match set {
+        // Backfill the named set's atoms once, so `--set` sees the field even
+        // on a projection written before it existed. Once is enough: every
+        // write since keeps the field current, and repeating it per query
+        // turns a scoped search into an indexing job.
+        Some(name) => {
+            let key = (dir.to_path_buf(), name.to_string());
+            if backfilled()
+                .lock()
+                .is_ok_and(|fill| fill.seen.contains(&key))
+            {
+                return true;
+            }
+            let now = packset_core::clock::utcnow();
+            let docs: Vec<Value> = atoms
+                .iter()
+                .filter(|a| {
+                    a.get("set").and_then(Value::as_str) == Some(name)
+                        && (record::is_live(a, &now) || record::is_due(a, &now))
+                })
+                .map(|a| atom_document(a))
+                .collect();
+            let done = upsert(&docs, dir);
+            if done {
+                if let Ok(mut fill) = backfilled().lock() {
+                    remember_backfill(&mut fill, key, backfill_cap());
+                }
+            }
+            done
+        }
+        None => true,
+    }
+}
+
+/// One search against the projection, or nothing when it cannot answer.
+#[must_use]
+pub fn search(
+    corpus: Corpus<'_>,
+    query: &str,
+    limit: usize,
+    dir: &Path,
+    set: Option<&str>,
+    kind: Option<&str>,
+) -> Option<Vec<Value>> {
+    let (workspace, atoms) = (corpus.workspace, corpus.atoms);
+    binary()?;
+    if !ensure_atoms(corpus, dir, set) {
+        return None;
+    }
+    let once = |q: &str| -> Option<Vec<Value>> {
+        let mut argv = vec![
+            "search".into(),
+            "--index".into(),
+            dir.display().to_string(),
+            "--q".into(),
+            q.to_string(),
+            "--limit".into(),
+            limit.to_string(),
+        ];
+        if !workspace.is_empty() {
+            argv.push("--workspace".into());
+            argv.push(workspace.to_string());
+        }
+        if let Some(name) = set {
+            argv.push("--set".into());
+            argv.push(name.to_string());
+        }
+        let payload = run(&argv, None)?;
+        let raw = payload.get("hits")?.as_array()?;
+        let hits: Vec<Value> = raw.iter().filter(|h| h.is_object()).cloned().collect();
+        Some(filter_atom_hits(&hits, atoms, set, kind))
+    };
+
+    let mut atom_hits = once(query)?;
+    if atom_hits.is_empty() && !query.trim().is_empty() && !rebuilt_from(atoms, dir) {
+        // Nothing found may mean the projection is behind rather than that the
+        // pack has nothing. Reindex the atoms once and ask again; a failed
+        // reindex means the index is not authoritative, and the caller falls
+        // back to the linear scorer rather than reporting a prose-only miss.
+        // Once the projection has been rebuilt from these very atoms, an
+        // empty answer is final: a conversational prompt shares no word
+        // with most packs, and rebuilding on each one cost every such
+        // search a second child and an upsert of the whole pack, 30 ms of
+        // the 50 a one-word miss took on a 29-atom pack.
+        if !reindex_atoms(atoms, dir) {
+            return None;
+        }
+        note_rebuilt_from(atoms, dir);
+        atom_hits = once(query)?;
+    }
+    Some(atom_hits)
+}
+
+/// The atom set the projection at `dir` was last rebuilt from, by
+/// fingerprint: every id with its text, entities, set and kind, in order.
+fn rebuilt() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, u64>> {
+    static REBUILT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, u64>>> =
+        std::sync::OnceLock::new();
+    REBUILT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn atoms_fingerprint<R: Borrow<Record>>(atoms: &[R]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    atoms.len().hash(&mut hasher);
+    for atom in atoms {
+        let atom: &Record = atom.borrow();
+        for key in ["id", "text", "entities", "set", "kind", "ts"] {
+            atom.get(key).map(Value::to_string).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Whether the projection at `dir` was already rebuilt from exactly `atoms`.
+fn rebuilt_from<R: Borrow<Record>>(atoms: &[R], dir: &Path) -> bool {
+    rebuilt()
+        .lock()
+        .is_ok_and(|seen| seen.get(dir) == Some(&atoms_fingerprint(atoms)))
+}
+
+fn note_rebuilt_from<R: Borrow<Record>>(atoms: &[R], dir: &Path) {
+    if let Ok(mut seen) = rebuilt().lock() {
+        seen.insert(dir.to_path_buf(), atoms_fingerprint(atoms));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Past the cap the oldest set is forgotten and would be uploaded
+    /// again. A repeat of a remembered set does not grow the list.
+    #[test]
+    fn the_backfill_remembers_a_capped_number_of_sets() {
+        let mut fill = Backfill {
+            order: std::collections::VecDeque::new(),
+            seen: std::collections::HashSet::new(),
+        };
+        let key = |n: u8| (PathBuf::from("/idx"), format!("set-{n}"));
+        remember_backfill(&mut fill, key(1), 2);
+        remember_backfill(&mut fill, key(1), 2);
+        assert_eq!(fill.order.len(), 1, "a repeat was stored again");
+        remember_backfill(&mut fill, key(2), 2);
+        remember_backfill(&mut fill, key(3), 2);
+        assert_eq!(fill.order.len(), 2);
+        assert!(!fill.seen.contains(&key(1)), "the oldest set was kept");
+        assert!(fill.seen.contains(&key(3)));
+        remember_backfill(&mut fill, key(4), 0);
+        assert_eq!(fill.order.len(), 3, "a cap of zero dropped a set");
+    }
+
+    fn record(value: Value) -> Record {
+        value.as_object().unwrap().clone()
+    }
+
+    /// An explicit search binary beats any kept discovery: naming
+    /// `PACKSET_MILLI` answers from the variable without touching the
+    /// cache. `/bin/false` never runs here; `binary` only checks it is
+    /// executable. Serialised with the stub-spawning tests on the shared
+    /// encoder lock, the way every test that mutates these variables is.
+    #[test]
+    fn an_explicit_milli_binary_beats_any_cached_discovery() {
+        let _held = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("PACKSET_MILLI");
+        // SAFETY: the lock is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_MILLI", "/bin/false") };
+        let found = binary();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("PACKSET_MILLI", v),
+                None => std::env::remove_var("PACKSET_MILLI"),
+            }
+        }
+        drop(_held);
+        assert_eq!(found, Some(std::path::PathBuf::from("/bin/false")));
+    }
+
+    /// Discovery finds the search binary on the path: a planted
+    /// `packset-milli` in a directory prepended to `PATH` answers from
+    /// `discover` directly, so the kept cache is never primed and no
+    /// other test can observe the plant. The plant exits at once, so
+    /// even a concurrent spawn would be harmless.
+    #[test]
+    fn discovery_finds_the_search_binary_on_the_path() {
+        let _held = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let plant = dir.path().join("packset-milli");
+        std::fs::write(&plant, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&plant).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&plant, perm).unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![dir.path().to_path_buf()];
+        if let Some(old) = &old_path {
+            paths.extend(std::env::split_paths(old));
+        }
+        // SAFETY: the lock is held, and every test that spawns a stub
+        // holds it too; the plant itself needs no lookup to run.
+        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
+        let found = discover();
+        unsafe {
+            match old_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        drop(_held);
+        assert_eq!(found, Some(plant));
+    }
+
+    /// A miss rebuilds the projection once per atom set. The second miss
+    /// over the same atoms asks the child once and does not upsert again;
+    /// a changed atom set rebuilds once more.
+    #[test]
+    fn a_miss_rebuilds_the_projection_once_per_atom_set() {
+        let _held = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index");
+        std::fs::create_dir_all(&index).unwrap();
+        std::fs::write(index.join("data.mdb"), "").unwrap();
+        let log = dir.path().join("calls.log");
+        let stub = dir.path().join("packset-milli");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho \"$1 $3\" >> '{}'\necho '{{\"hits\":[]}}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        let old = std::env::var_os("PACKSET_MILLI");
+        // SAFETY: the lock is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_MILLI", &stub) };
+        let atoms = vec![std::sync::Arc::new(record(json!({
+            "id": "a1", "kind": "lesson", "text": "one", "ts": "2026-01-01T00:00:00.000Z"
+        })))];
+        let corpus = Corpus {
+            workspace: "w",
+            user: "",
+            memory: "",
+            atoms: &atoms,
+        };
+        // Other tests of this binary project through the same variable
+        // while this one runs; only the calls on this index count.
+        let calls = || {
+            let mine = format!(" {}", index.display());
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.ends_with(&mine))
+                .map(|line| line.split(' ').next().unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let first = search(corpus, "nothing here", 5, &index, None, None);
+        assert_eq!(first, Some(Vec::new()));
+        assert_eq!(calls(), "search\nindex\nsearch", "{}", calls());
+        let second = search(corpus, "still nothing", 5, &index, None, None);
+        assert_eq!(second, Some(Vec::new()));
+        assert_eq!(
+            calls(),
+            "search\nindex\nsearch\nsearch",
+            "a second miss over the same atoms does not rebuild: {}",
+            calls()
+        );
+        let changed = vec![std::sync::Arc::new(record(json!({
+            "id": "a1", "kind": "lesson", "text": "one, revised", "ts": "2026-01-02T00:00:00.000Z"
+        })))];
+        let third = search(
+            Corpus {
+                atoms: &changed,
+                ..corpus
+            },
+            "nothing again",
+            5,
+            &index,
+            None,
+            None,
+        );
+        assert_eq!(third, Some(Vec::new()));
+        assert_eq!(
+            calls(),
+            "search\nindex\nsearch\nsearch\nsearch\nindex\nsearch",
+            "{}",
+            calls()
+        );
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("PACKSET_MILLI", v),
+                None => std::env::remove_var("PACKSET_MILLI"),
+            }
+        }
+        drop(_held);
+    }
+
+    #[test]
+    fn an_index_hit_carries_the_records_source_and_entities() {
+        let live = vec![record(json!({
+            "id": "a1", "kind": "lesson", "text": "one",
+            "entities": ["seat:acme", "issue:brio-1"],
+            "source": {"harness": "acme", "host": "brio"}
+        }))];
+        let hits = vec![json!({"field": "atom", "id": "a1", "text": "one",
+            "entities": "seat:acme issue:brio-1", "score": 1.0})];
+        let kept = filter_atom_hits(&hits, &live, None, None);
+        assert_eq!(kept[0]["source"]["harness"], json!("acme"));
+        assert_eq!(kept[0]["entities"], json!(["seat:acme", "issue:brio-1"]));
+    }
+
+    /// The index has no origin. The hit carries the atom's, a forged
+    /// `user-declared` on the hit does not survive, and a record with no
+    /// origin is `unknown` so it is not read as the person's.
+    #[test]
+    fn an_index_hit_carries_the_stored_origin() {
+        let live = vec![
+            record(json!({
+                "id": "agent", "kind": "lesson", "text": "one",
+                "origin": "agent-derived",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "legacy", "kind": "lesson", "text": "two",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "blank", "kind": "lesson", "text": "three",
+                "origin": "",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "spaced", "kind": "lesson", "text": "four",
+                "origin": "   ",
+                "source": {"basis": "person"}
+            })),
+            record(json!({
+                "id": "person", "kind": "lesson", "text": "five",
+                "origin": "user-declared",
+                "source": {"basis": "person"}
+            })),
+        ];
+        let hits = vec![
+            json!({"field": "atom", "id": "agent", "text": "one", "score": 1.0}),
+            json!({
+                "field": "atom", "id": "agent", "text": "one",
+                "origin": "user-declared", "score": 0.9
+            }),
+            json!({
+                "field": "atom", "id": "legacy", "text": "two",
+                "origin": "user-declared"
+            }),
+            json!({"field": "atom", "id": "blank", "text": "three"}),
+            json!({"field": "atom", "id": "spaced", "text": "four", "origin": "user-declared"}),
+            json!({"field": "atom", "id": "person", "text": "five"}),
+        ];
+        let kept = filter_atom_hits(&hits, &live, None, None);
+        assert_eq!(kept.len(), 6, "{kept:?}");
+        assert_eq!(kept[0]["origin"], json!("agent-derived"));
+        assert_eq!(kept[0]["source"]["basis"], json!("person"));
+        assert_eq!(kept[1]["origin"], json!("agent-derived"), "{kept:?}");
+        assert_eq!(kept[2]["origin"], json!("unknown"));
+        assert!(!kept[2]["origin"].as_str().unwrap().is_empty());
+        assert_eq!(kept[3]["origin"], json!("unknown"));
+        assert_eq!(kept[4]["origin"], json!("unknown"));
+        assert_eq!(kept[5]["origin"], json!("user-declared"));
+    }
+
+    #[test]
+    fn an_index_hit_carries_the_records_stamp() {
+        let live = vec![record(json!({
+            "id": "a1", "kind": "lesson", "text": "one",
+            "ts": "2026-09-01T00:00:00.000Z", "due_at": "2026-09-20T00:00:00.000Z"
+        }))];
+        let hits = vec![
+            json!({"field": "atom", "id": "a1", "text": "one", "score": 1.0}),
+            json!({"field": "atom", "id": "gone", "text": "two", "score": 0.5}),
+            json!({"field": "user", "id": null, "text": "card", "score": 0.4}),
+        ];
+        let kept = filter_atom_hits(&hits, &live, None, None);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0]["ts"], json!("2026-09-01T00:00:00.000Z"));
+        assert_eq!(kept[0]["kind"], json!("lesson"));
+        assert_eq!(kept[0]["due_at"], json!("2026-09-20T00:00:00.000Z"));
+        assert_eq!(kept[0]["score"], json!(1.0));
+    }
+
+    #[test]
+    fn the_digest_is_the_one_the_other_writer_computes() {
+        // hashlib.sha256(b"").hexdigest()[:16]
+        assert_eq!(short_digest(""), "e3b0c44298fc1c14");
+        // hashlib.sha256(b"abc").hexdigest()[:16]
+        assert_eq!(short_digest("abc"), "ba7816bf8f01cfea");
+    }
+
+    #[test]
+    fn sha256_matches_the_known_vectors() {
+        let empty = sha256(b"");
+        assert_eq!(empty[0], 0xe3);
+        assert_eq!(empty[31], 0x55);
+        let abc = sha256(b"abc");
+        assert_eq!(abc[0], 0xba);
+        assert_eq!(abc[31], 0xad);
+        // A message spanning two blocks exercises the padding.
+        let long = sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+        assert_eq!(long[0], 0x24);
+        assert_eq!(long[31], 0xc1);
+        assert_eq!(
+            short_digest("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8"
+        );
+    }
+
+    #[test]
+    fn a_workspace_card_keys_on_a_digest_not_a_name() {
+        // The index accepts [A-Za-z0-9_-] and a workspace name carries neither
+        // a colon nor a slash safely.
+        let key = document_id("memory", "git:github.com/HaoZeke/vissue", "");
+        assert!(key.starts_with("memory_"), "{key}");
+        assert!(
+            key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{key}"
+        );
+        assert_eq!(document_id("user", "anything", ""), "user");
+        assert_eq!(document_id("atom", "w", "abc123"), "abc123");
+    }
+
+    #[test]
+    fn an_atom_document_flattens_the_entities() {
+        let doc = atom_document(&record(json!({
+            "id": "a", "kind": "voice", "text": "x",
+            "entities": ["one", "two"], "workspace": "w", "trust": 2.0
+        })));
+        assert_eq!(doc["entities"], json!("one two"));
+        assert_eq!(doc["trust"], json!(2.0));
+        assert_eq!(doc["set"], json!(""), "absent is empty, not missing");
+    }
+
+    #[test]
+    fn a_pack_projects_its_cards_only_when_they_say_something() {
+        let docs = pack_documents::<Record>("w", "", "", &[]);
+        assert!(docs.is_empty(), "{docs:?}");
+        let docs = pack_documents::<Record>("w", "seat card", "workspace card", &[]);
+        assert_eq!(docs.len(), 2);
+        assert!(docs[0]["trust"].as_f64().unwrap() > docs[1]["trust"].as_f64().unwrap());
+    }
+
+    #[test]
+    fn an_expired_atom_is_not_projected() {
+        let atoms = vec![
+            record(json!({"id": "live", "text": "a", "workspace": "w"})),
+            record(json!({
+                "id": "gone", "text": "b", "workspace": "w",
+                "valid_to": "2000-01-01T00:00:00.000Z"
+            })),
+        ];
+        let docs = pack_documents("w", "", "", &atoms);
+        let ids: Vec<&str> = docs.iter().filter_map(|d| d["id"].as_str()).collect();
+        assert_eq!(ids, vec!["live"], "{docs:?}");
+    }
+
+    #[test]
+    fn the_pack_decides_membership_and_not_the_index() {
+        // A stale projection may return an atom the pack has since dropped, or
+        // one written before the set field existed.
+        let live = vec![record(json!({"id": "kept", "text": "a", "set": "review"}))];
+        let hits = vec![
+            json!({"field": "atom", "id": "kept", "text": "a"}),
+            json!({"field": "atom", "id": "vanished", "text": "b"}),
+            json!({"field": "user", "id": "user", "text": "prose"}),
+        ];
+        let filtered = filter_atom_hits(&hits, &live, Some("review"), None);
+        let ids: Vec<&str> = filtered.iter().filter_map(|h| h["id"].as_str()).collect();
+        assert_eq!(ids, vec!["kept"], "{filtered:?}");
+
+        // And out of scope means out, whatever the index said.
+        assert!(filter_atom_hits(&hits, &live, Some("other"), None).is_empty());
+    }
+
+    #[test]
+    fn prose_from_the_index_is_always_dropped() {
+        let live = vec![record(json!({"id": "a", "text": "x"}))];
+        let hits = vec![
+            json!({"field": "user", "id": "user", "text": "p"}),
+            json!({"field": "memory", "id": "memory_x", "text": "q"}),
+        ];
+        assert!(
+            filter_atom_hits(&hits, &live, None, None).is_empty(),
+            "prose comes from the pack, so the index copy can be stale"
+        );
+    }
+
+    #[test]
+    fn an_empty_batch_is_a_success_without_running_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(upsert(&[], dir.path()));
+        assert!(delete(&[], dir.path()));
+    }
+
+    #[test]
+    fn a_missing_index_directory_is_not_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!index_ready(&dir.path().join("nothing")));
+        std::fs::write(dir.path().join("data.mdb"), b"x").unwrap();
+        assert!(index_ready(dir.path()));
+    }
+}

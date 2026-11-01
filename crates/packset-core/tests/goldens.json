@@ -1,0 +1,769 @@
+{
+ "prose": [
+  {
+   "text": "",
+   "words": 0,
+   "sentences": 0,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "Reviews open with a reproducibility check.",
+   "words": 6,
+   "sentences": 1,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "One thing. Another thing. A third thing.",
+   "words": 7,
+   "sentences": 3,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "The header was parsed by the reader.",
+   "words": 7,
+   "sentences": 1,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 1,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "only family apply early daily",
+   "words": 5,
+   "sentences": 1,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "quickly and very carefully the reviewer really basically just moved on",
+   "words": 11,
+   "sentences": 1,
+   "grade": 9.76,
+   "ease": 18.78,
+   "adverbs": 6,
+   "adverb_ratio": 0.545,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "word word word word word word word word word word word word word word word word word word word word .",
+   "words": 20,
+   "sentences": 1,
+   "grade": 7.41,
+   "ease": 101.94,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 1,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word .",
+   "words": 30,
+   "sentences": 1,
+   "grade": 12.41,
+   "ease": 91.79,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 1
+  },
+  {
+   "text": "Prefer ripgrep over grep for repository search because it respects gitignore.",
+   "words": 11,
+   "sentences": 1,
+   "grade": 12.33,
+   "ease": 26.47,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "Always open review links after pushing, so the CI result is visible before the next change lands.",
+   "words": 17,
+   "sentences": 1,
+   "grade": 8.96,
+   "ease": 65.17,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 1,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "The seat pack keeps one claim per atom and the cards stay files on disk.",
+   "words": 15,
+   "sentences": 1,
+   "grade": 3.97,
+   "ease": 95.73,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "Tool dumps and fetched bodies are not atoms.",
+   "words": 8,
+   "sentences": 1,
+   "grade": 3.77,
+   "ease": 82.39,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 1,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "packsetd listens on 127.0.0.1 only and never on localhost.",
+   "words": 8,
+   "sentences": 1,
+   "grade": 6.12,
+   "ease": 50.67,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "AAA",
+   "words": 1,
+   "sentences": 1,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  },
+  {
+   "text": "Make the change, then run the tests.",
+   "words": 7,
+   "sentences": 1,
+   "grade": null,
+   "ease": null,
+   "adverbs": 0,
+   "adverb_ratio": 0.0,
+   "passives": 0,
+   "hard_sentences": 0,
+   "very_hard_sentences": 0
+  }
+ ],
+ "remote": [
+  {
+   "remote": "https://github.com/example/kit.git",
+   "workspace": "git:github.com/example/kit"
+  },
+  {
+   "remote": "git@github.com:example/kit.git",
+   "workspace": "git:github.com/example/kit"
+  },
+  {
+   "remote": "ssh://git@github.com/HaoZeke/vissue.git",
+   "workspace": "git:github.com/HaoZeke/vissue"
+  },
+  {
+   "remote": "https://example.com:8443/team/repo.git",
+   "workspace": "git:example.com/team/repo"
+  },
+  {
+   "remote": "http://gitlab.com/group/sub/project.git",
+   "workspace": "git:gitlab.com/group/sub/project"
+  },
+  {
+   "remote": "git@bitbucket.org:team/repo",
+   "workspace": "git:bitbucket.org/team/repo"
+  }
+ ],
+ "slug": [
+  {
+   "workspace": "git:github.com/HaoZeke/vissue",
+   "slug": "git_github.com_HaoZeke_vissue"
+  },
+  {
+   "workspace": "global",
+   "slug": "global"
+  },
+  {
+   "workspace": "dir:/home/x/y",
+   "slug": "dir_home_x_y"
+  },
+  {
+   "workspace": "///",
+   "slug": "workspace"
+  },
+  {
+   "workspace": "",
+   "slug": "workspace"
+  },
+  {
+   "workspace": "a.b_c-d",
+   "slug": "a.b_c-d"
+  }
+ ],
+ "set": [
+  {
+   "name": "Review",
+   "set": "review"
+  },
+  {
+   "name": "  joss-reviews  ",
+   "set": "joss-reviews"
+  },
+  {
+   "name": "a",
+   "set": "a"
+  },
+  {
+   "name": "1review",
+   "error": true
+  },
+  {
+   "name": "-review",
+   "error": true
+  },
+  {
+   "name": "",
+   "error": true
+  },
+  {
+   "name": "../etc",
+   "error": true
+  },
+  {
+   "name": "a/b",
+   "error": true
+  },
+  {
+   "name": "a b",
+   "error": true
+  },
+  {
+   "name": "a_b",
+   "error": true
+  },
+  {
+   "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "set": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "error": true
+  }
+ ],
+ "atom": [
+  {
+   "input": {
+    "kind": "voice",
+    "text": "Reviews open with a reproducibility check.",
+    "workspace": "w"
+   },
+   "ok": {
+    "kind": "voice",
+    "text": "Reviews open with a reproducibility check.",
+    "workspace": "w",
+    "prose": {
+     "words": 6,
+     "sentences": 1,
+     "grade": null,
+     "ease": null,
+     "adverbs": 0,
+     "adverb_ratio": 0.0,
+     "passives": 0,
+     "hard_sentences": 0,
+     "very_hard_sentences": 0
+    }
+   }
+  },
+  {
+   "input": {
+    "kind": "vibes",
+    "text": "nope",
+    "workspace": "w"
+   },
+   "error": "unknown atom kind: vibes"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "nope",
+    "workspace": "w",
+    "level": "guessed"
+   },
+   "error": "unknown atom level: guessed"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "   ",
+    "workspace": "w"
+   },
+   "error": "atom text is required"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "no workspace",
+    "workspace": ""
+   },
+   "error": "atom workspace is required"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "workspace": "w"
+   },
+   "error": "atom text exceeds soft cap 500"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "api_key=sk-not-a-real-key-here",
+    "workspace": "w"
+   },
+   "error": "credential-shaped text is rejected"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "One. Two. Three.",
+    "workspace": "w",
+    "origin": "agent-derived"
+   },
+   "error": "atom has 3 sentences; one claim is at most 2"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "Set scoped.",
+    "workspace": "w",
+    "set": "Review"
+   },
+   "ok": {
+    "kind": "voice",
+    "text": "Set scoped.",
+    "workspace": "w",
+    "set": "review",
+    "prose": {
+     "words": 2,
+     "sentences": 1,
+     "grade": null,
+     "ease": null,
+     "adverbs": 0,
+     "adverb_ratio": 0.0,
+     "passives": 0,
+     "hard_sentences": 0,
+     "very_hard_sentences": 0
+    }
+   }
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "Bad set.",
+    "workspace": "w",
+    "set": "../etc"
+   },
+   "error": "bad set name: '../etc'"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "Cited.",
+    "workspace": "w",
+    "entities": [
+     "deed-patch-overlay",
+     "JOSS"
+    ]
+   },
+   "ok": {
+    "kind": "voice",
+    "text": "Cited.",
+    "workspace": "w",
+    "entities": [
+     "deed-patch-overlay",
+     "JOSS"
+    ],
+    "prose": {
+     "words": 1,
+     "sentences": 1,
+     "grade": null,
+     "ease": null,
+     "adverbs": 0,
+     "adverb_ratio": 0.0,
+     "passives": 0,
+     "hard_sentences": 0,
+     "very_hard_sentences": 0
+    }
+   }
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "Bare.",
+    "workspace": "w",
+    "entities": [
+     "deed-"
+    ]
+   },
+   "error": "'deed-' is a bare 'deed-' and names no deed"
+  },
+  {
+   "input": {
+    "kind": "voice",
+    "text": "Split.",
+    "workspace": "w",
+    "entities": [
+     "deed-a,b"
+    ]
+   },
+   "error": "'deed-a,b' carries ',', which would split the entity into two"
+  }
+ ],
+ "entities": [
+  {
+   "text": "The Parser reads the Header block.",
+   "entities": [
+    "Header",
+    "Parser",
+    "The"
+   ]
+  },
+  {
+   "text": "Use `ripgrep` not `grep` here.",
+   "entities": [
+    "Use",
+    "grep",
+    "ripgrep"
+   ]
+  },
+  {
+   "text": "no capitals at all here",
+   "entities": []
+  },
+  {
+   "text": "A single A and an AB pair",
+   "entities": [
+    "AB"
+   ]
+  },
+  {
+   "text": "Mixed `back tick` and Capitalized runs",
+   "entities": [
+    "Capitalized",
+    "Mixed",
+    "back tick"
+   ]
+  },
+  {
+   "text": "",
+   "entities": []
+  }
+ ],
+ "tool_dump": [
+  {
+   "text": "",
+   "is_dump": true
+  },
+  {
+   "text": "   ",
+   "is_dump": true
+  },
+  {
+   "text": "Reviews open with a check.",
+   "is_dump": false
+  },
+  {
+   "text": "Here is the run:\n```\nstdout: everything fine\n```",
+   "is_dump": true
+  },
+  {
+   "text": "```\nnothing named\n```",
+   "is_dump": false
+  },
+  {
+   "text": "<!DOCTYPE html><html><body>hi</body></html>",
+   "is_dump": true
+  },
+  {
+   "text": "<html>no doctype</html>",
+   "is_dump": true
+  },
+  {
+   "text": "total 48\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file0\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file1\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file2\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file3\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file4\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file5\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file6",
+   "is_dump": true
+  },
+  {
+   "text": "total 48\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file0\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file1\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file2\n-rw-r--r-- 1 x x 0 Jan 1 00:00 file3",
+   "is_dump": false
+  },
+  {
+   "text": "drwxr-xr-x 2 x x 4096 Jan 1 00:00 dir0\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir1\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir2\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir3\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir4\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir5\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir6\ndrwxr-xr-x 2 x x 4096 Jan 1 00:00 dir7",
+   "is_dump": true
+  }
+ ],
+ "claim": [
+  {
+   "line": "Remember: always pin the review set",
+   "kind": "lesson",
+   "claim": "always pin the review set"
+  },
+  {
+   "line": "Prefer: ripgrep over grep",
+   "kind": "preference",
+   "claim": "ripgrep over grep"
+  },
+  {
+   "line": "Remember that: pin the review set"
+  },
+  {
+   "line": "Note that the test failed on line 12"
+  },
+  {
+   "line": "Prefer conventional commits"
+  },
+  {
+   "line": "remember: lowercase still counts",
+   "kind": "lesson",
+   "claim": "lowercase still counts"
+  },
+  {
+   "line": ""
+  }
+ ],
+ "links": {
+  "clock": "2026-01-01T00:00:00.000Z",
+  "live": [
+   {
+    "id": "one",
+    "text": "one",
+    "entities": [
+     "Parser",
+     "Header"
+    ],
+    "links": []
+   },
+   {
+    "id": "two",
+    "text": "two",
+    "entities": [
+     "Parser",
+     "Header",
+     "Record"
+    ],
+    "links": []
+   },
+   {
+    "id": "three",
+    "text": "three",
+    "entities": [
+     "Unrelated"
+    ],
+    "links": [
+     "subject"
+    ]
+   },
+   {
+    "id": "four",
+    "text": "four",
+    "entities": [
+     "Parser"
+    ],
+    "valid_to": "2020-01-01T00:00:00.000Z"
+   }
+  ],
+  "subject_in": {
+   "id": "subject",
+   "text": "subject",
+   "entities": [
+    "Parser",
+    "Header"
+   ]
+  },
+  "subject_links": [
+   "one",
+   "two"
+  ],
+  "rewritten": [
+   {
+    "id": "one",
+    "links": [
+     "subject"
+    ]
+   },
+   {
+    "id": "three",
+    "links": []
+   },
+   {
+    "id": "two",
+    "links": [
+     "subject"
+    ]
+   }
+  ],
+  "filtered": [
+   {
+    "id": "a",
+    "links": [
+     "b"
+    ]
+   },
+   {
+    "id": "b",
+    "links": [
+     "a"
+    ]
+   }
+  ]
+ },
+ "review_clock": "2026-01-01T00:00:00.000Z",
+ "review": [
+  {
+   "review_in": {},
+   "grade": "initial",
+   "interval_s": null,
+   "due_at": "2026-01-02T00:00:00.000Z",
+   "review": {
+    "reps": 0,
+    "interval_s": 86400,
+    "ease": 2.5,
+    "stability": 1.0,
+    "difficulty": 5.0,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "review_in": {},
+   "grade": "initial",
+   "interval_s": 3600,
+   "due_at": "2026-01-01T01:00:00.000Z",
+   "review": {
+    "reps": 0,
+    "interval_s": 3600,
+    "ease": 2.5,
+    "stability": 1.0,
+    "difficulty": 5.0,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "review_in": {},
+   "grade": "recalled",
+   "interval_s": null,
+   "due_at": "2026-01-02T00:24:06.000Z",
+   "review": {
+    "reps": 1,
+    "interval_s": 87846,
+    "ease": 2.5,
+    "stability": 1.0167363850179754,
+    "difficulty": 4.85,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "review_in": {},
+   "grade": "lapsed",
+   "interval_s": null,
+   "due_at": "2026-01-02T00:00:00.000Z",
+   "review": {
+    "reps": 0,
+    "interval_s": 86400,
+    "ease": 2.5,
+    "stability": 0.5,
+    "difficulty": 5.2,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "review_in": {
+    "reps": 3,
+    "stability": 4.0,
+    "difficulty": 6.0,
+    "last": "2025-12-20T00:00:00.000Z"
+   },
+   "grade": "recalled",
+   "interval_s": null,
+   "due_at": "2026-01-06T15:23:52.000Z",
+   "review": {
+    "reps": 4,
+    "interval_s": 487432,
+    "ease": 2.5,
+    "stability": 5.64157788291018,
+    "difficulty": 5.85,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "review_in": {
+    "reps": 3,
+    "stability": 4.0,
+    "difficulty": 6.0,
+    "last": "2025-12-20T00:00:00.000Z"
+   },
+   "grade": "lapsed",
+   "interval_s": null,
+   "due_at": "2026-01-03T00:00:00.000Z",
+   "review": {
+    "reps": 0,
+    "interval_s": 172800,
+    "ease": 2.5,
+    "stability": 2.0,
+    "difficulty": 6.2,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "review_in": {
+    "reps": 1,
+    "stability": 0.2,
+    "difficulty": 9.9,
+    "last": "2026-01-01T00:00:00.000Z"
+   },
+   "grade": "recalled",
+   "interval_s": null,
+   "due_at": "2026-01-02T00:00:00.000Z",
+   "review": {
+    "reps": 2,
+    "interval_s": 86400,
+    "ease": 2.5,
+    "stability": 0.20205063024104888,
+    "difficulty": 9.75,
+    "last": "2026-01-01T00:00:00.000Z"
+   }
+  }
+ ]
+}
