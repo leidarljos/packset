@@ -157,6 +157,4 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -q 'cogapp==3.6.0'
-          files=$(git grep -l -F '[[[cog')
-          # shellcheck disable=SC2086
-          cog --check --diff $files
+          cog --check --diff @cogfiles.txt
