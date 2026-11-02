@@ -28,3 +28,15 @@ serde = { version = "1", features = ["derive"] }
 # fields in the order that writer put them.
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
+# Crates in this workspace. cog writes the version from [workspace.package],
+# which is the one line where the version is written by hand.
+# [[[cog
+# import sys
+# from pathlib import Path
+# sys.path.insert(0, str(Path(cog.inFile).resolve().parent / "scripts"))
+# from workspace_version import workspace_dependency_lines
+# cog.out(workspace_dependency_lines())
+# ]]]
+packset-client = { path = "crates/packset-client", version = "0.17.3" }
+packset-core = { path = "crates/packset-core", version = "0.17.3" }
+# [[[end]]]

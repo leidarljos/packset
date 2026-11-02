@@ -41,6 +41,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ env.TAG }}
+      # The tag's v prefix is not part of the crate version. One runner reads
+      # the manifest; the matrix builds that same tag.
+      - name: The tag matches the crate version
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          ver=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          tag="${TAG#v}"
+          if [ "$tag" != "$ver" ]; then
+            echo "tag $TAG does not match crate version $ver" >&2
+            exit 1
+          fi
       # The build script comes from the workflow's commit, so a fix to it
       # applies when an older tag is rebuilt.
       - uses: actions/checkout@v4

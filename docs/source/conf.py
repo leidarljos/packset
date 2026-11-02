@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 from docutils import nodes
@@ -10,11 +11,20 @@ from sphinx.writers.html5 import HTML5Translator
 _DOCS = Path(__file__).resolve().parent
 _ROOT = _DOCS.parent.parent
 
+
+def _crate_release() -> str:
+    # The version is written in the workspace manifest and read here.
+    with (_ROOT / "Cargo.toml").open("rb") as handle:
+        manifest = tomllib.load(handle)
+    return manifest["workspace"]["package"]["version"]
+
+
 project = "packset"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.2.0"
-version = "0.2"
+release = _crate_release()
+# |version| is major.minor. |release| is the crate version.
+version = ".".join(release.split(".")[:2])
 
 extensions = [
     "sphinx.ext.mathjax",

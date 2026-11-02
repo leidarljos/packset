@@ -16,6 +16,18 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
+      # A tag publish is a release of this crate. The tag's v prefix is not
+      # part of the crate version. A branch dispatch has no tag to compare.
+      - name: The tag matches the crate version
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          ver=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$ver" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match crate version ${ver}" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: rust-lang/crates-io-auth-action@v1.0.5
         id: auth

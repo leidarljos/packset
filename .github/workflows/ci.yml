@@ -142,3 +142,21 @@ jobs:
         run: cargo install --locked cargo-deny --version 0.20.2
       - name: cargo deny check licenses
         run: cargo deny check licenses
+
+  version:
+    name: cog --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # cog writes the internal crate versions from the workspace package
+      # version. A hand edit of those lines fails here.
+      - name: cog --check
+        run: |
+          set -euo pipefail
+          python -m pip install -q 'cogapp==3.6.0'
+          files=$(git grep -l -F '[[[cog')
+          # shellcheck disable=SC2086
+          cog --check --diff $files
