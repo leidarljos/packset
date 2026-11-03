@@ -539,6 +539,33 @@ impl WorkspaceLive {
             }
         }
     }
+
+    /// Drop claims [`Self::shown`] would now refuse.
+    ///
+    /// A claim is indexed when it is written. `valid_to` can pass later,
+    /// with no write of that claim, and the claim stays in the set. The
+    /// next write would then return it as a duplicate, offer it as a link
+    /// or a replacement, and count it in the live cap. The readers of this
+    /// map (`records_in`, `first_same`, `link_peers`, `indexed_records`,
+    /// `indexed_len`, the shape pass and reconcile) run after this pass.
+    /// It drops what a rebuilt snapshot would, and cuts links that named
+    /// a claim that left.
+    fn prune_expired(&mut self, now: &str) {
+        let stale: Vec<String> = self
+            .sets
+            .values()
+            .flat_map(|members| members.order.iter())
+            .filter(|rec| !Self::shown(rec, now))
+            .filter_map(|rec| rec.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for id in &stale {
+            self.remove_id(id);
+        }
+        self.cut_every_link();
+    }
 }
 
 /// Shapes kept when `PACKSET_SHAPE_CAP` is unset. The smallest power of
@@ -1133,6 +1160,19 @@ impl Service {
         Ok(())
     }
 
+    /// Drop indexed claims whose window has closed since they were written.
+    ///
+    /// The set index is patched, not rebuilt, so a claim stays until a
+    /// later write of that same claim. This runs at the start of a write,
+    /// before the live length is read.
+    fn prune_expired(&self, workspace: &str) {
+        let mut index = self.live_sets.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(kept) = index.get_mut(workspace) else {
+            return;
+        };
+        kept.prune_expired(&clock::utcnow());
+    }
+
     /// Fold committed records into the set index. A workspace that has not
     /// been indexed yet is left alone: the next write reads the store.
     fn patch_live_sets(&self, workspace: &str, written: &[Record]) {
@@ -1476,7 +1516,11 @@ impl Service {
             .to_string();
         // The set index is filled from the snapshot once. After that a write
         // reads its own set, not every live claim in the workspace.
+        // Membership was decided at insert. Drop claims the snapshot would
+        // no longer show before the length is read, or an expired claim
+        // counts toward the cap and answers a duplicate of the same words.
         self.ensure_live_sets(&workspace)?;
+        self.prune_expired(&workspace);
         let snapshot_len = self.indexed_len(&workspace)?;
         trace.mark("snapshot");
         // Dedupe and replacement stay inside the set the new claim names.
@@ -3914,6 +3958,123 @@ mod tests {
         assert_eq!(forgotten, 3);
         let panel = packset_core::Panel::named("rrf", "none", "off").unwrap();
         assert_eq!(svc.status(None, &panel).unwrap()["live_cap"], json!(3));
+    }
+
+    /// A claim is indexed while its window is open. Once `valid_to` passes,
+    /// the same words are a new live claim, and the cap does not count the
+    /// closed one. Counting it would forget the standing lesson.
+    #[test]
+    fn an_expired_claim_is_stored_again_and_left_out_of_the_cap() {
+        // Open for one second, so the test can store the claim and then
+        // wait until the window has passed. `clock::shift` moves by whole
+        // seconds. The bound is that window plus one more second, in the
+        // millisecond unit `parse_millis` returns. A remaining wait past
+        // the bound is not the window this test opened, and the test fails
+        // instead of sleeping.
+        const OPEN_S: i64 = 1;
+        const MILLIS_PER_SEC: i64 = 1000;
+        let (_dir, svc) = service();
+        // Two live claims fill the cap: the standing lesson, and the claim
+        // that replaces the one whose window has closed. The expired claim
+        // is not one of them. Counting it makes the pack one over, and the
+        // cap forgets the standing lesson, which is the least retrievable.
+        let svc = svc.with_live_cap(2);
+        let text = "The fuse rating holds only until the window closes.";
+        let standing_id = "standing000000000000000000000001";
+        let mut standing = atom("A standing lesson was written long ago and never recalled.");
+        standing.insert("id".into(), json!(standing_id));
+        standing.insert("kind".into(), json!("lesson"));
+        // Reviewed at the start of 2025, at the default stability of one
+        // day. Long after that review this is the least retrievable
+        // lesson, so the cap forgets it first if the expired claim is
+        // still counted.
+        let reviewed = "2025-01-01T00:00:00.000Z";
+        standing.insert("ts".into(), json!(reviewed));
+        standing.insert(
+            "review".into(),
+            json!({"last": reviewed, "stability": record::DEFAULT_STABILITY}),
+        );
+        standing.insert("tombstone".into(), json!(false));
+        svc.store().upsert(&standing).unwrap();
+
+        let until = clock::shift(&clock::utcnow(), OPEN_S).expect("valid_to");
+        let mut expiring = atom(text);
+        expiring.insert("kind".into(), json!("lesson"));
+        expiring.insert("valid_to".into(), json!(until));
+        let first = svc.add(expiring).unwrap();
+        assert!(first.get("forgot").is_none(), "{first:?}");
+        let first_id = first["id"].as_str().unwrap().to_string();
+        let due = first["due_at"].as_str().unwrap();
+        assert!(
+            due > until.as_str(),
+            "a due claim stays indexed after valid_to: due {due}, until {until}"
+        );
+        let left_ms =
+            clock::parse_millis(&until).unwrap() - clock::parse_millis(&clock::utcnow()).unwrap();
+        assert!(left_ms > 0, "the window closed while the claim was stored");
+        // `valid_to` is exclusive, so the wait runs one millisecond past it.
+        let past_end_ms = left_ms + 1;
+        let bound_ms = (OPEN_S + 1) * MILLIS_PER_SEC;
+        assert!(
+            past_end_ms <= bound_ms,
+            "remaining wait {past_end_ms} ms is not the one-second window"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(past_end_ms as u64));
+        assert!(
+            clock::utcnow().as_str() >= until.as_str(),
+            "still inside the window"
+        );
+        let closed = svc.store().get("w", &first_id).unwrap().unwrap();
+        assert!(
+            !record::is_live(&closed, &clock::utcnow()),
+            "the wait did not pass valid_to: {closed:?}"
+        );
+
+        let mut again_atom = atom(text);
+        again_atom.insert("kind".into(), json!("lesson"));
+        let again = svc.add(again_atom).unwrap();
+        assert_ne!(
+            again["id"].as_str().unwrap(),
+            first_id.as_str(),
+            "the expired claim was returned as the live copy: {again:?}"
+        );
+        assert!(
+            again.get("forgot").is_none(),
+            "the cap counted the expired claim: {again:?}"
+        );
+        assert!(
+            record::is_live(&again, &clock::utcnow()),
+            "the new claim is not live: {again:?}"
+        );
+        let kept = svc.store().get("w", standing_id).unwrap().unwrap();
+        assert_eq!(kept["tombstone"], json!(false), "{kept:?}");
+        assert!(
+            kept.get("forgotten").is_none(),
+            "the cap forgot the standing lesson: {kept:?}"
+        );
+        let expired = svc.store().get("w", &first_id).unwrap().unwrap();
+        assert!(
+            expired.get("forgotten").is_none(),
+            "the cap tombstoned the expired claim: {expired:?}"
+        );
+        let copies: Vec<_> = svc
+            .store()
+            .scan(Some("w"))
+            .unwrap()
+            .into_iter()
+            .filter(|peer| peer.get("text").and_then(Value::as_str) == Some(text))
+            .collect();
+        assert_eq!(copies.len(), 2, "the repeat was not stored: {copies:?}");
+        let live_copies = copies
+            .iter()
+            .filter(|peer| record::is_live(peer, &clock::utcnow()))
+            .count();
+        assert_eq!(live_copies, 1, "{copies:?}");
+        let panel = packset_core::Panel::default();
+        let status = svc.status(Some("w"), &panel).unwrap();
+        assert_eq!(status["live"], json!(2), "{status}");
+        assert_eq!(status["expired"], json!(1), "{status}");
+        assert_eq!(status["tombstone"], json!(0), "{status}");
     }
 
     /// A lesson a seat wrote a year ago and nobody asked for since, with a
