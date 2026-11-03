@@ -3548,6 +3548,37 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// What this process has resident of its maps of `path`, in KiB: the
+    /// `Rss` of each mapping in `/proc/self/smaps` that names it. The file
+    /// is read a line at a time, so the read leaves no heap of its size
+    /// behind to count in the next reading.
+    #[cfg(target_os = "linux")]
+    fn mapped_kib(path: &Path) -> u64 {
+        use std::io::BufRead;
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = path.to_string_lossy();
+        let Ok(smaps) = fs::File::open("/proc/self/smaps") else {
+            return 0;
+        };
+        let mut named = false;
+        let mut kib = 0;
+        for line in std::io::BufReader::new(smaps).lines().map_while(Result::ok) {
+            let Some(first) = line.split_whitespace().next() else {
+                continue;
+            };
+            if !first.ends_with(':') {
+                named = line.trim_end().ends_with(path.as_ref());
+            } else if named && first == "Rss:" {
+                kib += line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+            }
+        }
+        kib
+    }
+
     /// Start the writer over `home` in a child of this test binary and
     /// return the child's report. RSS is the whole process, so a
     /// neighbouring test would otherwise charge its own allocations to it.
@@ -3623,6 +3654,11 @@ mod tests {
     /// (`M_MMAP_THRESHOLD` in mallopt(3)). The next open's list came from
     /// the heap, cleared, and charged 2048 KiB to the start. packsetd opens
     /// one environment, whose list is mapped and touched a page at a time.
+    ///
+    /// `exe_base` and `exe` are what this test binary has resident before
+    /// the open and after the pass, and `mdb` what the pack's data file
+    /// has after the pass, so the file pages a start leaves can be told
+    /// apart from the pack's.
     #[cfg(target_os = "linux")]
     fn report_start(home: &Path) {
         let warm = tempfile::tempdir().unwrap();
@@ -3630,6 +3666,8 @@ mod tests {
         let warm_start =
             crate::service::Service::open(crate::home::Home::new(warm.path())).unwrap();
         warm_start.store().restore_created().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let exe_base = mapped_kib(&exe);
         let base = status_kib("VmRSS");
         let started = std::time::Instant::now();
         let opened = crate::service::Service::open(crate::home::Home::new(home));
@@ -3648,12 +3686,15 @@ mod tests {
         let passed = service.store().restore_created();
         let pass_ms = started.elapsed().as_millis();
         println!(
-            "start {} open_us={open_us} pass_ms={pass_ms} base={base} rss={} anon={} file={} hwm={}{}",
+            "start {} open_us={open_us} pass_ms={pass_ms} base={base} rss={} anon={} file={} hwm={} \
+             exe_base={exe_base} exe={} mdb={}{}",
             if passed.is_ok() { "ok" } else { "stopped" },
             status_kib("VmRSS"),
             status_kib("RssAnon"),
             status_kib("RssFile") + status_kib("RssShmem"),
             status_kib("VmHWM"),
+            mapped_kib(&exe),
+            mapped_kib(&service.store().db_dir.join("data.mdb")),
             passed.err().map_or_else(String::new, |err| format!(" err={err:#}")),
         );
     }
