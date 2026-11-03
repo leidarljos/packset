@@ -17,7 +17,7 @@ use packset_core::record::AtomError;
 use serde_json::{json, Map, Value};
 
 use crate::cards::WriteError;
-use crate::service::{RetiredId, Service};
+use crate::service::Service;
 use crate::wire::{self, Method};
 
 /// The address the writer will bind, and no other.
@@ -807,9 +807,21 @@ fn written(mut atom: Map<String, Value>) -> Map<String, Value> {
 /// on the record already.
 fn stored(atom: Map<String, Value>) -> Map<String, Value> {
     let mut atom = written(atom);
+    // A retired id already named itself in `warning`. A flagged text has
+    // its own line. The client prints one line, so the two are joined
+    // rather than one of them dropped.
+    let prior = atom
+        .get("warning")
+        .and_then(Value::as_str)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string);
     let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
     let found = packset_core::record::flags(text);
     if let Some(line) = packset_core::record::flag_warning(&found) {
+        let line = match prior {
+            Some(prev) => format!("{prev} {line}"),
+            None => line,
+        };
         atom.insert("warning".into(), Value::String(line));
     }
     atom
@@ -846,16 +858,7 @@ fn flagged(mut body: Value, texts: &[&str]) -> Value {
 fn answer<T: Into<Value>>(result: anyhow::Result<T>) -> Answer {
     match result {
         Ok(value) => Answer::ok(value.into()),
-        Err(e) => {
-            // A retired id is a conflict with the tombstone, not a malformed
-            // body. Every other refusal stays 400.
-            let code = if e.downcast_ref::<RetiredId>().is_some() {
-                409
-            } else {
-                400
-            };
-            Answer::err(code, root_message(&e))
-        }
+        Err(e) => Answer::err(400, root_message(&e)),
     }
 }
 
@@ -1717,8 +1720,8 @@ mod tests {
         );
     }
 
-    /// The review's order: a person lesson, a deletion, then the same id
-    /// with new text. The id stays the tombstone.
+    /// A person lesson, a deletion, then the same id with new text.
+    /// The new text is stored under a fresh id. The old id stays the tombstone.
     #[test]
     fn a_tombstoned_id_is_not_posted_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1767,6 +1770,8 @@ mod tests {
             deleted.body["retracted_by"],
             json!("deed-patch-not-a-real-deed")
         );
+        assert!(deleted.body.get("warning").is_none(), "{:?}", deleted.body);
+        assert!(deleted.body.get("why_text").is_none(), "{:?}", deleted.body);
 
         let mut getq = HashMap::new();
         getq.insert("workspace".into(), "w".into());
@@ -1788,16 +1793,58 @@ mod tests {
             "origin": "user-declared",
             "source": {"basis": "person"}
         }));
-        assert_eq!(again.code, 409, "{:?}", again.body);
-        let err = again.body["error"].as_str().unwrap_or("");
-        assert!(err.contains(id) && err.contains("deleted"), "{err}");
+        assert_eq!(again.code, 200, "{:?}", again.body);
+        let fresh = again.body["id"].as_str().unwrap().to_string();
+        assert_ne!(fresh, id);
+        assert_eq!(
+            again.body["warning"],
+            json!(format!(
+                "{id} is retired; stored under a new id. A deleted atom does not come back under its old id"
+            ))
+        );
+        assert_eq!(
+            again.body["text"],
+            json!("Unrelated note about the weather.")
+        );
         let stored = svc.store().get("w", id).unwrap().unwrap();
         assert_eq!(stored["tombstone"], json!(true), "{stored:?}");
         assert_eq!(stored["text"], json!(lesson), "{stored:?}");
         assert_eq!(stored["origin"], json!("user-declared"), "{stored:?}");
-        assert!(svc.store().live("w").unwrap().is_empty());
+        let live_ids: Vec<String> = svc
+            .store()
+            .live("w")
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(live_ids, vec![fresh.clone()]);
 
-        // The same words are still that retired id, not a second live atom.
+        let still = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            &format!("/v1/atoms/{id}"),
+            &getq,
+            &Map::new(),
+        );
+        assert_eq!(still.code, 404, "{:?}", still.body);
+        let hits = read(&svc, "/v1/search", "weather")["hits"].clone();
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["id"] == json!(fresh)),
+            "{hits:?}"
+        );
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["id"] != json!(id)),
+            "search returned the tombstone: {hits:?}"
+        );
+
+        // The same words under the retired id are a new claim. The tombstone stays.
         let same = post(json!({
             "id": id,
             "workspace": "w",
@@ -1806,8 +1853,14 @@ mod tests {
             "origin": "user-declared",
             "source": {"basis": "person"}
         }));
-        assert_eq!(same.code, 409, "{:?}", same.body);
-        assert!(svc.store().live("w").unwrap().is_empty());
+        assert_eq!(same.code, 200, "{:?}", same.body);
+        let second = same.body["id"].as_str().unwrap();
+        assert_ne!(second, id);
+        assert_ne!(second, fresh);
+        assert_eq!(
+            svc.store().get("w", id).unwrap().unwrap()["text"],
+            json!(lesson)
+        );
 
         // Another workspace may use the id. It is a different atom.
         let other = post(json!({
@@ -1847,6 +1900,229 @@ mod tests {
         assert_eq!(
             svc.store().get("w", live_id).unwrap().unwrap()["text"],
             json!("A live claim can still be rewritten.")
+        );
+    }
+
+    /// A retraction whose reason is plain text is stored. The reason is on
+    /// the tombstone, and the answer carries one warning line. An accession
+    /// is unchanged.
+    #[test]
+    fn a_plain_text_retraction_is_stored_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let q = HashMap::new();
+        let text = "The gauge reads eta after the valve opens.";
+        let added = post(
+            &svc,
+            "/v1/atoms",
+            &json!({"workspace": "scout", "kind": "lesson", "text": text}),
+        );
+        let id = added.body["id"].as_str().unwrap().to_string();
+        let mut searchq = HashMap::new();
+        searchq.insert("workspace".into(), "scout".into());
+        searchq.insert("q".into(), "gauge eta".into());
+        let before = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &searchq,
+            &Map::new(),
+        );
+        assert_eq!(before.code, 200, "{:?}", before.body);
+        assert!(
+            before.body["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["id"] == json!(id)),
+            "search missed the live claim: {:?}",
+            before.body
+        );
+        let deleted = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/delete",
+            &q,
+            json!({"workspace": "scout", "id": id, "why": "because it was wrong"})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(deleted.code, 200, "{:?}", deleted.body);
+        assert_eq!(deleted.body["tombstone"], json!(true));
+        assert_eq!(deleted.body["text"], json!(text));
+        assert_eq!(deleted.body["why_text"], json!("because it was wrong"));
+        assert!(
+            deleted.body.get("retracted_by").is_none(),
+            "{:?}",
+            deleted.body
+        );
+        assert_eq!(
+            deleted.body["warning"],
+            json!(
+                "because it was wrong is not a deed accession; kept as why_text. A retraction cites deed-<kind>-<slug> or sha256:<hash>"
+            )
+        );
+        let mut getq = HashMap::new();
+        getq.insert("workspace".into(), "scout".into());
+        let missing = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            &format!("/v1/atoms/{id}"),
+            &getq,
+            &Map::new(),
+        );
+        assert_eq!(missing.code, 404, "{:?}", missing.body);
+        let hits = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &searchq,
+            &Map::new(),
+        );
+        assert_eq!(hits.code, 200, "{:?}", hits.body);
+        assert!(
+            hits.body["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["id"] != json!(id)),
+            "search returned the retracted claim: {:?}",
+            hits.body
+        );
+
+        let kept = post(
+            &svc,
+            "/v1/atoms",
+            &json!({"workspace": "scout", "kind": "lesson", "text": "The deed still cites."}),
+        );
+        let cited = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/delete",
+            &q,
+            json!({
+                "workspace": "scout",
+                "id": kept.body["id"],
+                "why": "sha256:aabbccdd"
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert_eq!(cited.code, 200, "{:?}", cited.body);
+        assert_eq!(cited.body["retracted_by"], json!("sha256:aabbccdd"));
+        assert!(cited.body.get("why_text").is_none(), "{:?}", cited.body);
+        assert!(cited.body.get("warning").is_none(), "{:?}", cited.body);
+    }
+
+    /// A post that reuses a deleted id is stored under a fresh id. The
+    /// tombstone keeps the old one, and search finds the new claim.
+    #[test]
+    fn a_post_over_a_retired_id_is_stored_under_a_fresh_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let q = HashMap::new();
+        let id = "lessonid0000000000000000000009";
+        let first = post(
+            &svc,
+            "/v1/atoms",
+            &json!({
+                "workspace": "scout",
+                "kind": "lesson",
+                "id": id,
+                "text": "Retire me soon."
+            }),
+        );
+        assert_eq!(first.body["id"], json!(id));
+        let deleted = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/delete",
+            &q,
+            json!({"workspace": "scout", "id": id}).as_object().unwrap(),
+        );
+        assert_eq!(deleted.code, 200, "{:?}", deleted.body);
+        assert_eq!(deleted.body["tombstone"], json!(true));
+        let again = post(
+            &svc,
+            "/v1/atoms",
+            &json!({
+                "workspace": "scout",
+                "kind": "lesson",
+                "id": id,
+                "text": "Retire me soon, again."
+            }),
+        );
+        let fresh = again.body["id"].as_str().unwrap();
+        assert_ne!(fresh, id);
+        assert_eq!(again.body["text"], json!("Retire me soon, again."));
+        assert_eq!(
+            again.body["warning"],
+            json!(format!(
+                "{id} is retired; stored under a new id. A deleted atom does not come back under its old id"
+            ))
+        );
+        let mut getq = HashMap::new();
+        getq.insert("workspace".into(), "scout".into());
+        let old = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            &format!("/v1/atoms/{id}"),
+            &getq,
+            &Map::new(),
+        );
+        assert_eq!(old.code, 404, "{:?}", old.body);
+        let got = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            &format!("/v1/atoms/{fresh}"),
+            &getq,
+            &Map::new(),
+        );
+        assert_eq!(got.code, 200, "{:?}", got.body);
+        assert_eq!(got.body["text"], json!("Retire me soon, again."));
+        assert_eq!(got.body["tombstone"], json!(false));
+        let tomb = svc.store().get("scout", id).unwrap().unwrap();
+        assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+        assert_eq!(tomb["text"], json!("Retire me soon."));
+        let mut searchq = HashMap::new();
+        searchq.insert("workspace".into(), "scout".into());
+        searchq.insert("q".into(), "Retire soon".into());
+        let hits = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &searchq,
+            &Map::new(),
+        );
+        assert_eq!(hits.code, 200, "{:?}", hits.body);
+        assert!(
+            hits.body["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["id"] == json!(fresh)),
+            "{:?}",
+            hits.body
+        );
+        assert!(
+            hits.body["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["id"] != json!(id)),
+            "search returned the tombstone: {:?}",
+            hits.body
         );
     }
 

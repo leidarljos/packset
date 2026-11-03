@@ -15,21 +15,6 @@ use crate::cards;
 use crate::home::Home;
 use crate::store::{Record, Store};
 
-/// A client-chosen id a tombstone still holds. The HTTP layer answers 409.
-///
-/// The id is the name a later reader uses. Writing a new live atom over
-/// the tombstone would put new text on the id a person had deleted.
-#[derive(Debug)]
-pub struct RetiredId(pub String);
-
-impl std::fmt::Display for RetiredId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for RetiredId {}
-
 /// The cap on one attached body.
 pub const ATTACH_CAP: usize = 200_000;
 /// How many workspaces may hold an attachment at once. A slot that is
@@ -1424,17 +1409,29 @@ impl Service {
         self.add_prepared_traced(atom, WriteTrace::begin(), true)
     }
 
-    /// Refuse a post whose id a tombstone in this workspace still holds,
-    /// else return the record the post would write over.
+    /// A post whose id a tombstone in this workspace still holds is stored
+    /// under a fresh id. The tombstone keeps the old one, so a deleted atom
+    /// does not come back under its old id. Returns the live record a post
+    /// would write over, or none when the id is free or was just retired.
     ///
     /// The key is workspace and id together, so the same id in another
     /// workspace is a different atom. A forget keeps the tombstones, so a
     /// forgotten workspace's other ids may be posted again and these not.
-    fn refuse_retired(&self, workspace: &str, id: &str) -> anyhow::Result<Option<Record>> {
+    fn refuse_retired(&self, atom: &mut Record) -> anyhow::Result<Option<Record>> {
+        let workspace = atom
+            .get("workspace")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let id = atom
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if workspace.is_empty() || id.is_empty() {
             return Ok(None);
         }
-        let Some(existing) = self.store.get(workspace, id)? else {
+        let Some(existing) = self.store.get(&workspace, &id)? else {
             return Ok(None);
         };
         if existing
@@ -1442,9 +1439,16 @@ impl Service {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            return Err(anyhow::Error::new(RetiredId(format!(
-                "{id} is retired; a deleted atom does not come back under its old id"
-            ))));
+            // The line a client prints. It names the id that stayed a
+            // tombstone; the record's own id is the fresh one.
+            atom.insert("id".into(), Value::String(new_id()));
+            atom.insert(
+                "warning".into(),
+                Value::String(format!(
+                    "{id} is retired; stored under a new id. A deleted atom does not come back under its old id"
+                )),
+            );
+            return Ok(None);
         }
         Ok(Some(existing))
     }
@@ -1457,10 +1461,9 @@ impl Service {
         accepted: bool,
     ) -> anyhow::Result<Record> {
         // Before a proposal is filed, and before a duplicate is answered:
-        // the id is retired even when the text matches what was deleted.
-        let workspace = atom.get("workspace").and_then(Value::as_str).unwrap_or("");
-        let id = atom.get("id").and_then(Value::as_str).unwrap_or("");
-        let over = self.refuse_retired(workspace, id)?;
+        // a retired id is moved aside even when the text matches what was
+        // deleted, so this post does not write over the tombstone.
+        let over = self.refuse_retired(&mut atom)?;
         if packset_core::atom::needs_accept(
             record::origin_of(&atom),
             record::hook_of(&atom),
@@ -1810,14 +1813,16 @@ impl Service {
 
     /// Tombstone one atom and drop it from the projection.
     ///
-    /// `why` names the deed that withdrew the claim. A retraction cites a deed
-    /// or nothing, so unlike an entity it is refused when it is free text: the
-    /// point of writing it is that `deedar evidence` can be asked about it, and
-    /// a name no deed store answers for is a citation that only looks like one.
+    /// `why` names the deed that withdrew the claim when it is a deed
+    /// accession, and that accession is `retracted_by`, as before. Plain text
+    /// is the seat's reason. It is kept on the tombstone as `why_text`, with
+    /// one warning line, so the retraction is stored either way. A sentence
+    /// does not go in `retracted_by`: that field is a citation, and a name no
+    /// deed store answers for would only look like one.
     ///
     /// # Errors
     ///
-    /// [`AtomError`] when `why` is not a deed accession, else the store's.
+    /// The store's, including when the id is not current.
     pub fn delete_atom(
         &self,
         workspace: &str,
@@ -1825,15 +1830,26 @@ impl Service {
         why: Option<&str>,
     ) -> anyhow::Result<Record> {
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
-        let why = match why.map(str::trim).filter(|w| !w.is_empty()) {
-            Some(w) if !packset_core::atom::is_accession(w) => {
-                return Err(anyhow::Error::new(AtomError(format!(
-                    "{w} is not a deed accession; a retraction cites deed-<kind>-<slug> or sha256:<hash>"
-                ))))
-            }
-            other => other,
+        let why = why.map(str::trim).filter(|w| !w.is_empty());
+        let (cited, plain) = match why {
+            Some(w) if packset_core::atom::is_accession(w) => (Some(w), None),
+            other => (None, other),
         };
-        let tomb = self.store.delete(workspace, id, why)?;
+        let mut tomb = self.store.delete(workspace, id, cited)?;
+        if let Some(text) = plain {
+            // `delete` writes `why` only into `retracted_by`. The plain
+            // reason is a second write of the tombstone just stored, which
+            // is the whole migration: the record is the schema.
+            tomb.insert("why_text".into(), Value::String(text.to_string()));
+            tomb.insert(
+                "warning".into(),
+                Value::String(format!(
+                    "{text} is not a deed accession; kept as why_text. A retraction cites deed-<kind>-<slug> or sha256:<hash>"
+                )),
+            );
+            let mut stored = self.store.upsert_many(std::slice::from_ref(&tomb))?;
+            tomb = stored.pop().unwrap_or(tomb);
+        }
         self.queue_projection(vec![ProjectionOp::Delete(id.to_string())]);
         self.patch_live_sets(workspace, std::slice::from_ref(&tomb));
         self.unshape(workspace, &[id.to_string()]);
@@ -3611,8 +3627,8 @@ mod tests {
         assert_eq!(stored["tombstone"], json!(false));
     }
 
-    /// A forget is not a way back for a deleted id. Its tombstone survives
-    /// the forget, and the post after it is still refused.
+    /// A forget is not a way back onto a deleted id. Its tombstone survives
+    /// the forget, and a post of that id is stored under a fresh one.
     #[test]
     fn forgetting_a_workspace_keeps_its_retired_ids() {
         let (_dir, svc) = service();
@@ -3628,11 +3644,15 @@ mod tests {
 
         let report = svc.forget_workspace("w").unwrap();
         assert_eq!(report["forgotten"], json!(1), "{report:?}");
-        let err = svc.add(lesson).unwrap_err();
-        assert!(err.downcast_ref::<RetiredId>().is_some(), "{err}");
+        let stored = svc.add(lesson).unwrap();
+        assert_ne!(stored["id"].as_str(), Some(id));
+        let warning = stored["warning"].as_str().unwrap_or("");
+        assert!(warning.contains(id), "{warning}");
         let tomb = svc.store.get("w", id).unwrap().unwrap();
         assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
-        assert!(svc.store().live("w").unwrap().is_empty());
+        let live = svc.store().live("w").unwrap();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_ne!(live[0].get("id").and_then(Value::as_str), Some(id));
     }
 
     #[test]
@@ -3986,8 +4006,12 @@ mod tests {
                 assert!(tomb.get(gone).is_none(), "{gone} stayed: {tomb:?}");
             }
         }
-        let err = svc.add(rows[0].clone()).unwrap_err();
-        assert!(err.downcast_ref::<RetiredId>().is_some(), "{err}");
+        let again = svc.add(rows[0].clone()).unwrap();
+        assert_ne!(again["id"], rows[0]["id"]);
+        let id = rows[0]["id"].as_str().unwrap();
+        let tomb = svc.store().get("w", id).unwrap().unwrap();
+        assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+        assert!(tomb.get("text").is_none(), "{tomb:?}");
     }
 
     /// The first ask for a workspace's rules after the writer opens reads the
@@ -5162,17 +5186,46 @@ mod tests {
         );
     }
 
+    /// Plain text is the reason, kept beside the claim it retracts. An
+    /// accession stays a citation and gains no warning.
     #[test]
-    fn a_retraction_cites_a_deed_or_nothing() {
+    fn a_plain_retraction_keeps_its_reason() {
         let (_dir, svc) = service();
         let stored = svc.add(atom("The overlay landed.")).unwrap();
         let id = stored["id"].as_str().unwrap().to_string();
-        let refused = svc.delete_atom("w", &id, Some("because I said so"));
-        assert!(refused.is_err(), "free text passed as a citation");
-        // Refusing the citation refuses the whole write; the atom is still live.
-        assert!(svc
+        let tomb = svc
+            .delete_atom("w", &id, Some("because I said so"))
+            .unwrap();
+        assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+        assert_eq!(tomb["why_text"], json!("because I said so"));
+        assert_eq!(tomb["text"], json!("The overlay landed."));
+        assert!(tomb.get("retracted_by").is_none(), "{tomb:?}");
+        assert_eq!(
+            tomb["warning"],
+            json!(
+                "because I said so is not a deed accession; kept as why_text. A retraction cites deed-<kind>-<slug> or sha256:<hash>"
+            )
+        );
+        let kept = svc.store().get("w", &id).unwrap().unwrap();
+        assert_eq!(kept["why_text"], json!("because I said so"));
+        assert_eq!(kept["tombstone"], json!(true));
+
+        let stored = svc.add(atom("The overlay landed again.")).unwrap();
+        let id = stored["id"].as_str().unwrap().to_string();
+        let cited = svc
             .delete_atom("w", &id, Some("deed-patch-overlay"))
-            .is_ok());
+            .unwrap();
+        assert_eq!(cited["retracted_by"], json!("deed-patch-overlay"));
+        assert!(cited.get("why_text").is_none(), "{cited:?}");
+        assert!(cited.get("warning").is_none(), "{cited:?}");
+
+        let stored = svc.add(atom("The overlay landed a third time.")).unwrap();
+        let id = stored["id"].as_str().unwrap().to_string();
+        let blank = svc.delete_atom("w", &id, Some("   ")).unwrap();
+        assert!(blank.get("why_text").is_none(), "{blank:?}");
+        assert!(blank.get("retracted_by").is_none(), "{blank:?}");
+        assert!(blank.get("warning").is_none(), "{blank:?}");
+        assert_eq!(blank["tombstone"], json!(true));
     }
 
     #[test]

@@ -58,18 +58,18 @@ carry the port the kernel assigned.
 | =GET /health= | =packsetd= |
 | =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave), and =search.ranks= (the top-k cuts this writer honours; an older writer omits =search=) |
 | =GET /v1/workspaces= | names with live counts |
-| =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate; a post that names a live id writes over it and, like an update, cannot raise its =origin= or =source.basis= |
+| =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate; a post that names a live id writes over it and, like an update, cannot raise its =origin= or =source.basis=. A post that names an id a tombstone still holds is stored under a fresh id, with one =warning= naming the retired id; the tombstone keeps that id |
 | =GET /v1/atoms?workspace=&as_of== | live claims, or those live at =as_of= |
 | =GET /v1/atoms/<id>?workspace== | one record, whatever its state |
 | =POST /v1/atoms/update= | merge fields into one live claim |
-| =POST /v1/atoms/delete= | tombstone; =why= names the deed that withdrew it |
+| =POST /v1/atoms/delete= | tombstone. =why= as a deed accession is stored as =retracted_by=. Plain text is stored as =why_text=, and the answer carries one =warning= line. The claim is retracted either way |
 | =POST /v1/grade= | =recalled= true or false; moves =due_at= |
 | =GET /v1/search?workspace=&q=&limit=&as_of=&rerank=&rank== | ranked hits, the engine, the stage, and =rank= (=fused= or =relevance=); =rank=relevance= chooses the top k by lexical, BM25 and cosine, with no half-life and no retrievability; a hit the encoder named carries =dense_rank= (cosine plus a tenth of trust, not age) and =cosine= |
 | =GET /v1/islands?workspace== | the link graph's communities, largest first |
 | =GET /v1/hubs?workspace=&limit== | the claims the link graph turns on, highest first, with their scores |
 | =GET /v1/activate?workspace=&q=&limit=&fire=&as== | the cluster a cue activates: top hits as seeds, two hops along the links, as =island=; =seeds=, =agreed_seeds= (two scorers agreed), =weak= (no seed both scorers agreed on), =fired= and =held= (the same cue fired within the hour, so nothing moved), =as=; =fire=1= wires the top eight; =as=NAME= reads and writes that persona's weights (=link_weights_by=), the shared ones untouched |
 | =POST /v1/sweep= | =workspace=; the neglect sweep now: =lapsed=, =forgotten=, =forgotten_ids=. The writer runs it on a workspace's first write of a day |
-| =POST /v1/forget= | =workspace=; drop a scratch workspace's atoms whole, no deed: =workspace=, =forgotten=. A tombstone stays, so a deleted id stays retired and a post of it answers 409. Retraction stays =POST /v1/atoms/delete=, which names the deed |
+| =POST /v1/forget= | =workspace=; drop a scratch workspace's atoms whole, no deed: =workspace=, =forgotten=. A tombstone stays, so a deleted id stays retired and a post that names it is stored under a fresh id, with a warning. Retraction stays =POST /v1/atoms/delete= |
 | =POST /v1/fire= | =ids= that fired together: weights up, missing links made, other links decayed; the same set within an hour of its last fire is held (=held: true=), so two or more seats closing one issue tighten it once |
 | =POST /v1/consolidate= | the replacement rule over the live set in written order; =apply= false reports the pairs, true closes the earlier of each |
 | =GET /v1/accessions?workspace== | accessions the live claims cite |
@@ -119,6 +119,8 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object; a rewrite never crosses a different =from=, =to=, =about=, =agent=, =issue= or =name=, so two voters' rows or two agents' forecasts stay two records |
 | =due_at=, =review= | the review clock: =stability=, =difficulty=, =reps=, =last=, =interval_s=, =neglected= (sweeps that found it overdue); =add= starts none for a trust row, a persona, an outcome or mail, and the sweep skips them even when a grade has started one |
 | =forgotten= | on a tombstone the writer made: =neglect= (a forgettable claim never recalled and missed three sweeps) or =the live cap= (the least retrievable claims past the workspace's cap); a forget by hand carries its own reason. Preferences, rules, readings, goals, trust rows, personas, predictions and outcomes are never forgotten by the writer |
+| =retracted_by= | on a retraction whose =why= is a deed accession: that accession |
+| =why_text= | on a retraction whose =why= is plain text: that reason, so it can be read back |
 | =links= | peers by entity overlap, at most eight, chosen by relative-neighbourhood pruning; =fire= adds peers up to eight |
 | =link_weights= | weight per link in (0, 1], absent meaning 0.5; moved by =fire= |
 | =link_weights_by= | a persona's own weights by name, written by a fire =as= that persona and read only through its lens; the nodes and links stay shared |

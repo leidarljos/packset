@@ -716,9 +716,11 @@ impl PacksetClient {
     /// entry, so a forgotten atom stops being recalled without the pack losing
     /// the fact that it once held it.
     ///
-    /// `why` is the deed accession that withdrew the claim, and the daemon
-    /// refuses one that is not an accession. It rides onto the tombstone beside
-    /// the text, so the retraction and what it retracted read back together.
+    /// `why` is the deed accession that withdrew the claim, or the plain-text
+    /// reason when the seat has no accession. An accession is stored as
+    /// `retracted_by`. Plain text is stored as `why_text`, and the answer
+    /// carries one `warning` line. The retraction and what it retracted read
+    /// back together either way.
     ///
     /// # Errors
     ///
