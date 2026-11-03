@@ -41,7 +41,7 @@ to start and names the process with the lock.
 ======================
 
 An atom is one claim in at most two sentences of at most twenty-five words
-each. The pack refuses anything longer, and it refuses a tool dump outright.
+each. The pack refuses anything longer, and it stores a tool dump labelled ``flag:tool-dump``.
 
 .. code:: console
 

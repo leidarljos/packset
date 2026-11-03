@@ -1327,8 +1327,7 @@ impl Service {
     ///
     /// # Errors
     ///
-    /// [`AtomError`] when the text is a tool dump or the record does not
-    /// validate, else the store's.
+    /// [`AtomError`] when the record does not validate, else the store's.
     pub fn add(&self, atom: Record) -> anyhow::Result<Record> {
         // Validation and the encoder run before the lock: the encode is the
         // slow part of a write and depends on the text alone.
@@ -1348,14 +1347,6 @@ impl Service {
 
     /// Check a claim and fill the fields that depend on nothing stored.
     fn prepare(&self, mut atom: Record) -> anyhow::Result<Record> {
-        let text = atom
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if packset_core::extract::is_tool_dump(&text) {
-            anyhow::bail!(AtomError("tool dump is attach, not an atom".into()));
-        }
         record::validate(&mut atom).map_err(anyhow::Error::new)?;
         atom.remove(record::PROVENANCE_FLOOR);
 
@@ -4745,18 +4736,19 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_dump_is_refused_as_an_atom() {
+    fn a_tool_dump_is_stored_with_its_label() {
         let (_dir, svc) = service();
         let listing = std::iter::once("total 48".to_string())
             .chain((0..7).map(|i| format!("-rw-r--r-- 1 x x 0 Jan 1 00:00 file{i}")))
             .collect::<Vec<_>>()
             .join("\n");
-        let err = svc.add(atom(&listing)).unwrap_err();
-        assert!(err.to_string().contains("attach"), "{err}");
+        let stored = svc.add(atom(&listing)).unwrap();
+        assert_eq!(stored["labels"], json!([packset_core::record::TOOL_DUMP]));
 
         // A fenced capture naming a stream is the other shape.
         let fenced = atom("Here is the run:\n```\nstdout: everything fine\n```");
-        assert!(svc.add(fenced).is_err());
+        let stored = svc.add(fenced).unwrap();
+        assert_eq!(stored["labels"], json!([packset_core::record::TOOL_DUMP]));
     }
 
     #[test]

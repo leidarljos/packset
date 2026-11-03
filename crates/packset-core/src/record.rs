@@ -334,6 +334,8 @@ pub const CREDENTIAL_SHAPED: &str = "flag:credential-shaped";
 pub const INSTRUCTION_SHAPED: &str = "flag:instruction-shaped";
 /// The text carries zero-width or bidirectional controls.
 pub const INVISIBLE_UNICODE: &str = "flag:invisible-unicode";
+/// The text is a tool dump ([`crate::extract::is_tool_dump`]).
+pub const TOOL_DUMP: &str = "flag:tool-dump";
 
 /// What the text matched: each label beside what it found. None of these
 /// stops a write; the record is stored and carries the labels.
@@ -348,6 +350,11 @@ pub fn flags(text: &str) -> Vec<(&'static str, &'static str)> {
     }
     if has_invisible(text) {
         found.push((INVISIBLE_UNICODE, "characters a reader cannot see"));
+    }
+    // A blank string matches the dump check, and it is missing text, so the
+    // label is not that match. A write rejects the blank before labels.
+    if !text.trim().is_empty() && crate::extract::is_tool_dump(text) {
+        found.push((TOOL_DUMP, "a tool dump"));
     }
     found
 }

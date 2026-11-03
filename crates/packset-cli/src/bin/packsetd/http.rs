@@ -1556,6 +1556,63 @@ mod tests {
         assert!(rotated.body.get("warning").is_none(), "{:?}", rotated.body);
     }
 
+    /// A fenced line of stdout is stored, labelled, and found. Replacing
+    /// the text with a plain claim drops the label. Blank text is still
+    /// missing text, though the dump check matches it.
+    #[test]
+    fn a_tool_dump_is_stored_with_its_label_and_a_warning() {
+        use packset_core::record::TOOL_DUMP;
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let text = "```\nstdout: build ok\n```";
+        let added = post(
+            &svc,
+            "/v1/atoms",
+            &json!({"workspace": "w", "kind": "lesson", "text": text}),
+        );
+        assert_eq!(added.body["text"], json!(text), "{:?}", added.body);
+        assert_eq!(added.body["labels"], json!([TOOL_DUMP]), "{:?}", added.body);
+        assert_eq!(
+            added.body["warning"],
+            json!(format!(
+                "stored with {TOOL_DUMP} (a tool dump); anyone who reads this pack reads the text"
+            ))
+        );
+        let id = added.body["id"].as_str().unwrap().to_string();
+        let hits = read(&svc, "/v1/search", "stdout build")["hits"].clone();
+        let hit = hits
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == json!(id))
+            .unwrap_or_else(|| panic!("search misses {id}: {hits:?}"));
+        assert_eq!(hit["labels"], json!([TOOL_DUMP]), "{hit:?}");
+
+        let plain = "The build finished cleanly.";
+        let updated = post(
+            &svc,
+            "/v1/atoms/update",
+            &json!({"workspace": "w", "id": id, "fields": {"text": plain}}),
+        );
+        assert_eq!(updated.body["text"], json!(plain), "{:?}", updated.body);
+        assert_eq!(updated.body["labels"], json!([]), "{:?}", updated.body);
+        assert!(updated.body.get("warning").is_none(), "{:?}", updated.body);
+
+        let panel = packset_core::Panel::default();
+        let blank = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms",
+            &HashMap::new(),
+            json!({"workspace": "w", "kind": "lesson", "text": "   "})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(blank.code, 400, "{:?}", blank.body);
+        assert_eq!(blank.body["error"], json!("atom text is required"));
+    }
+
     /// An agent's or a hook's claim past the prose gate is stored and found
     /// at once, and the answer carries the reason the gate gave.
     #[test]
