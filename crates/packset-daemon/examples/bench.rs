@@ -123,7 +123,13 @@ fn main() -> anyhow::Result<()> {
         let list = timed(
             || {
                 let atoms = service.store().live(WORKSPACE).expect("live");
-                let _ = serde_json::to_string(atoms.as_ref()).expect("json");
+                let mut out = Vec::new();
+                serde::Serializer::collect_seq(
+                    &mut serde_json::Serializer::new(&mut out),
+                    atoms.iter().map(|atom| &**atom),
+                )
+                .expect("json");
+                std::hint::black_box(out);
             },
             10,
         );

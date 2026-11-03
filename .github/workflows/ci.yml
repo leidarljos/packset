@@ -34,6 +34,16 @@ jobs:
       # neither is needed to build or run the writer.
       - name: Clippy
         run: cargo clippy --locked --workspace --exclude packset-milli --exclude packset-embed --all-targets -- -D warnings
+      # A workspace build unifies features across its members, so a target
+      # can compile there on a feature only another member turns on: the
+      # bench example used serde's `rc` through rmcp in the CLI. Each crate
+      # alone is the build `cargo run -p` gives.
+      - name: Clippy, one crate at a time
+        run: |
+          set -euo pipefail
+          for crate in packset-core packset-client packset-daemon packset; do
+            cargo clippy --locked -p "$crate" --all-targets -- -D warnings
+          done
       - name: Workspace tests
         run: cargo test --locked --workspace --exclude packset-milli --exclude packset-embed --no-fail-fast
 
