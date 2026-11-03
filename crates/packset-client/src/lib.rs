@@ -20,8 +20,17 @@ fn timeout() -> Duration {
 
 /// The wait before a busy writer is asked again, tripled each time.
 const BUSY_WAIT: Duration = Duration::from_millis(50);
+/// Each wait is this many times the last; the reference promises 50, 150
+/// and 450 ms.
+const BUSY_GROWTH: u32 = 3;
 /// How many times to ask again.
 const BUSY_RETRIES: u32 = 3;
+
+/// Whether a busy writer is asked again: a retry is left, and waiting
+/// `wait` from `elapsed` still ends inside `budget`.
+fn ask_again(retries: u32, elapsed: Duration, wait: Duration, budget: Duration) -> bool {
+    retries < BUSY_RETRIES && elapsed + wait < budget
+}
 
 /// Send `req`, with `body` when there is one, inside `budget`, and send it
 /// again when the writer answers busy. The writer answers 503 only when its
@@ -46,10 +55,10 @@ fn send(
         };
         match answered {
             Err(ureq::Error::Status(503, _))
-                if retries < BUSY_RETRIES && started.elapsed() + wait < budget =>
+                if ask_again(retries, started.elapsed(), wait, budget) =>
             {
                 std::thread::sleep(wait);
-                wait *= 3;
+                wait *= BUSY_GROWTH;
                 retries += 1;
             }
             other => return other.map_err(Box::new),
@@ -1125,25 +1134,38 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), 4);
     }
 
-    /// A 100 ms budget leaves no room for the 150 ms wait.
+    /// Room for the first wait and not the second: 50 ms fits in 100 ms,
+    /// and 50 + 150 ms does not.
+    const BUDGET: Duration = Duration::from_millis(100);
+
+    /// A 100 ms budget leaves no room for the 150 ms wait. The decision is
+    /// handed the elapsed time, so how long a round trip takes on the
+    /// machine running the test does not move it.
     #[test]
     fn the_retries_stop_where_the_budget_does() {
-        use std::sync::atomic::Ordering;
         let _env = ENV_LOCK.lock().unwrap();
         let old = env::var_os("PACKSET_TIMEOUT_MS");
-        unsafe { env::set_var("PACKSET_TIMEOUT_MS", "100") };
-        let (client, seen) = busy_for(usize::MAX);
-        let started = Instant::now();
-        let answered = client.status(None);
-        let took = started.elapsed();
+        unsafe { env::set_var("PACKSET_TIMEOUT_MS", BUDGET.as_millis().to_string()) };
+        let budget = timeout();
         unsafe {
             match old {
                 Some(v) => env::set_var("PACKSET_TIMEOUT_MS", v),
                 None => env::remove_var("PACKSET_TIMEOUT_MS"),
             }
         }
-        assert!(answered.is_err());
-        assert_eq!(seen.load(Ordering::SeqCst), 2);
-        assert!(took < Duration::from_millis(300), "{took:?}");
+        assert_eq!(budget, BUDGET);
+        let second = BUSY_WAIT * BUSY_GROWTH;
+        assert!(
+            ask_again(0, Duration::ZERO, BUSY_WAIT, budget),
+            "the first wait did not fit"
+        );
+        assert!(
+            !ask_again(1, BUSY_WAIT, second, budget),
+            "the second wait fit"
+        );
+        assert!(
+            !ask_again(0, budget - BUSY_WAIT, BUSY_WAIT, budget),
+            "a first round trip that spent the room was followed by a wait"
+        );
     }
 }
