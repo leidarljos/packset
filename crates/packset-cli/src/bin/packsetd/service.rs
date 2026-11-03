@@ -1751,10 +1751,7 @@ impl Service {
     /// Hold one body for a workspace, capped. Expired slots go first. A
     /// new workspace past the slot cap drops the oldest one.
     pub fn put_attach(&self, workspace: &str, text: &str, label: &str) -> Value {
-        let mut body = text.to_string();
-        if body.chars().count() > ATTACH_CAP {
-            body = body.chars().take(ATTACH_CAP).collect();
-        }
+        let body = packset_core::prose::prefix_chars(text, ATTACH_CAP).to_string();
         let slot = Attachment {
             text: body,
             label: label.trim().to_string(),
@@ -4591,6 +4588,21 @@ mod tests {
         let huge = "x".repeat(ATTACH_CAP + 100);
         let slot = svc.put_attach("w", &huge, "");
         assert_eq!(slot["text"].as_str().unwrap().chars().count(), ATTACH_CAP);
+    }
+
+    /// U+2024 is three bytes. A byte cut at the character cap falls inside
+    /// the leader when it is the last character kept.
+    #[test]
+    fn an_attachment_cut_keeps_the_leader_whole() {
+        let (_dir, svc) = service();
+        let mut body = "x".repeat(ATTACH_CAP - 1);
+        body.push('\u{2024}');
+        body.push('y');
+        let slot = svc.put_attach("w", &body, "note");
+        let text = slot["text"].as_str().unwrap();
+        assert_eq!(text.chars().count(), ATTACH_CAP);
+        assert!(text.ends_with('\u{2024}'), "{text:?}");
+        assert!(!text.contains('y'));
     }
 
     #[test]

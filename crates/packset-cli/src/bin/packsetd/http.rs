@@ -1331,6 +1331,45 @@ mod tests {
         assert_eq!(updated.body["id"], id);
     }
 
+    /// A message whose cut lands inside U+2024 is stored. The leader is
+    /// three bytes, so the soft cap taken as a byte index sits on its
+    /// second byte when one ASCII character under the cap precedes it.
+    /// The same character is what a "vs." stop is rewritten to, and a
+    /// cut at byte 161 used to sit inside that rewrite.
+    #[test]
+    fn a_message_with_the_leader_on_the_cut_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let q = HashMap::new();
+        let leader = format!(
+            "{}{}",
+            "n".repeat(packset_core::record::TEXT_SOFT_CAP - 1),
+            "\u{2024}"
+        );
+        assert!(!leader.is_char_boundary(packset_core::record::TEXT_SOFT_CAP));
+        // 157 n's put "vs." at byte 158. The rewritten stop occupies
+        // bytes 160..163.
+        let vs_note = format!("{} vs. lease {}", "n".repeat(157), "m".repeat(98));
+        for text in [leader, vs_note] {
+            let body = json!({
+                "workspace": "w",
+                "kind": "message",
+                "text": text,
+            });
+            let got = route(
+                &svc,
+                &panel,
+                &Method::Post,
+                "/v1/atoms",
+                &q,
+                body.as_object().unwrap(),
+            );
+            assert_eq!(got.code, 200, "{:?}", got.body);
+            assert_eq!(got.body["text"].as_str(), Some(text.as_str()));
+        }
+    }
+
     /// The review's order: a person lesson, a deletion, then the same id
     /// with new text. The id stays the tombstone.
     #[test]

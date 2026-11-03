@@ -99,7 +99,7 @@ fn words_of(text: &str) -> Vec<&str> {
             {
                 i += 1;
             }
-            out.push(&text[start..i]);
+            out.push(byte_slice(text, start, i));
         } else {
             i += 1;
         }
@@ -123,6 +123,38 @@ fn floor_char(text: &str, index: usize) -> usize {
         index -= 1;
     }
     index
+}
+
+/// `start..end` moved back onto character boundaries.
+///
+/// Indexes taken from a lowercased copy, or from a note after a stop was
+/// rewritten to U+2024 (three bytes), can name a byte inside a character.
+fn aligned(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let end = floor_char(text, end);
+    let start = floor_char(text, start.min(end));
+    (start, end)
+}
+
+/// `text[start..end]` stopped on character boundaries.
+///
+/// The slice is valid UTF-8. A prefix (`start` of zero) is no longer, in
+/// bytes, than `end`.
+fn byte_slice(text: &str, start: usize, end: usize) -> &str {
+    let (start, end) = aligned(text, start, end);
+    &text[start..end]
+}
+
+/// The longest prefix of `text` of at most `limit` characters.
+///
+/// An attachment is shortened to its character cap. Walking `char_indices`
+/// keeps that cut off a byte inside U+2024, an emoji, a combining mark or
+/// a CJK ideograph, which is where a byte index panics.
+#[must_use]
+pub fn prefix_chars(text: &str, limit: usize) -> &str {
+    match text.char_indices().nth(limit) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
 }
 
 /// `text` with every full stop that cannot end a sentence masked: one in a
@@ -154,30 +186,34 @@ fn mask_inner_dots(text: &str) -> String {
             p.push('.');
             p
         }] {
-            while let Some(pos) = lower[from..].find(&needle) {
-                let at = from + pos;
+            while let Some(pos) = byte_slice(&lower, from, lower.len()).find(&needle) {
+                let at = floor_char(&lower, from) + pos;
                 let starts_word = at == 0
-                    || !lower[..at]
+                    || !byte_slice(&lower, 0, at)
                         .chars()
                         .next_back()
                         .is_some_and(char::is_alphanumeric);
                 if starts_word {
                     spans.push((at, at + needle.len()));
                 }
-                from = at + needle.len();
+                // A cut that did not move would scan the same span forever.
+                let next = at + needle.len();
+                if next <= from {
+                    break;
+                }
+                from = next;
             }
             from = 0;
         }
         for (a, b) in spans.into_iter().rev() {
             // The index came from the lowercased note. A stop rewritten
             // to U+2024 is three bytes, so the next span can name a byte
-            // inside that character. Floor back to a boundary.
-            let end = floor_char(&masked, b);
-            let start = floor_char(&masked, a.min(end));
+            // inside that character.
+            let (start, end) = aligned(&masked, a, b);
             if start >= end {
                 continue;
             }
-            let piece: String = masked[start..end]
+            let piece: String = byte_slice(&masked, start, end)
                 .chars()
                 .map(|c| if c == '.' { INNER_DOT } else { c })
                 .collect();
@@ -673,6 +709,91 @@ mod tests {
             assert!(!flat.contains('\u{2024}'), "{mark}: {got:?}");
             if one_sentence {
                 assert_eq!(got.len(), 1, "{mark}: {got:?}");
+            }
+        }
+    }
+
+    /// Cuts of user text stay valid UTF-8 and inside the limit.
+    ///
+    /// The draw is a fixed sample, not a product cap: 32 strings of 24
+    /// pieces is enough to put U+2024, an emoji, a combining mark and a
+    /// CJK ideograph on both sides of the cut, and still finish with the
+    /// unit tests. The seed only makes the sample repeatable.
+    #[test]
+    fn a_cut_of_random_utf8_stays_inside_the_limit() {
+        // 157 n's put "vs." at byte 158. The stop is byte 160; rewritten
+        // to U+2024 it occupies 160..163, and a cut at 161 sits inside it.
+        let vs_note = format!("{} vs. lease {}", "n".repeat(157), "m".repeat(98));
+        // The soft cap counted in bytes lands on the second byte of the
+        // leader when 499 ASCII characters precede it.
+        let leader = format!(
+            "{}{}",
+            "n".repeat(crate::record::TEXT_SOFT_CAP - 1),
+            "\u{2024}"
+        );
+        assert_eq!(leader.chars().count(), crate::record::TEXT_SOFT_CAP);
+        assert!(!leader.is_char_boundary(crate::record::TEXT_SOFT_CAP));
+        let by_bytes = byte_slice(&leader, 0, crate::record::TEXT_SOFT_CAP);
+        assert!(by_bytes.len() <= crate::record::TEXT_SOFT_CAP);
+        assert!(by_bytes.ends_with('n'), "{by_bytes:?}");
+        let by_chars = prefix_chars(&leader, crate::record::TEXT_SOFT_CAP);
+        assert_eq!(by_chars.chars().count(), crate::record::TEXT_SOFT_CAP);
+        assert!(by_chars.ends_with('\u{2024}'));
+
+        let mut samples = vec![
+            String::new(),
+            "plain ascii".to_string(),
+            vs_note,
+            leader,
+            "a\u{0301}字😀\u{2024} vs. é".to_string(),
+        ];
+        const PARTS: &[&str] = &[
+            "a", " ", ".", "n", "\u{2024}", "😀", "\u{0301}", "字", "İ", "é", " vs. ",
+        ];
+        let mut state: u64 = 0xA5A5_F00D_1234_5678;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..32 {
+            let mut text = String::new();
+            for _ in 0..24 {
+                text.push_str(PARTS[(next() as usize) % PARTS.len()]);
+            }
+            samples.push(text);
+        }
+
+        for text in &samples {
+            let _ = sentences(text);
+            let _ = assess(text);
+            let nchars = text.chars().count();
+            for limit in [0, 1, nchars / 2, nchars, nchars.saturating_add(3)] {
+                let chars = prefix_chars(text, limit);
+                assert!(chars.chars().count() <= limit, "chars {limit}: {text:?}");
+                assert!(text.starts_with(chars), "{text:?}");
+            }
+            for limit in [
+                0,
+                1,
+                text.len() / 2,
+                text.len(),
+                text.len().saturating_add(3),
+            ] {
+                let bytes = byte_slice(text, 0, limit);
+                assert!(bytes.len() <= limit, "bytes {limit}: {text:?}");
+                assert!(text.starts_with(bytes), "{text:?}");
+            }
+            for at in 0..text.len() {
+                if text.is_char_boundary(at) {
+                    continue;
+                }
+                let cut = byte_slice(text, 0, at);
+                assert!(cut.len() < at, "{at}: {text:?}");
+                assert!(text.starts_with(cut));
+                let range = byte_slice(text, at.saturating_sub(1), at.saturating_add(2));
+                assert!(text.contains(range));
             }
         }
     }
