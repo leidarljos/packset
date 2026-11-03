@@ -2,7 +2,9 @@ name: docs
 
 on:
   push:
-    branches: [main]
+    # A push to develop has no pull request, so the build and the checks
+    # run on the push. Only a main ref uploads and deploys.
+    branches: [main, develop]
     # Release tags publish the docs at that tag. Path filters are not
     # applied to tag pushes.
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -48,12 +50,17 @@ jobs:
           node-version: "22"
       # Exit 2 on any finding the .impeccable config does not ignore.
       - run: npx -y impeccable@4.5.2 detect docs/build
+      # Only a main ref configures Pages and uploads the artifact. A
+      # develop push, a pull request, a tag and a manual run on any other
+      # ref build and check, then stop. A tag is published by
+      # docs-deploy.yml, which uploads its own artifact. The deploy job
+      # below is already main-only.
       - uses: actions/configure-pages@v5
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         with:
           enablement: true
       - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         with:
           path: docs/build
   deploy:
