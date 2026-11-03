@@ -1,0 +1,50 @@
+177c9f5333e2613b17f6481a95c7c5c5ac321600 PACKSET_START_SIZES=10000,50000,100000,140000 cargo test --release -p packset-daemon --lib start_cost_by_pack_size -- --ignored --nocapture
+
+What a start costs as the pack grows: `Service::open`, which packsetd runs before it binds, then the stamp pass it runs behind the listener, one after the other in one process.
+Intel(R) Xeon(R) Processor, 8 cores, one thread a core, Linux 6.12.94+, 4 KiB pages, ext4, CPU only, the pack in the page cache.
+Each pack is written by the test: claims of about 8 KiB as JSON, each with a 384-d embedding, round-robin over eight workspaces, as a writer from before `updated` left them.
+The first start stamps every claim; the second opens the same pack, now current.
+Each start runs in a child process; base is its VmRSS before the open, after a start over a one-claim pack, still open, has made the code resident.
+VmRSS, RssAnon and RssFile (with RssShmem) are read after the pass; VmHWM is the peak.
+Three runs, develop and this commit in turn; pass ms is the median and the range, and the memory columns, the median, agreed within 1 MiB across the three.
+140000 claims is past the 1 GiB map.
+
+Before: 177c9f5333e2613b17f6481a95c7c5c5ac321600, develop, with the measurement test added; Intel(R) Xeon(R) Processor, 8 cores
+
+| atoms | data.mdb MiB | start | open ms | pass ms, median (range) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 10000 | 79 | first | 0.1 | 586 (581 to 601) | 6 | 85 | 1 | 84 | 86 |
+| 10000 | 79 | second | 0.1 | 80 (79 to 81) | 5 | 87 | 0 | 86 | 87 |
+| 50000 | 395 | first | 0.1 | 2867 (2865 to 2903) | 6 | 402 | 1 | 401 | 403 |
+| 50000 | 395 | second | 0.1 | 410 (409 to 414) | 6 | 404 | 0 | 403 | 404 |
+| 100000 | 791 | first | 0.1 | 5710 (5650 to 5731) | 5 | 798 | 1 | 797 | 798 |
+| 100000 | 791 | second | 0.1 | 821 (817 to 830) | 5 | 799 | 0 | 799 | 799 |
+| 140000 | 1108 | first | 0.1 | stopped, MDB_MAP_FULL: 1135 (1130 to 1144) | 6 | 1114 | 0 | 1113 | 1114 |
+| 140000 | 1108 | second | 0.1 | stopped, MDB_MAP_FULL: 1129 (1125 to 1132) | 5 | 1114 | 0 | 1113 | 1114 |
+
+After: the commit that adds this file, on 177c9f5333e2613b17f6481a95c7c5c5ac321600; Intel(R) Xeon(R) Processor, 8 cores
+
+| atoms | data.mdb MiB | start | open ms | pass ms, median (range) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 10000 | 79 | first | 0.1 | 636 (613 to 657) | 5 | 6 | 1 | 5 | 15 |
+| 10000 | 79 | second | 0.1 | 106 (104 to 126) | 6 | 6 | 0 | 5 | 14 |
+| 50000 | 395 | first | 0.1 | 3108 (3094 to 3157) | 6 | 6 | 1 | 5 | 16 |
+| 50000 | 395 | second | 0.1 | 600 (582 to 636) | 6 | 6 | 0 | 5 | 14 |
+| 100000 | 791 | first | 0.1 | 6247 (6035 to 6354) | 6 | 6 | 1 | 5 | 16 |
+| 100000 | 791 | second | 0.1 | 1214 (1205 to 1279) | 6 | 6 | 0 | 5 | 14 |
+| 140000 | 1108 | first | 0.1 | 8646 (8430 to 8754) | 6 | 6 | 1 | 5 | 16 |
+| 140000 | 1108 | second | 0.1 | 1745 (1742 to 1818) | 6 | 6 | 0 | 5 | 14 |
+
+Before, the pass read the pack through the map and kept every page it read, so the peak was the pack and about 7 MiB more, nearly all of it file pages.
+Now a step ends after 1 MiB of records read, stamped or not, and drops the pages it read from the map before the next step reads.
+The peak is 14 to 16 MiB from 79 MiB to 1108 MiB of pack, and the pages read are gone once the pass ends.
+The claims of eight workspaces are interleaved in the file, so a step over one workspace's claims faults in every eighth claim, and the kernel maps the 16 pages around each fault (`fault_around_bytes` 65536).
+A step therefore maps about eight times what it reads before it drops them, which is most of the 8 to 10 MiB over base.
+Over one workspace, `store::tests::a_start_holds_one_step_not_the_pack`, as `cargo test` builds it, peaked 2400 to 2464 KiB over base stamping and 1248 to 1376 KiB current in four runs, on a 12692 KiB pack, against its bound of four steps, 4096 KiB.
+On 177c9f5333e2613b17f6481a95c7c5c5ac321600 the same test peaked 14156 KiB over base stamping, more than the pack, and failed.
+The pages a step drops are faulted in again when a later step reads them, so by the medians the pass took 8 to 9% longer on a first start, and a third to a half longer on a current pack: 80 to 106 ms at 79 MiB, 821 to 1214 ms at 791 MiB.
+It runs behind the listener; the open is 0.1 ms at every size, before and after.
+At 140k claims the 1108 MiB in use is past develop's 1 GiB map, and LMDB then opens the map at the pages in use (`mdb_env_open2` in `mdb.c`), which leaves no room to write.
+Every start's pass stopped with MDB_MAP_FULL and left claims unstamped; its time includes the count of what was left.
+After, the map opened at twice the data file and the pass stamped every claim.
+The first start stays open in each child: closing it freed LMDB's 2 MiB list of dirty pages, glibc moved its mmap threshold up to that size, and the next open cleared its list on the heap, which charged 2048 KiB and about 0.7 ms to the open measured.

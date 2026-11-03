@@ -14,15 +14,57 @@ use packset_core::bm25::Index;
 use packset_core::record::{self, AtomError};
 use serde_json::{Map, Value};
 
-/// The map the environment can grow into. Growing it is compatible;
-/// shrinking it below what is stored is not.
+/// The map writers before this one opened every pack with. A pack can
+/// still be opened with it beside the writer: the writer takes the
+/// environment this process opened first, and grows its map when a write
+/// needs room.
+pub const MAP_SIZE: usize = 1024 * 1024 * 1024;
+
+/// The map a pack with nothing on disk opens with: LMDB's own default,
+/// `DEFAULT_MAPSIZE` in `mdb.c`.
 ///
 /// The data file holds the pages in use and extends as writes need new
-/// pages, up to this map. It is not extended to the map at open: doing
+/// pages, up to the map. It is not extended to the map at open: doing
 /// that reserved a gibibyte per seat, and a file extended that far came
 /// back fully allocated. `ls -ls` reported 1048580 blocks for a store
 /// holding one or two claims.
-pub const MAP_SIZE: usize = 1024 * 1024 * 1024;
+const MAP_FLOOR: usize = 1 << 20;
+
+/// The map at open is the data file times this, and a write that finds
+/// the map full grows it by this and runs again. Doubling keeps the
+/// remaps logarithmic in the pack: a gibibyte pack remaps ten times from
+/// the floor in its life. The writes retried across those remaps redo
+/// fewer bytes than the pack holds, the geometric sum, and once the pack
+/// is past the floor the address space reserved past the data is never
+/// more than the data. A remap waits for every open transaction, so a
+/// smaller factor waits more often.
+const MAP_GROWTH: usize = 2;
+
+/// The map is kept a multiple of this: the largest page size LMDB meets,
+/// arm64 and ppc64 kernels built with 64 KiB pages. It is a multiple of
+/// the 4 KiB and 16 KiB pages elsewhere, which is what a resize requires.
+const MAP_ALIGN: usize = 64 * 1024;
+
+/// The map to open the data file in `dir` with: [`MAP_GROWTH`] times its
+/// size on disk, or [`MAP_FLOOR`] when that is larger.
+fn map_for(dir: &Path) -> usize {
+    let on_disk = fs::metadata(dir.join("data.mdb"))
+        .map(|meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
+        .unwrap_or(0);
+    on_disk
+        .saturating_mul(MAP_GROWTH)
+        .max(MAP_FLOOR)
+        .div_ceil(MAP_ALIGN)
+        .saturating_mul(MAP_ALIGN)
+}
+
+/// Whether a write failed because the map had no room for it.
+fn is_map_full(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<heed::Error>(),
+        Some(heed::Error::Mdb(heed::MdbError::MapFull))
+    )
+}
 
 /// Parsed workspaces kept at once when `PACKSET_WORKSPACE_CACHE` is unset.
 /// Each one holds its live claims and the index over them. A dense vector
@@ -214,12 +256,16 @@ fn stamp_old(mut atom: Record) -> Option<Record> {
     Some(atom)
 }
 
-/// Stored bytes one step of [`Store::restore_created`] rewrites. A write
-/// that arrives mid-step waits for its commit. Over 50,000 records with
-/// 384-d vectors (394 MiB; 8-core Intel Xeon, on 947c498), a `remember`
-/// during the pass took 9/12 ms (median/max) at 256 KiB steps, 13/14 ms
-/// at 1 MiB and 27/35 ms at 4 MiB, against 8/9 ms after it. The pass took
-/// 3.0, 2.4 and 2.4 s. 1 MiB is as fast as 4 MiB for half the wait.
+/// Stored bytes one step of [`Store::restore_created`] reads, stamped or
+/// not, and so the most it rewrites. A write that arrives mid-step waits
+/// for its commit. Over 50,000 records with 384-d vectors (394 MiB; 8-core
+/// Intel Xeon, on 947c498), a `remember` during the pass took 9/12 ms
+/// (median/max) at 256 KiB steps, 13/14 ms at 1 MiB and 27/35 ms at 4 MiB,
+/// against 8/9 ms after it. The pass took 3.0, 2.4 and 2.4 s. 1 MiB is as
+/// fast as 4 MiB for half the wait.
+///
+/// The pages a step read leave the map before the next step reads, so
+/// this is also how much of the pack the pass holds at once.
 const STAMP_STEP_BYTES: usize = 1024 * 1024;
 
 /// Steps of free space the pass needs. LMDB reuses the pages a step frees
@@ -239,7 +285,11 @@ struct Stamp {
 
 impl Store {
     /// Stamp the records a writer from before [`UPDATED`] left, as
-    /// [`stamp_old`] does, about [`STAMP_STEP_BYTES`] to a transaction.
+    /// [`stamp_old`] does, in steps of [`STAMP_STEP_BYTES`] read. Each step
+    /// drops the pages it read from the map, so the pass holds a step of
+    /// the pack, not the pack. A pass that kept what it read held it all: a
+    /// start over 791 MiB peaked at 799 MiB that way, and at 16 MiB
+    /// dropping each step (`measurements/start.txt`).
     ///
     /// packsetd runs this behind its listener, so an upgraded pack answers
     /// while it is rewritten. Each step commits on its own, and a step that
@@ -258,21 +308,23 @@ impl Store {
         let stopped = loop {
             let mut step: Vec<Vec<u8>> = Vec::new();
             let mut bytes = 0usize;
-            let scanned = self.each_unstamped(after.as_deref(), |key, len| {
+            let next = match self.each_unstamped(after.as_deref(), |key, len| {
                 step.push(key.to_vec());
                 bytes = bytes.saturating_add(len);
-                bytes < STAMP_STEP_BYTES
-            });
-            if let Err(err) = scanned {
-                break Some((err, None));
-            }
-            let Some(last) = step.last() else {
-                break None;
+            }) {
+                Ok(next) => next,
+                Err(err) => break Some((err, None)),
             };
-            after = Some(last.clone());
-            match self.stamp_step(&step) {
-                Ok(count) => stamped += count,
-                Err(err) => break Some((err, Some(bytes))),
+            if !step.is_empty() {
+                match self.stamp_step(&step) {
+                    Ok(count) => stamped += count,
+                    Err(err) => break Some((err, Some(bytes))),
+                }
+            }
+            self.release_pages();
+            match next {
+                Some(key) => after = Some(key),
+                None => break None,
             }
         };
         if stamped > 0 {
@@ -287,10 +339,11 @@ impl Store {
             return Ok(stamped);
         };
         let mut left = 0usize;
-        let _ = self.each_unstamped(None, |_, _| {
-            left += 1;
-            true
-        });
+        let mut from: Option<Vec<u8>> = None;
+        while let Ok(Some(next)) = self.each_unstamped(from.as_deref(), |_, _| left += 1) {
+            self.release_pages();
+            from = Some(next);
+        }
         // A full disk can read as an I/O error: LMDB reports a short write
         // that way. The room is said whatever the error, since it is the
         // first thing to check.
@@ -309,56 +362,60 @@ impl Store {
     }
 
     /// Visit each key after `after` whose record has no `updated`, with the
-    /// length stored, until `visit` returns `false`.
+    /// length stored, over one step: [`STAMP_STEP_BYTES`] of records read.
+    /// Returns the last key read when the step ends before the store does.
     fn each_unstamped(
         &self,
         after: Option<&[u8]>,
-        mut visit: impl FnMut(&[u8], usize) -> bool,
-    ) -> anyhow::Result<()> {
+        mut visit: impl FnMut(&[u8], usize),
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         use std::ops::Bound;
+        let _gate = self.gate();
         let rtxn = self.env.read_txn()?;
         let range = (
             after.map_or(Bound::Unbounded, Bound::Excluded),
             Bound::Unbounded,
         );
+        let mut read = 0usize;
         for item in self.db.range(&rtxn, &range)? {
             let (key, raw) = item?;
             let unstamped = matches!(
                 serde_json::from_slice::<Stamp>(raw),
                 Ok(Stamp { updated: None })
             );
-            if unstamped && !visit(key, raw.len()) {
-                break;
+            if unstamped {
+                visit(key, raw.len());
+            }
+            read = read.saturating_add(key.len() + raw.len());
+            if read >= STAMP_STEP_BYTES {
+                return Ok(Some(key.to_vec()));
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Stamp one step's records in one transaction and say how many. Each
     /// is read again under the write lock, so a write since the scan is
     /// what is kept.
     fn stamp_step(&self, step: &[Vec<u8>]) -> anyhow::Result<usize> {
-        let mut wtxn = self.env.write_txn()?;
-        let mut count = 0;
-        for key in step {
-            let stored = self
-                .db
-                .get(&wtxn, key)?
-                .and_then(|raw| serde_json::from_slice::<Value>(raw).ok());
-            let Some(atom) = stored.and_then(|v| match v {
-                Value::Object(map) => stamp_old(map),
-                _ => None,
-            }) else {
-                continue;
-            };
-            self.db.put(&mut wtxn, key, &serde_json::to_vec(&atom)?)?;
-            count += 1;
-        }
-        if count == 0 {
-            return Ok(0);
-        }
-        wtxn.commit()?;
-        Ok(count)
+        self.write(|wtxn| {
+            let mut count = 0;
+            for key in step {
+                let stored = self
+                    .db
+                    .get(wtxn, key)?
+                    .and_then(|raw| serde_json::from_slice::<Value>(raw).ok());
+                let Some(atom) = stored.and_then(|v| match v {
+                    Value::Object(map) => stamp_old(map),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                self.db.put(wtxn, key, &serde_json::to_vec(&atom)?)?;
+                count += 1;
+            }
+            Ok(count)
+        })
     }
 }
 
@@ -416,6 +473,10 @@ pub struct Store {
     /// has to be closed before another opener can take the lock.
     env: Env,
     db: Database<Bytes, Bytes>,
+    /// Shared by every transaction, and held alone to grow the map. LMDB
+    /// remaps on a resize, and asks that no transaction in the process be
+    /// open across it: a reader would be left in the old mapping.
+    map_gate: RwLock<()>,
     /// Held for as long as the store is: dropping it drops the lock.
     _lock: HomeLock,
     /// Bumped by every write, so a reader can tell a stale snapshot.
@@ -492,13 +553,24 @@ impl Store {
         let db_path = root.join("memory.lmdb");
         fs::create_dir_all(&db_path)?;
         // SAFETY: LMDB maps the file; the contract is that no other process
-        // writes it, which the lock above is what enforces. The map is
-        // [`MAP_SIZE`]; the file grows with the pages written.
-        let env = unsafe {
+        // writes it, which the lock above is what enforces. The map starts
+        // from the file's size and grows when a write needs room; the file
+        // grows with the pages written.
+        let env = match unsafe {
             EnvOpenOptions::new()
-                .map_size(MAP_SIZE)
+                .map_size(map_for(&db_path))
                 .max_dbs(1)
-                .open(&db_path)?
+                .open(&db_path)
+        } {
+            Ok(env) => env,
+            // A store closes its environment on drop, so this is another
+            // opener in this process that has not closed its own. heed hands
+            // that environment back with the map it was opened with, and a
+            // write that needs room grows it. That opener's transactions are
+            // outside the map gate, so it must hold none while this store
+            // writes.
+            Err(heed::Error::BadOpenOptions { env, .. }) => env,
+            Err(err) => return Err(err.into()),
         };
         let mut wtxn = env.write_txn()?;
         let db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, None)?;
@@ -511,6 +583,7 @@ impl Store {
         Ok(Self {
             env,
             db,
+            map_gate: RwLock::new(()),
             _lock: lock,
             generation: AtomicU64::new(0),
             last_release: AtomicU64::new(0),
@@ -532,6 +605,55 @@ impl Store {
         })
     }
 
+    /// The map gate, shared. Held for as long as a transaction is open.
+    fn gate(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.map_gate.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run `write` in one transaction and commit it. When the map has no
+    /// room, the transaction is dropped, the map grows by [`MAP_GROWTH`],
+    /// and `write` runs again over the store as it was committed.
+    fn write<T>(
+        &self,
+        mut write: impl FnMut(&mut heed::RwTxn<'_>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        loop {
+            let full_at = {
+                let _gate = self.gate();
+                let mut attempt = || -> anyhow::Result<T> {
+                    let mut wtxn = self.env.write_txn()?;
+                    let value = write(&mut wtxn)?;
+                    wtxn.commit()?;
+                    Ok(value)
+                };
+                match attempt() {
+                    Err(err) if is_map_full(&err) => self.env.info().map_size,
+                    done => return done,
+                }
+            };
+            self.grow_map(full_at)?;
+        }
+    }
+
+    /// Grow the map from `full_at`, the size a write found full, unless a
+    /// writer that waited beside this one already grew it.
+    fn grow_map(&self, full_at: usize) -> anyhow::Result<()> {
+        let _alone = self.map_gate.write().unwrap_or_else(|e| e.into_inner());
+        let size = self.env.info().map_size;
+        if size > full_at {
+            return Ok(());
+        }
+        let grown = size
+            .checked_mul(MAP_GROWTH)
+            .ok_or_else(|| anyhow::anyhow!("the map cannot grow past {size} bytes"))?
+            .div_ceil(MAP_ALIGN)
+            * MAP_ALIGN;
+        // SAFETY: the gate is held alone, so no transaction of this store
+        // is open, and every one that starts after waits for the gate.
+        unsafe { self.env.resize(grown)? };
+        Ok(())
+    }
+
     /// Every record in one workspace, or in all of them.
     ///
     /// # Errors
@@ -543,6 +665,7 @@ impl Store {
         if workspace == Some("") {
             return Ok(Vec::new());
         }
+        let _gate = self.gate();
         let rtxn = self.env.read_txn()?;
         let mut out = Vec::new();
         match workspace {
@@ -577,6 +700,7 @@ impl Store {
         if workspace == Some("") {
             return Ok(());
         }
+        let _gate = self.gate();
         let rtxn = self.env.read_txn()?;
         let mut each = |raw: &[u8]| {
             if let Ok(Value::Object(record)) = serde_json::from_slice::<Value>(raw) {
@@ -616,6 +740,7 @@ impl Store {
         let mut out = Vec::new();
         let mut unindexed = Vec::new();
         {
+            let _gate = self.gate();
             let rtxn = self.env.read_txn()?;
             // Both walks are in key order, and an entry is its record's key
             // behind one byte, so the index is read alongside, not looked up.
@@ -658,14 +783,14 @@ impl Store {
     /// No record changes, so the generation stays and the cached snapshot
     /// is still the store's.
     fn index_tombstones(&self, keys: &[Vec<u8>]) -> anyhow::Result<()> {
-        let mut wtxn = self.env.write_txn()?;
-        for key in keys {
-            if self.db.get(&wtxn, key)?.is_some_and(is_tombstone) {
-                self.db.put(&mut wtxn, &tombstone_key(key), b"")?;
+        self.write(|wtxn| {
+            for key in keys {
+                if self.db.get(wtxn, key)?.is_some_and(is_tombstone) {
+                    self.db.put(wtxn, &tombstone_key(key), b"")?;
+                }
             }
-        }
-        wtxn.commit()?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// One record by id, whatever its state.
@@ -677,6 +802,7 @@ impl Store {
         if workspace.is_empty() || id.is_empty() {
             return Ok(None);
         }
+        let _gate = self.gate();
         let rtxn = self.env.read_txn()?;
         let raw = self.db.get(&rtxn, &atom_key(workspace, id))?;
         Ok(raw.and_then(|bytes| {
@@ -712,52 +838,54 @@ impl Store {
     /// The clock is an argument so a test can place two writes in one
     /// millisecond. The index follows the text either way.
     fn upsert_many_at(&self, atoms: &[Record], now: &str) -> anyhow::Result<Vec<Record>> {
-        let mut written = Vec::with_capacity(atoms.len());
-        let mut wtxn = self.env.write_txn()?;
-        for atom in atoms {
-            let mut payload = atom.clone();
-            if !matches!(payload.get("links"), Some(Value::Array(_))) {
-                payload.insert("links".into(), Value::Array(Vec::new()));
+        let written = self.write(|wtxn| {
+            let mut written = Vec::with_capacity(atoms.len());
+            for atom in atoms {
+                let mut payload = atom.clone();
+                if !matches!(payload.get("links"), Some(Value::Array(_))) {
+                    payload.insert("links".into(), Value::Array(Vec::new()));
+                }
+                let workspace = payload
+                    .get("workspace")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("record has no workspace"))?;
+                let id = payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("record has no id"))?;
+                let key = atom_key(workspace, id);
+                let stored = self
+                    .db
+                    .get(wtxn, &key)?
+                    .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
+                    .and_then(|v| match v {
+                        Value::Object(map) => Some(map),
+                        _ => None,
+                    });
+                stamp_write(&mut payload, stored.as_ref(), now);
+                let buried = record::is_tombstone(&payload);
+                if buried {
+                    // Nothing scores a tombstone, and the vector was most of
+                    // its bytes.
+                    payload.remove("embedding");
+                } else {
+                    // A fire or a grade rewrites the record from the cache,
+                    // which does not carry the vector. A null or an empty
+                    // array is a clear. A write that leaves the key off keeps
+                    // what is stored.
+                    keep_stored_embedding(&mut payload, stored.as_ref());
+                }
+                let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
+                self.db.put(wtxn, &key, &blob)?;
+                if buried {
+                    self.db.put(wtxn, &tombstone_key(&key), b"")?;
+                } else if stored.as_ref().is_some_and(record::is_tombstone) {
+                    self.db.delete(wtxn, &tombstone_key(&key))?;
+                }
+                written.push(payload);
             }
-            let workspace = payload
-                .get("workspace")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("record has no workspace"))?;
-            let id = payload
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("record has no id"))?;
-            let key = atom_key(workspace, id);
-            let stored = self
-                .db
-                .get(&wtxn, &key)?
-                .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
-                .and_then(|v| match v {
-                    Value::Object(map) => Some(map),
-                    _ => None,
-                });
-            stamp_write(&mut payload, stored.as_ref(), now);
-            let buried = record::is_tombstone(&payload);
-            if buried {
-                // Nothing scores a tombstone, and the vector was most of
-                // its bytes.
-                payload.remove("embedding");
-            } else {
-                // A fire or a grade rewrites the record from the cache, which
-                // does not carry the vector. A null or an empty array is a
-                // clear. A write that leaves the key off keeps what is stored.
-                keep_stored_embedding(&mut payload, stored.as_ref());
-            }
-            let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
-            self.db.put(&mut wtxn, &key, &blob)?;
-            if buried {
-                self.db.put(&mut wtxn, &tombstone_key(&key), b"")?;
-            } else if stored.as_ref().is_some_and(record::is_tombstone) {
-                self.db.delete(&mut wtxn, &tombstone_key(&key))?;
-            }
-            written.push(payload);
-        }
-        wtxn.commit()?;
+            Ok(written)
+        })?;
         // After the commit, never before: a reader that scans between a bump
         // and its write would otherwise cache the older corpus as the newer.
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1064,6 +1192,10 @@ impl Store {
         // file stays resident.
         #[cfg(target_os = "linux")]
         {
+            // The map gate is held to the end, so the ranges read below
+            // are still the database's when they are advised. A resize in
+            // between would unmap them, and the addresses could be reused.
+            let _gate = self.gate();
             // Open a write transaction and drop it at once, so a commit
             // already in progress finishes before pages leave the map.
             // The lock is not held across the advice, and it does not
@@ -1501,6 +1633,7 @@ impl Store {
         }
         let prefix = workspace_prefix(workspace);
         let keys: Vec<Vec<u8>> = {
+            let _gate = self.gate();
             let rtxn = self.env.read_txn()?;
             let mut keys = Vec::new();
             for item in self.db.prefix_iter(&rtxn, &prefix)? {
@@ -1512,11 +1645,12 @@ impl Store {
             keys
         };
         if !keys.is_empty() {
-            let mut wtxn = self.env.write_txn()?;
-            for key in &keys {
-                self.db.delete(&mut wtxn, key)?;
-            }
-            wtxn.commit()?;
+            self.write(|wtxn| {
+                for key in &keys {
+                    self.db.delete(wtxn, key)?;
+                }
+                Ok(())
+            })?;
             // After the commit, never before: as in `upsert_many`, a reader
             // scanning between a bump and its write would cache older data
             // as newer.
@@ -1785,7 +1919,7 @@ fn push_record(out: &mut Vec<Record>, raw: &[u8]) {
 /// Pages at and below the last used page hold the database, free pages
 /// included. Bytes past that page are the unused tail of a map-sized file.
 /// Dropping them returns the disk space; the next write extends the file
-/// again, up to [`MAP_SIZE`].
+/// again, and grows the map when the file reaches it.
 ///
 /// A `lock.mdb` slot owned by another process that is still running keeps
 /// the tail. `mdb_stat` maps the file for the length of its read, and
@@ -2056,8 +2190,8 @@ mod tests {
         fs::metadata(path).unwrap().blocks() * 512
     }
 
-    /// A fresh store with a few atoms stays a handful of pages. The map is
-    /// still [`MAP_SIZE`], so this is the allocated size, `st_blocks * 512`.
+    /// A fresh store with a few atoms stays a handful of pages, counted as
+    /// allocated, `st_blocks * 512`, which a file extended to its map fills.
     #[cfg(unix)]
     #[test]
     fn a_few_atoms_allocate_far_less_than_the_map() {
@@ -2981,6 +3115,422 @@ mod tests {
         let _first = Store::open(dir.path()).unwrap();
         let second = Store::open(dir.path());
         assert!(second.is_err(), "one writer is the whole design");
+    }
+
+    /// A store opens with a map sized to its file. One write several
+    /// times that map, and single writes past it after, land, and the
+    /// store opens again with every claim. The map at 1 GiB refused the
+    /// write that needed more than it had left.
+    #[test]
+    fn writes_past_the_map_grow_it() {
+        let (dir, store) = store();
+        let opened = store.env.info().map_size;
+        let claim = |n: usize| {
+            record(json!({
+                "id": format!("c{n:05}"),
+                "workspace": "w",
+                "kind": "lesson",
+                "text": format!("claim {n} {}", "x".repeat(4096)),
+            }))
+        };
+        let per_claim = serde_json::to_vec(&claim(0)).unwrap().len();
+        let at_once = 4 * opened / per_claim;
+        let batch: Vec<Record> = (0..at_once).map(claim).collect();
+        assert_eq!(store.upsert_many(&batch).unwrap().len(), at_once);
+        let one_by_one = at_once + 2 * store.env.info().map_size / per_claim;
+        for n in at_once..one_by_one {
+            store.upsert(&claim(n)).unwrap();
+        }
+        assert!(
+            (one_by_one * per_claim) > 4 * opened,
+            "the writes did not pass the {opened}-byte map"
+        );
+        assert_eq!(store.scan(Some("w")).unwrap().len(), one_by_one);
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.scan(Some("w")).unwrap().len(), one_by_one);
+        let last = format!("c{:05}", one_by_one - 1);
+        assert!(store.get("w", &last).unwrap().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("claim {}", one_by_one - 1)));
+    }
+
+    /// Take the room left in the map with values no reader parses, put
+    /// past [`Store::write`] so the map does not grow for them. The key
+    /// opens with a byte UTF-8 never holds, so no workspace reaches it.
+    fn fill_the_map(store: &Store) {
+        let put = |key: &[u8], chunk: usize| -> heed::Result<()> {
+            let mut wtxn = store.env.write_txn()?;
+            store.db.put(&mut wtxn, key, &vec![0; chunk])?;
+            wtxn.commit()
+        };
+        for chunk in [64 * 1024, 4096, 512] {
+            loop {
+                let key = [&[0xFE][..], &store.env.info().last_txn_id.to_be_bytes()].concat();
+                match put(&key, chunk) {
+                    Ok(()) => {}
+                    Err(heed::Error::Mdb(heed::MdbError::MapFull)) => break,
+                    Err(err) => panic!("the fill failed: {err}"),
+                }
+            }
+        }
+    }
+
+    /// The stamp pass and the tombstone index write behind a read, not
+    /// for a client, and each finds room when the map is full. The pass
+    /// stamps every record a writer from before [`UPDATED`] left, and the
+    /// entries the first cold read enters are there at the next open.
+    #[test]
+    fn a_full_map_grows_for_the_stamp_pass_and_the_tombstone_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let claims = 32;
+        let buried = 400;
+        {
+            let store = Store::open(dir.path()).unwrap();
+            let mut wtxn = store.env.write_txn().unwrap();
+            for n in 0..claims {
+                let row = json!({"id": format!("c{n:02}"), "workspace": "w",
+                                 "text": "x".repeat(4096),
+                                 "ts": "2026-10-18T19:31:19.444Z"});
+                let key = atom_key("w", row["id"].as_str().unwrap());
+                store
+                    .db
+                    .put(&mut wtxn, &key, &serde_json::to_vec(&row).unwrap())
+                    .unwrap();
+            }
+            for n in 0..buried {
+                let id = format!("t{n:03}-{}", "y".repeat(200));
+                let row = json!({"id": id, "workspace": "w", "text": "gone",
+                                 "tombstone": true,
+                                 "ts": "2026-10-18T19:31:19.444Z",
+                                 "updated": "2026-10-18T19:31:19.444Z"});
+                store
+                    .db
+                    .put(
+                        &mut wtxn,
+                        &atom_key("w", &id),
+                        &serde_json::to_vec(&row).unwrap(),
+                    )
+                    .unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        fill_the_map(&store);
+        assert_eq!(store.restore_created().unwrap(), claims);
+        fill_the_map(&store);
+        assert_eq!(store.live("w").unwrap().len(), claims);
+        assert_eq!(store.tombstones_read(), buried as u64);
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.live("w").unwrap().len(), claims);
+        assert_eq!(store.tombstones_read(), 0, "the entries were not kept");
+        assert!(store
+            .scan(Some("w"))
+            .unwrap()
+            .iter()
+            .all(|atom| atom.contains_key(UPDATED)));
+    }
+
+    /// A start over a pack many times [`STAMP_STEP_BYTES`] holds about one
+    /// step at its peak, whether its pass stamps every claim or none. That
+    /// step is the start's working set: its pages as read through the map,
+    /// its stamped copies, the write transaction's pages for them, and as
+    /// much again for the tree pages around them and the allocator. The
+    /// pack is more than twice that, so a start that held it would be over
+    /// the bound by the pack. Its claims are in one workspace: the pass
+    /// reads the file in order, and the pages the kernel maps around a
+    /// fault are the next ones it reads.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_start_holds_one_step_not_the_pack() {
+        if let Some(home) = std::env::var_os("PACKSET_START_CHILD") {
+            report_start(Path::new(&home));
+            return;
+        }
+        let working_set = 4 * STAMP_STEP_BYTES;
+        let working_set_kib = (working_set / 1024) as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let per_claim = unstamped(0, 1).1.len();
+        let atoms = 3 * working_set / per_claim;
+        let disk_kib = write_unstamped_pack(dir.path(), atoms, 1) / 1024;
+        assert!(
+            disk_kib > 2 * working_set_kib,
+            "the {disk_kib} KiB pack is not twice the {working_set_kib} KiB bound"
+        );
+        for start in ["stamping", "current"] {
+            let got = start_in_child(
+                dir.path(),
+                "store::tests::a_start_holds_one_step_not_the_pack",
+            );
+            assert!(got.passed, "the {start} start failed: {}", got.line);
+            let peak = got.hwm.saturating_sub(got.base);
+            eprintln!(
+                "{start} start peaked {peak} KiB over a {disk_kib} KiB pack, bound {working_set_kib} KiB"
+            );
+            assert!(
+                peak < working_set_kib,
+                "the {start} start peaked {peak} KiB over a {disk_kib} KiB pack, past {working_set_kib} KiB: {}",
+                got.line
+            );
+        }
+        let store = Store::open(dir.path()).unwrap();
+        let all = store.scan(None).unwrap();
+        assert_eq!(all.len(), atoms);
+        assert!(
+            all.iter()
+                .all(|atom| atom[UPDATED] == json!("2026-10-18T19:31:19.444Z")
+                    && atom["ts"] == json!("2026-10-16T10:07:21.644Z")),
+            "a claim past the first step was not stamped"
+        );
+    }
+
+    /// One claim the size a seat writes, as a writer from before
+    /// [`UPDATED`] left it: a sentence, two entities and a 384-d
+    /// embedding, the encoder's width, as the f32 an encoder returns
+    /// written out as f64. About 8 KiB as JSON. The claim is in workspace
+    /// `n % workspaces`.
+    #[cfg(target_os = "linux")]
+    fn unstamped(n: usize, workspaces: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut state = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let embedding: Vec<f64> = (0..384)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                f64::from((state >> 40) as f32 / (1u32 << 24) as f32 - 0.5)
+            })
+            .collect();
+        let workspace = format!("git:github.com/example/pack-{}", n % workspaces);
+        let id = format!("a{n:07}");
+        let row = json!({
+            "id": id,
+            "workspace": workspace,
+            "kind": "lesson",
+            "text": format!("Claim {n}: the parser keeps header {} when overlay {} applies.", n % 97, n % 31),
+            "entities": ["seat:ljos", format!("n{n}")],
+            "links": [],
+            "ts": "2026-10-18T19:31:19.444Z",
+            "valid_from": "2026-10-16T10:07:21.644Z",
+            "embedding": embedding,
+        });
+        (atom_key(&workspace, &id), serde_json::to_vec(&row).unwrap())
+    }
+
+    /// Write `atoms` unstamped claims straight into a home's database,
+    /// spread round-robin over `workspaces`, and return the size of the
+    /// data file.
+    #[cfg(target_os = "linux")]
+    fn write_unstamped_pack(home: &Path, atoms: usize, workspaces: usize) -> u64 {
+        let dir = home.join("memory.lmdb");
+        fs::create_dir_all(&dir).unwrap();
+        // SAFETY: a fresh directory no other process has open. The map is
+        // address space only; the file grows with the pages written.
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(1 << 36)
+                .max_dbs(1)
+                .open(&dir)
+                .unwrap()
+        };
+        let mut wtxn = env.write_txn().unwrap();
+        let db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, None).unwrap();
+        for n in 0..atoms {
+            let (key, blob) = unstamped(n, workspaces);
+            db.put(&mut wtxn, &key, &blob).unwrap();
+            if n % 1000 == 999 {
+                wtxn.commit().unwrap();
+                wtxn = env.write_txn().unwrap();
+            }
+        }
+        wtxn.commit().unwrap();
+        env.prepare_for_closing().wait();
+        fs::metadata(dir.join("data.mdb")).unwrap().len()
+    }
+
+    /// A field of `/proc/self/status`, in KiB.
+    #[cfg(target_os = "linux")]
+    fn status_kib(field: &str) -> u64 {
+        let text = fs::read_to_string("/proc/self/status").unwrap();
+        text.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix(field)?.strip_prefix(':')?;
+                rest.split_whitespace().next()?.parse().ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Start the writer over `home` in a child of this test binary and
+    /// return the child's report. RSS is the whole process, so a
+    /// neighbouring test would otherwise charge its own allocations to it.
+    #[cfg(target_os = "linux")]
+    fn start_in_child(home: &Path, test: &str) -> StartReport {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("PACKSET_START_CHILD", home)
+            .args([
+                "--exact",
+                test,
+                "--include-ignored",
+                "--nocapture",
+                "--test-threads=1",
+                "--quiet",
+            ])
+            .output()
+            .expect("start child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("start "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "start child said nothing: {stdout} {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        let field = |name: &str| -> u64 {
+            line.split_whitespace()
+                .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0)
+        };
+        StartReport {
+            opened: !line.starts_with("failed"),
+            passed: line.starts_with("ok"),
+            line: line.to_string(),
+            open_us: field("open_us"),
+            pass_ms: field("pass_ms"),
+            base: field("base"),
+            rss: field("rss"),
+            anon: field("anon"),
+            file: field("file"),
+            hwm: field("hwm"),
+        }
+    }
+
+    /// What one start cost, in KiB and milliseconds. `base` is the child's
+    /// resident size before the open.
+    #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct StartReport {
+        opened: bool,
+        passed: bool,
+        line: String,
+        open_us: u64,
+        pass_ms: u64,
+        base: u64,
+        rss: u64,
+        anon: u64,
+        file: u64,
+        hwm: u64,
+    }
+
+    /// The child's half of [`start_in_child`]: what packsetd runs at start,
+    /// `Service::open` before it binds and the stamp pass behind the
+    /// listener, one after the other, then what it cost. A start over a
+    /// one-claim pack runs first, so the code a start runs is resident
+    /// before `base` is read, and the rest is the pack's.
+    ///
+    /// The first start stays open. Closing it frees LMDB's 2 MiB list of
+    /// dirty pages, and glibc then moves its mmap threshold up to that size
+    /// (`M_MMAP_THRESHOLD` in mallopt(3)). The next open's list came from
+    /// the heap, cleared, and charged 2048 KiB to the start. packsetd opens
+    /// one environment, whose list is mapped and touched a page at a time.
+    #[cfg(target_os = "linux")]
+    fn report_start(home: &Path) {
+        let warm = tempfile::tempdir().unwrap();
+        write_unstamped_pack(warm.path(), 1, 1);
+        let warm_start =
+            crate::service::Service::open(crate::home::Home::new(warm.path())).unwrap();
+        warm_start.store().restore_created().unwrap();
+        let base = status_kib("VmRSS");
+        let started = std::time::Instant::now();
+        let opened = crate::service::Service::open(crate::home::Home::new(home));
+        let open_us = started.elapsed().as_micros();
+        let service = match opened {
+            Ok(service) => service,
+            Err(err) => {
+                println!(
+                    "start failed open_us={open_us} base={base} hwm={} err={err:#}",
+                    status_kib("VmHWM")
+                );
+                return;
+            }
+        };
+        let started = std::time::Instant::now();
+        let passed = service.store().restore_created();
+        let pass_ms = started.elapsed().as_millis();
+        println!(
+            "start {} open_us={open_us} pass_ms={pass_ms} base={base} rss={} anon={} file={} hwm={}{}",
+            if passed.is_ok() { "ok" } else { "stopped" },
+            status_kib("VmRSS"),
+            status_kib("RssAnon"),
+            status_kib("RssFile") + status_kib("RssShmem"),
+            status_kib("VmHWM"),
+            passed.err().map_or_else(String::new, |err| format!(" err={err:#}")),
+        );
+    }
+
+    /// What start costs as the pack grows, for `measurements/start.txt`.
+    ///
+    /// ```console
+    /// $ cargo test --release -p packset-daemon --lib start_cost_by_pack_size -- --ignored --nocapture
+    /// ```
+    ///
+    /// Each pack is written as a writer from before [`UPDATED`] left it,
+    /// so the first start stamps every claim. The second start is the
+    /// same pack once it is current. The claims are spread over eight
+    /// workspaces written in turn, so a scan in key order reads the file
+    /// out of order, as a pack written by several checkouts is read.
+    /// `PACKSET_START_SIZES` names the sizes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "a measurement: a gibibyte of disk at the largest size"]
+    fn start_cost_by_pack_size() {
+        if let Some(home) = std::env::var_os("PACKSET_START_CHILD") {
+            report_start(Path::new(&home));
+            return;
+        }
+        let sizes =
+            std::env::var("PACKSET_START_SIZES").unwrap_or_else(|_| "10000,50000,100000".into());
+        println!("| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |");
+        println!("|---|---|---|---|---|---|---|---|---|---|");
+        let mib = |kib: u64| kib / 1024;
+        for atoms in sizes
+            .split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let disk = write_unstamped_pack(dir.path(), atoms, 8);
+            for start in ["first", "second"] {
+                let got = start_in_child(dir.path(), "store::tests::start_cost_by_pack_size");
+                let err = got.line.split_once(" err=").map_or("", |(_, err)| err);
+                if !got.opened {
+                    println!(
+                        "| {atoms} | {} | {start} | did not open: {err} | | {} | | | | {} |",
+                        disk >> 20,
+                        mib(got.base),
+                        mib(got.hwm),
+                    );
+                    continue;
+                }
+                let pass = if got.passed {
+                    got.pass_ms.to_string()
+                } else {
+                    format!("{}, stopped: {err}", got.pass_ms)
+                };
+                println!(
+                    "| {atoms} | {} | {start} | {:.1} | {pass} | {} | {} | {} | {} | {} |",
+                    disk >> 20,
+                    got.open_us as f64 / 1000.0,
+                    mib(got.base),
+                    mib(got.rss),
+                    mib(got.anon),
+                    mib(got.file),
+                    mib(got.hwm),
+                );
+            }
+        }
     }
 }
 
