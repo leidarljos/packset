@@ -625,6 +625,22 @@ fn ignored_hold_notice(raw: Option<&str>) -> Option<&'static str> {
     )
 }
 
+/// The provenance line rides on the answer beside a warning the record
+/// already carries, such as an unknown origin. The stored record keeps
+/// its own line.
+fn with_provenance_warning(atom: &mut Record, line: Option<String>) {
+    let Some(line) = line else {
+        return;
+    };
+    let joined = atom
+        .get("warning")
+        .and_then(Value::as_str)
+        .filter(|prev| !prev.is_empty() && !prev.contains(line.as_str()))
+        .map(|prev| format!("{prev} {line}"))
+        .unwrap_or(line);
+    atom.insert("warning".into(), Value::String(joined));
+}
+
 /// Whether `origin` is missing, null, or an empty string.
 fn origin_is_blank(value: Option<&Value>) -> bool {
     match value {
@@ -1545,10 +1561,11 @@ impl Service {
         if let Some(existing) = same_text {
             return Ok(Record::clone(&existing));
         }
-        if let Some(stored) = over.as_ref().filter(|_| !accepted) {
+        let provenance_warning = if let Some(stored) = over.as_ref().filter(|_| !accepted) {
             record::hold_provenance(stored, &mut atom, "a post over an existing id")
-                .map_err(anyhow::Error::new)?;
-        }
+        } else {
+            None
+        };
 
         trace.mark("dedup");
         let now = clock::utcnow();
@@ -1632,6 +1649,9 @@ impl Service {
         if forgot > 0 {
             atom.insert("forgot".into(), json!(forgot));
         }
+        // The provenance line is the answer's. A warning already on the
+        // record, such as an unknown origin, stays stored and shares the line.
+        with_provenance_warning(&mut atom, provenance_warning);
         trace.finish(
             atom.get("id").and_then(Value::as_str).unwrap_or(""),
             snapshot_len,
@@ -1788,7 +1808,7 @@ impl Service {
                 }
             }
         }
-        record::hold_provenance(stored, &mut updated, "an update").map_err(anyhow::Error::new)?;
+        let provenance_warning = record::hold_provenance(stored, &mut updated, "an update");
 
         let now = clock::utcnow();
         let mut batch = Vec::new();
@@ -1805,7 +1825,11 @@ impl Service {
         let all = self.store.upsert_many(&all)?;
         self.project_atoms(&all);
         self.patch_live_sets(workspace, &all);
-        Ok(all.into_iter().next().unwrap_or(updated))
+        let mut written = all.into_iter().next().unwrap_or(updated);
+        // The provenance line is the answer's. A warning already on the
+        // record, such as an unknown origin, stays stored and shares the line.
+        with_provenance_warning(&mut written, provenance_warning);
+        Ok(written)
     }
 
     /// Move one atom along the review clock.
@@ -4426,10 +4450,18 @@ mod tests {
         let id = stored["id"].as_str().unwrap();
         let mut fields = serde_json::Map::new();
         fields.insert("origin".into(), json!("user-declared"));
-        let refused = svc.update("w", id, &fields).unwrap_err();
-        assert!(refused.to_string().contains("accept"), "{refused}");
+        fields.insert("text".into(), json!("The fuse is CombMNZ again, kept."));
+        let updated = svc.update("w", id, &fields).unwrap();
+        assert_eq!(updated["origin"], json!("agent-derived"));
+        assert_eq!(updated["text"], json!("The fuse is CombMNZ again, kept."));
+        assert!(
+            updated["warning"].as_str().unwrap().contains("accept"),
+            "{updated:?}"
+        );
         let still = svc.store.get("w", id).unwrap().unwrap();
         assert_eq!(still["origin"], json!("agent-derived"));
+        assert_eq!(still["text"], json!("The fuse is CombMNZ again, kept."));
+        assert!(still.get("warning").is_none(), "{still:?}");
     }
 
     /// Null, `""` and a non-string are the origin validate would default.
@@ -4465,8 +4497,24 @@ mod tests {
 
         let mut fields = Map::new();
         fields.insert("origin".into(), json!("user-declared"));
-        let err = svc.update("w", id, &fields).unwrap_err();
-        assert!(err.to_string().contains("accept"), "{err}");
+        fields.insert(
+            "text".into(),
+            json!("The fuse is CombMNZ for this seat now."),
+        );
+        let updated = svc.update("w", id, &fields).unwrap();
+        assert_eq!(updated["origin"], json!("agent-derived"));
+        assert_eq!(
+            updated["text"],
+            json!("The fuse is CombMNZ for this seat now.")
+        );
+        assert!(
+            updated["warning"].as_str().unwrap().contains("accept"),
+            "{updated:?}"
+        );
+        let got = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(got["origin"], json!("agent-derived"));
+        assert_eq!(got["text"], updated["text"]);
+        assert!(got.get("warning").is_none(), "{got:?}");
 
         let mut fields = Map::new();
         fields.insert("origin".into(), json!("tool-echo"));
@@ -4498,15 +4546,23 @@ mod tests {
         lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
         svc.add(lesson).unwrap();
 
+        let revised = "The fuse is CombMNZ on this seat.";
         let mut fields = Map::new();
         fields.insert("source".into(), json!({"basis": " Person ", "via": "ljos"}));
-        fields.insert("text".into(), json!("The fuse is CombMNZ on this seat."));
-        let err = svc.update("w", id, &fields).unwrap_err();
-        assert!(err.to_string().contains("basis"), "{err}");
+        fields.insert("text".into(), json!(revised));
+        let updated = svc.update("w", id, &fields).unwrap();
+        assert_eq!(
+            updated["warning"],
+            json!("an update cannot raise source.basis from agent to person")
+        );
+        assert_eq!(updated["text"], json!(revised));
+        assert_eq!(updated["source"]["basis"], json!("agent"));
+        assert_eq!(updated["source"]["via"], json!("ljos"));
         let got = svc.store.get("w", id).unwrap().unwrap();
         assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
-        assert_eq!(got["text"], json!(text));
+        assert_eq!(got["text"], json!(revised));
         assert_eq!(got["origin"], json!("user-declared"));
+        assert!(got.get("warning").is_none(), "{got:?}");
 
         let mut legacy = atom("Prefer ripgrep when the tree is large.");
         legacy.insert("kind".into(), json!("preference"));
@@ -4528,11 +4584,17 @@ mod tests {
                 "basis": "person"
             }),
         );
-        let err = svc.update("w", legacy_id, &fields).unwrap_err();
-        assert!(err.to_string().contains("basis"), "{err}");
+        let updated = svc.update("w", legacy_id, &fields).unwrap();
+        assert_eq!(
+            updated["warning"],
+            json!("an update cannot raise source.basis from none to person")
+        );
+        assert!(updated["source"].get("basis").is_none(), "{updated:?}");
+        assert_eq!(updated["source"]["seat"], json!("seat"));
         let kept = svc.store.get("w", legacy_id).unwrap().unwrap();
         assert!(kept["source"].get("basis").is_none(), "{kept:?}");
         assert_eq!(kept["origin"], json!("user-declared"));
+        assert!(kept.get("warning").is_none(), "{kept:?}");
 
         let mut down = Map::new();
         down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
@@ -4558,18 +4620,28 @@ mod tests {
             fields.insert("origin".into(), json!(step));
             let moved = svc.update("w", id, &fields).unwrap();
             assert_eq!(moved["origin"], json!(step));
+            assert!(moved.get("warning").is_none(), "{moved:?}");
+            let kept = format!("The origin stayed {step} for this seat.");
             let mut fields = Map::new();
             fields.insert("origin".into(), json!("user-declared"));
-            let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains("accept"), "{err}");
+            fields.insert("text".into(), json!(kept));
+            let updated = svc.update("w", id, &fields).unwrap();
+            assert_eq!(updated["origin"], json!(step));
+            assert_eq!(updated["text"], json!(kept));
+            assert!(
+                updated["warning"].as_str().unwrap().contains("accept"),
+                "{updated:?}"
+            );
             let got = svc.store.get("w", id).unwrap().unwrap();
             assert_eq!(got["origin"], json!(step), "{got:?}");
+            assert_eq!(got["text"], json!(kept));
+            assert!(got.get("warning").is_none(), "{got:?}");
         }
     }
 
     /// A `source` that hides the basis under another key, or replaces the
-    /// object whole, leaves no person basis, and the next update cannot
-    /// stamp one back.
+    /// object whole, leaves no person basis. The next update is stored,
+    /// and it still cannot stamp one back.
     #[test]
     fn a_basis_cannot_climb_back_through_a_nested_or_missing_one() {
         let (_dir, svc) = service();
@@ -4592,10 +4664,17 @@ mod tests {
             svc.update("w", id, &fields).unwrap();
             let mut fields = Map::new();
             fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
-            let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains("basis"), "{err}");
+            let updated = svc.update("w", id, &fields).unwrap();
+            assert!(
+                updated["warning"].as_str().unwrap().contains("basis"),
+                "{updated:?}"
+            );
+            assert!(updated["source"].get("basis").is_none(), "{updated:?}");
+            assert_eq!(updated["source"]["via"], json!("ljos"));
             let got = svc.store.get("w", id).unwrap().unwrap();
-            assert_eq!(got["source"], hidden, "{got:?}");
+            assert!(got["source"].get("basis").is_none(), "{got:?}");
+            assert_eq!(got["source"]["via"], json!("ljos"));
+            assert!(got.get("warning").is_none(), "{got:?}");
         }
     }
 
@@ -4625,18 +4704,40 @@ mod tests {
         let floor = json!({"origin": "agent-derived", "basis": "agent"});
         assert_eq!(lowered[record::PROVENANCE_FLOOR], floor);
 
-        for (key, up) in [
-            ("origin", json!("user-declared")),
-            ("source", json!({"basis": "person", "via": "ljos"})),
+        for (key, up, text) in [
+            (
+                "origin",
+                json!("user-declared"),
+                "Prefer ripgrep when the tree is huge.",
+            ),
+            (
+                "source",
+                json!({"basis": "person", "via": "ljos"}),
+                "Prefer ripgrep when the tree is vast.",
+            ),
         ] {
             let mut fields = Map::new();
             fields.insert(key.into(), up);
+            fields.insert("text".into(), json!(text));
             fields.insert(
                 record::PROVENANCE_FLOOR.into(),
                 json!({"origin": "user-declared", "basis": "person"}),
             );
-            let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains(key), "{err}");
+            let updated = svc.update("w", id, &fields).unwrap();
+            assert!(
+                updated["warning"].as_str().unwrap().contains(key),
+                "{updated:?}"
+            );
+            assert_eq!(updated["text"], json!(text));
+            assert_eq!(updated["origin"], json!("agent-derived"));
+            assert_eq!(updated["source"]["basis"], json!("agent"));
+            assert_eq!(updated[record::PROVENANCE_FLOOR], floor);
+            let got = svc.store.get("w", id).unwrap().unwrap();
+            assert_eq!(got["text"], json!(text));
+            assert_eq!(got["origin"], json!("agent-derived"));
+            assert_eq!(got["source"]["basis"], json!("agent"));
+            assert_eq!(got[record::PROVENANCE_FLOOR], floor);
+            assert!(got.get("warning").is_none(), "{got:?}");
         }
         let mut clear = Map::new();
         clear.insert(record::PROVENANCE_FLOOR.into(), Value::Null);
@@ -4681,19 +4782,112 @@ mod tests {
         .unwrap();
         let floor = json!({"origin": "agent-derived", "basis": "agent"});
         assert_eq!(down[record::PROVENANCE_FLOOR], floor);
+        assert!(down.get("warning").is_none(), "{down:?}");
 
-        for (origin, basis, key) in [
-            ("user-declared", "agent", "origin"),
-            ("agent-derived", "person", "basis"),
+        for (origin, basis, key, text) in [
+            (
+                "user-declared",
+                "agent",
+                "origin",
+                "Reviews open with a check.",
+            ),
+            (
+                "agent-derived",
+                "person",
+                "basis",
+                "Reviews close on a green build.",
+            ),
         ] {
-            let err = post("Reviews open with a check.", origin, basis).unwrap_err();
-            assert!(err.to_string().contains(key), "{err}");
+            let updated = post(text, origin, basis).unwrap();
+            assert_eq!(updated["text"], json!(text));
+            assert_eq!(updated["origin"], json!("agent-derived"));
+            assert_eq!(updated["source"]["basis"], json!("agent"));
+            assert_eq!(updated[record::PROVENANCE_FLOOR], floor);
+            assert!(
+                updated["warning"].as_str().unwrap().contains(key),
+                "{updated:?}"
+            );
             let got = svc.store.get("w", id).unwrap().unwrap();
-            assert_eq!(got["text"], json!("The fuse is CombMNZ for this seat."));
+            assert_eq!(got["text"], json!(text));
+            assert_eq!(got["origin"], json!("agent-derived"));
+            assert_eq!(got["source"]["basis"], json!("agent"));
+            assert!(got.get("warning").is_none(), "{got:?}");
         }
         let aside = post("Deploys wait for the green build.", "tool-echo", "agent").unwrap();
         assert_eq!(aside["origin"], json!("tool-echo"));
         assert_eq!(aside[record::PROVENANCE_FLOOR], floor);
+    }
+
+    /// An update, and a post over a live id, that would raise provenance
+    /// keeps the new text. The origin and basis stay at the floor, and
+    /// the answer carries one warning line. A later read does not.
+    #[test]
+    fn an_edit_that_would_raise_provenance_is_stored_with_a_warning() {
+        let (_dir, svc) = service();
+        let id = "lessonid000000000000000000000007";
+        let mut lesson = atom("The fuse is CombMNZ for this seat.");
+        lesson.insert("id".into(), json!(id));
+        lesson.insert("kind".into(), json!("lesson"));
+        lesson.insert("origin".into(), json!("agent-derived"));
+        lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+        svc.add(lesson).unwrap();
+
+        let mut fields = Map::new();
+        fields.insert("origin".into(), json!("user-declared"));
+        fields.insert("text".into(), json!("The fuse is CombMNZ on this seat."));
+        let updated = svc.update("w", id, &fields).unwrap();
+        assert_eq!(updated["origin"], json!("agent-derived"));
+        assert_eq!(updated["text"], json!("The fuse is CombMNZ on this seat."));
+        assert_eq!(
+            updated["warning"],
+            json!(
+                "an update cannot raise origin from agent-derived to user-declared; only accept raises an origin"
+            )
+        );
+        let got = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(got["origin"], json!("agent-derived"));
+        assert_eq!(got["text"], json!("The fuse is CombMNZ on this seat."));
+        assert!(got.get("warning").is_none(), "{got:?}");
+
+        let mut fields = Map::new();
+        fields.insert("source".into(), json!({"basis": "person", "via": "seat"}));
+        fields.insert("text".into(), json!("The fuse is CombMNZ for the seat."));
+        let updated = svc.update("w", id, &fields).unwrap();
+        assert_eq!(updated["origin"], json!("agent-derived"));
+        assert_eq!(updated["source"]["basis"], json!("agent"));
+        assert_eq!(updated["source"]["via"], json!("seat"));
+        assert_eq!(updated["text"], json!("The fuse is CombMNZ for the seat."));
+        assert_eq!(
+            updated["warning"],
+            json!("an update cannot raise source.basis from agent to person")
+        );
+        let got = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(got["source"]["basis"], json!("agent"));
+        assert_eq!(got["source"]["via"], json!("seat"));
+        assert_eq!(got["text"], updated["text"]);
+        assert!(got.get("warning").is_none(), "{got:?}");
+
+        let mut post = atom("Reviews open with a check.");
+        post.insert("id".into(), json!(id));
+        post.insert("kind".into(), json!("lesson"));
+        post.insert("origin".into(), json!("user-declared"));
+        post.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+        let posted = svc.add(post).unwrap();
+        assert_eq!(posted["text"], json!("Reviews open with a check."));
+        assert_eq!(posted["origin"], json!("agent-derived"));
+        assert_eq!(posted["source"]["basis"], json!("agent"));
+        assert_eq!(posted["source"]["via"], json!("ljos"));
+        assert_eq!(
+            posted["warning"],
+            json!(
+                "a post over an existing id cannot raise origin from agent-derived to user-declared; only accept raises an origin; a post over an existing id cannot raise source.basis from agent to person"
+            )
+        );
+        let got = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(got["text"], json!("Reviews open with a check."));
+        assert_eq!(got["origin"], json!("agent-derived"));
+        assert_eq!(got["source"]["basis"], json!("agent"));
+        assert!(got.get("warning").is_none(), "{got:?}");
     }
 
     /// Accept of an admission proposal already on file stores it as
@@ -4712,8 +4906,24 @@ mod tests {
         assert_eq!(relabelled["origin"], json!("agent-derived"));
         let mut up = Map::new();
         up.insert("origin".into(), json!("user-declared"));
-        let err = svc.update("w", id, &up).unwrap_err();
-        assert!(err.to_string().contains("accept"), "{err}");
+        up.insert(
+            "text".into(),
+            json!("The fuse is CombMNZ for this seat, revised."),
+        );
+        let kept = svc.update("w", id, &up).unwrap();
+        assert_eq!(kept["origin"], json!("agent-derived"));
+        assert_eq!(
+            kept["text"],
+            json!("The fuse is CombMNZ for this seat, revised.")
+        );
+        assert!(
+            kept["warning"].as_str().unwrap().contains("accept"),
+            "{kept:?}"
+        );
+        let stored = svc.store.get("w", id).unwrap().unwrap();
+        assert_eq!(stored["origin"], json!("agent-derived"));
+        assert_eq!(stored["text"], kept["text"]);
+        assert!(stored.get("warning").is_none(), "{stored:?}");
     }
 
     /// A record written before origin existed stays without the field.
@@ -4758,19 +4968,27 @@ mod tests {
             .get("origin")
             .is_none());
 
-        // No origin is the bottom of the order. Naming one is a rise.
-        for named in ["user-declared", "agent-derived"] {
+        // No origin is the bottom of the order. Naming one is held down,
+        // and the rest of the update is kept. The field stays unwritten.
+        for (named, text) in [
+            ("user-declared", "Reviews open with one check."),
+            ("agent-derived", "Reviews open with two checks."),
+        ] {
             let mut fields = Map::new();
             fields.insert("origin".into(), json!(named));
-            let err = svc.update("w", &id, &fields).unwrap_err();
-            assert!(err.to_string().contains("origin"), "{err}");
-            assert!(svc
-                .store
-                .get("w", &id)
-                .unwrap()
-                .unwrap()
-                .get("origin")
-                .is_none());
+            fields.insert("text".into(), json!(text));
+            let updated = svc.update("w", &id, &fields).unwrap();
+            assert!(updated.get("origin").is_none(), "{updated:?}");
+            assert_eq!(updated["text"], json!(text));
+            assert!(
+                updated["warning"].as_str().unwrap().contains("origin"),
+                "{updated:?}"
+            );
+            let got = svc.store.get("w", &id).unwrap().unwrap();
+            assert!(got.get("origin").is_none(), "{got:?}");
+            assert_eq!(got["text"], json!(text));
+            assert!(got.get(record::PROVENANCE_FLOOR).is_none(), "{got:?}");
+            assert!(got.get("warning").is_none(), "{got:?}");
         }
     }
 

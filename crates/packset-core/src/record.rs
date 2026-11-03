@@ -996,44 +996,119 @@ impl Provenance {
     }
 }
 
-/// Refuse a write over `stored` that would leave `after` with a higher
-/// origin or basis than the lowest `stored` has held, and carry that
-/// lowest onto `after` as [`PROVENANCE_FLOOR`].
+/// Put back the unknown-origin label and the warning that names the value
+/// sent, when a rise is held down to a stored `unknown`. [`validate`] drops
+/// both once the write names a known origin, and the floor puts that origin
+/// back.
+fn restore_unknown_origin(stored: &Map<String, Value>, after: &mut Map<String, Value>) {
+    let had_flag = stored
+        .get(LABELS)
+        .and_then(Value::as_array)
+        .is_some_and(|labels| {
+            labels
+                .iter()
+                .any(|label| label.as_str() == Some(UNKNOWN_ORIGIN_FLAG))
+        });
+    if had_flag {
+        let labels = after
+            .entry(LABELS)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Value::Array(items) = labels {
+            if !items
+                .iter()
+                .any(|label| label.as_str() == Some(UNKNOWN_ORIGIN_FLAG))
+            {
+                items.push(Value::String(UNKNOWN_ORIGIN_FLAG.to_string()));
+            }
+        }
+    }
+    if after
+        .get("warning")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        if let Some(line) = stored.get("warning").and_then(Value::as_str) {
+            if !line.is_empty() {
+                after.insert("warning".into(), Value::String(line.to_string()));
+            }
+        }
+    }
+}
+
+/// Hold a write over `stored` at the lowest origin and basis `stored` has
+/// kept, and carry that lowest onto `after` as [`PROVENANCE_FLOOR`].
 ///
-/// `what` names the write in the refusal. Accept is the one rise, and it
-/// does not come through here.
+/// When `after` would rank above that floor, the floor's origin or basis
+/// is written into it and every other field stays as the write sent it.
+/// The returned line names what was held down, for the caller to put on
+/// the answer. Accept is the one rise, and it does not come through here.
 ///
-/// # Errors
-///
-/// [`AtomError`] when either part would rise.
+/// A missing origin ranks below every named one and stays unwritten.
+/// A stored `unknown` is that same rank: it is written back, and its
+/// label and warning stay, so the value that was sent is not forgotten.
+#[must_use]
 pub fn hold_provenance(
     stored: &Map<String, Value>,
     after: &mut Map<String, Value>,
     what: &str,
-) -> Result<(), AtomError> {
+) -> Option<String> {
     let floor = Provenance::floor(stored);
-    let next = Provenance::of(after);
+    let requested = Provenance::of(after);
     let (floor_origin, floor_basis) = floor.ranks();
-    let (next_origin, next_basis) = next.ranks();
-    if next_origin > floor_origin {
-        return Err(AtomError(format!(
+    let (requested_origin, requested_basis) = requested.ranks();
+    let mut held = Vec::new();
+    if requested_origin > floor_origin {
+        held.push(format!(
             "{what} cannot raise origin from {} to {}; only accept raises an origin",
-            floor.origin, next.origin
-        )));
+            floor.origin, requested.origin
+        ));
+        // A known floor is written as that origin. A stored `unknown` is a
+        // real value, with [`UNKNOWN_ORIGIN_FLAG`]. A missing field is only
+        // the rank, and it stays absent.
+        if crate::atom::known_origin(&floor.origin) {
+            after.insert("origin".into(), Value::String(floor.origin.clone()));
+        } else if stored
+            .get("origin")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.trim().is_empty())
+        {
+            after.insert("origin".into(), Value::String(floor.origin.clone()));
+            restore_unknown_origin(stored, after);
+        } else {
+            after.remove("origin");
+        }
     }
-    if next_basis > floor_basis {
-        return Err(AtomError(format!(
+    if requested_basis > floor_basis {
+        held.push(format!(
             "{what} cannot raise source.basis from {} to {}",
             floor.basis.as_deref().unwrap_or("none"),
             crate::atom::PERSON_BASIS
-        )));
+        ));
+        if let Some(source) = after.get_mut("source").and_then(Value::as_object_mut) {
+            match floor.basis.as_deref() {
+                Some(name) => {
+                    source.insert("basis".into(), Value::String(name.to_string()));
+                }
+                None => {
+                    source.remove("basis");
+                }
+            }
+        }
     }
+    // The bookkeeping sees the write that will be stored. A part that was
+    // held down is the floor's, so a pure rise does not look like a lowering
+    // and does not mint a floor.
+    let next = Provenance::of(after);
     if stored.contains_key(PROVENANCE_FLOOR) || next.ranks() != Provenance::of(stored).ranks() {
         after.insert(PROVENANCE_FLOOR.into(), floor.lower(&next).to_value());
     } else {
         after.remove(PROVENANCE_FLOOR);
     }
-    Ok(())
+    if held.is_empty() {
+        None
+    } else {
+        Some(held.join("; "))
+    }
 }
 
 fn named_origin(atom: &Map<String, Value>) -> Option<&str> {
@@ -2601,16 +2676,20 @@ The build failed. Look at the log. It is the writer.";
         assert_eq!(forged["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
         assert_eq!(forged["warning"].as_str(), Some(line.as_str()));
 
-        // Naming a known origin drops the label and the warning, and the
-        // rise itself is still refused by the provenance floor.
+        // Naming a known origin drops the label and the warning. The rise
+        // is held at unknown, so both come back and the text stays.
         let stored = forged.clone();
         forged.insert("origin".into(), json!("user-declared"));
         validate(&mut forged).unwrap();
         assert_eq!(forged["origin"], json!("user-declared"));
         assert!(forged.get(LABELS).is_none() || forged[LABELS].as_array().unwrap().is_empty());
         assert!(forged.get("warning").is_none());
-        let err = hold_provenance(&stored, &mut forged, "an update").unwrap_err();
-        assert!(err.0.contains("cannot raise origin"), "{err:?}");
+        let line = hold_provenance(&stored, &mut forged, "an update").unwrap();
+        assert!(line.contains("cannot raise origin"), "{line}");
+        assert_eq!(forged["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
+        assert_eq!(forged["text"], json!("A revised claim."));
+        assert_eq!(forged[LABELS], json!([UNKNOWN_ORIGIN_FLAG]));
+        assert_eq!(forged["warning"], stored["warning"]);
 
         // A line break in the sent value stays inside the one warning line.
         let mut broken = atom(json!({

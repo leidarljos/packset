@@ -1659,7 +1659,9 @@ mod tests {
 
     /// An origin outside the five known ones, and text past the soft cap,
     /// are stored and found. The answer carries the label and one warning
-    /// line. The stored origin reads unknown, and an update cannot raise it.
+    /// line. The stored origin reads unknown. An update that would raise it
+    /// keeps the text, the label and that warning, and the answer adds its
+    /// own line.
     #[test]
     fn an_unknown_origin_and_text_past_the_soft_cap_are_stored_and_found() {
         use packset_core::record::{OVER_SOFT_CAP, TEXT_SOFT_CAP, UNKNOWN_ORIGIN_FLAG};
@@ -1720,23 +1722,25 @@ mod tests {
             &Method::Post,
             "/v1/atoms/update",
             &HashMap::new(),
-            json!({"workspace": "w", "id": id, "fields": {"origin": "user-declared"}})
+            json!({"workspace": "w", "id": id, "fields": {"origin": "user-declared", "text": "Origin typo kept."}})
                 .as_object()
                 .unwrap(),
         );
-        assert_eq!(raised.code, 400, "{:?}", raised.body);
+        assert_eq!(raised.code, 200, "{:?}", raised.body);
+        assert_eq!(raised.body["origin"], json!("unknown"));
+        assert_eq!(raised.body["text"], json!("Origin typo kept."));
+        assert_eq!(raised.body["labels"], json!([UNKNOWN_ORIGIN_FLAG]));
+        let raised_line = raised.body["warning"].as_str().unwrap();
         assert!(
-            raised.body["error"]
-                .as_str()
-                .unwrap()
-                .contains("cannot raise origin"),
-            "{:?}",
-            raised.body
+            raised_line.contains("cannot raise origin")
+                && raised_line.contains(UNKNOWN_ORIGIN_FLAG),
+            "{raised_line}"
         );
-        assert_eq!(
-            svc.store().get("w", &id).unwrap().unwrap()["origin"],
-            json!("unknown")
-        );
+        let kept = svc.store().get("w", &id).unwrap().unwrap();
+        assert_eq!(kept["origin"], json!("unknown"));
+        assert_eq!(kept["text"], json!("Origin typo kept."));
+        assert_eq!(kept["labels"], json!([UNKNOWN_ORIGIN_FLAG]));
+        assert_eq!(kept["warning"], added.body["warning"]);
 
         let long = format!("softcapmarker {}", "word ".repeat(120));
         assert!(long.chars().count() > TEXT_SOFT_CAP);
