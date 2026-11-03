@@ -62,3 +62,27 @@ license-files = [{ path = "../LICENSE", hash = 0xa8b3d205 }]
 crate = "json-depth-checker"
 expression = "MIT"
 license-files = [{ path = "../LICENSE", hash = 0xa8b3d205 }]
+
+# A `*` version requirement fails the check. The milli dependency is a
+# git tag with no version field, which this check calls a wildcard.
+# packset-milli is unpublished, so a path or git requirement is allowed
+# through. Duplicate versions stay a warning. On 2026-11-03, setting
+# multiple-versions to deny failed the check: milli v0.41.3 keeps older
+# releases beside newer ones.
+[bans]
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# crates.io is the allowed registry. The allowed git repositories are
+# the three milli v0.41.3 pulls in. heed 0.12.4 and lmdb-rkv-sys come
+# in through that pin. Any other registry or git repository fails the
+# check.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/meilisearch/milli",
+    "https://github.com/meilisearch/heed",
+    "https://github.com/meilisearch/lmdb-rs",
+]
