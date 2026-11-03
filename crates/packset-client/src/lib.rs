@@ -182,6 +182,10 @@ pub fn authorize(request: ureq::Request) -> ureq::Request {
 }
 
 /// The port of a loopback `url`, `None` for any other host.
+///
+/// Only the Linux check below calls this. Off Linux the listener is never
+/// treated as foreign, so the port is not read.
+#[cfg(target_os = "linux")]
 fn loopback_port(url: &str) -> Option<u16> {
     let rest = url
         .strip_prefix("http://")
@@ -197,6 +201,7 @@ fn loopback_port(url: &str) -> Option<u16> {
 /// The owners of the sockets listening on `port`, from one `/proc/net/tcp`
 /// or `tcp6` table: local address is the second column, state the fourth,
 /// uid the eighth.
+#[cfg(target_os = "linux")]
 fn listen_uids(table: &str, port: u16) -> Vec<u32> {
     table
         .lines()
@@ -970,6 +975,7 @@ mod tests {
     // the suite fails one run in five on a polluted read.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn only_a_loopback_url_has_a_port_to_check() {
         assert_eq!(loopback_port("http://127.0.0.1:8761/health"), Some(8761));
@@ -980,6 +986,7 @@ mod tests {
         assert_eq!(loopback_port("http://[::1]/"), Some(80));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_owner_of_a_listening_port_is_read_off_the_table() {
         let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
