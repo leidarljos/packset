@@ -581,8 +581,7 @@ impl Service {
                 && FORGETTABLE_KINDS.contains(&kind)
                 && changed.get("pinned").and_then(Value::as_bool) != Some(true)
             {
-                changed.insert("tombstone".into(), Value::Bool(true));
-                changed.insert("forgotten".into(), Value::String("neglect".into()));
+                record::forget(&mut changed, "neglect");
                 forgotten.push(changed);
                 continue;
             }
@@ -981,8 +980,7 @@ impl Service {
             .into_iter()
             .take(over)
             .map(|(_, _, mut a)| {
-                a.insert("tombstone".into(), Value::Bool(true));
-                a.insert("forgotten".into(), Value::String("the live cap".into()));
+                record::forget(&mut a, "the live cap");
                 a
             })
             .collect();
@@ -3320,6 +3318,14 @@ mod tests {
             !ids.contains(&"lesson000000000000000000000000000a"),
             "{ids:?}"
         );
+        let gone = svc
+            .store()
+            .get("w", "lesson000000000000000000000000000a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(gone["forgotten"], json!("neglect"), "{gone:?}");
+        assert_eq!(gone["review"]["neglected"], json!(2), "{gone:?}");
+        assert!(gone.get("text").is_none(), "{gone:?}");
         let b = live
             .iter()
             .find(|a| {
@@ -3434,6 +3440,178 @@ mod tests {
         assert_eq!(forgotten, 3);
         let panel = packset_core::Panel::named("rrf", "none", "off").unwrap();
         assert_eq!(svc.status(None, &panel).unwrap()["live_cap"], json!(3));
+    }
+
+    /// A lesson a seat wrote a year ago and nobody asked for since, with a
+    /// vector shaped like the encoder's: as many components as
+    /// bge-small-en-v1.5, its default, writes, each about a unit vector's
+    /// share.
+    fn neglected_lesson(n: usize) -> Record {
+        const DIM: usize = 384;
+        let mut row = atom(&format!(
+            "Quorum lesson {n} was written once and never recalled."
+        ));
+        row.insert("id".into(), json!(format!("neglected{n:04}")));
+        row.insert("kind".into(), json!("lesson"));
+        row.insert("origin".into(), json!("agent-derived"));
+        row.insert(
+            "source".into(),
+            json!({"via": "ljos", "seat": "codex", "basis": "agent"}),
+        );
+        row.insert("entities".into(), json!(["seat:codex"]));
+        row.insert("ts".into(), json!("2025-01-01T00:00:00.000Z"));
+        row.insert(
+            "review".into(),
+            json!({"last": "2025-01-01T00:00:00.000Z", "stability": 1.0}),
+        );
+        let vector: Vec<f64> = (0..DIM)
+            .map(|j| ((n * DIM + j) as f64).sin() / (DIM as f64).sqrt())
+            .collect();
+        row.insert("embedding".into(), json!(vector));
+        row.insert("tombstone".into(), json!(false));
+        row
+    }
+
+    /// The live cap forgets a thousand lessons in one write. The store gives
+    /// back at least their vectors' bytes, search stops finding them, and
+    /// each stays a tombstone that status counts, that keeps who wrote it,
+    /// when, and why it went, and whose id stays retired.
+    #[test]
+    fn forgetting_a_thousand_claims_gives_back_their_vectors() {
+        const FORGET: usize = 1000;
+        let (_dir, svc) = service();
+        let svc = svc.with_live_cap(1);
+        let rows: Vec<Record> = (0..FORGET).map(neglected_lesson).collect();
+        svc.store().upsert_many(&rows).unwrap();
+        let stored_bytes = || -> usize {
+            svc.store()
+                .scan(None)
+                .unwrap()
+                .iter()
+                .map(|r| serde_json::to_vec(r).unwrap().len())
+                .sum()
+        };
+        let vector_bytes: usize = rows
+            .iter()
+            .map(|r| serde_json::to_vec(&r["embedding"]).unwrap().len())
+            .sum();
+        let panel = packset_core::Panel::default();
+        let found = |svc: &Service| -> usize {
+            svc.search("w", "quorum lesson", 20, None, &panel, None, false, None)
+                .unwrap()["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|h| {
+                    h["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("neglected"))
+                })
+                .count()
+        };
+        assert!(
+            found(&svc) > 0,
+            "the query finds the lessons while they live"
+        );
+        let before = stored_bytes();
+
+        let mut fresh = atom("A fresh note pushes the pack over its cap of one.");
+        fresh.insert("kind".into(), json!("lesson"));
+        let written = svc.add(fresh).unwrap();
+        assert_eq!(written["forgot"], json!(FORGET), "{written:?}");
+
+        let after = stored_bytes();
+        assert!(
+            before.saturating_sub(after) >= vector_bytes,
+            "{before} bytes before, {after} after, {vector_bytes} of them vectors"
+        );
+        assert_eq!(found(&svc), 0, "search returned a forgotten lesson");
+        let status = svc.status(Some("w"), &panel).unwrap();
+        assert_eq!(status["tombstone"], json!(FORGET), "{status}");
+        assert_eq!(
+            status["forgotten_by_reason"]["the live cap"],
+            json!(FORGET),
+            "{status}"
+        );
+        for row in &rows {
+            let id = row["id"].as_str().unwrap();
+            let tomb = svc.store().get("w", id).unwrap().unwrap();
+            assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+            assert_eq!(tomb["forgotten"], json!("the live cap"), "{tomb:?}");
+            for kept in ["id", "kind", "origin", "source", "entities", "review", "ts"] {
+                assert_eq!(tomb.get(kept), row.get(kept), "{kept} moved: {tomb:?}");
+            }
+            for gone in ["text", "embedding"] {
+                assert!(tomb.get(gone).is_none(), "{gone} stayed: {tomb:?}");
+            }
+        }
+        let err = svc.add(rows[0].clone()).unwrap_err();
+        assert!(err.downcast_ref::<RetiredId>().is_some(), "{err}");
+    }
+
+    /// The first ask for a workspace's rules after the writer opens reads the
+    /// store, as `/v1/atoms?kind=rule` does. A thousand tombstones beside the
+    /// rules are passed by in the index, and not one is parsed.
+    #[test]
+    fn a_cold_rule_lookup_reads_no_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules: Vec<Record> = ["git push *", "rm -rf *", "curl * | sh"]
+            .iter()
+            .enumerate()
+            .map(|(n, pattern)| {
+                let mut row = atom(&format!("Ask before the command {pattern} runs."));
+                row.insert("id".into(), json!(format!("rule{n}")));
+                row.insert("kind".into(), json!("rule"));
+                row.insert("pattern".into(), json!(pattern));
+                row.insert("verdict".into(), json!("ask"));
+                row.insert("tombstone".into(), json!(false));
+                row
+            })
+            .collect();
+        {
+            let svc = Service::open(Home::new(dir.path()))
+                .unwrap()
+                .with_live_cap(rules.len() + 1);
+            svc.store().upsert_many(&rules).unwrap();
+            let lessons: Vec<Record> = (0..1000).map(neglected_lesson).collect();
+            svc.store().upsert_many(&lessons).unwrap();
+            let mut fresh = atom("A fresh note pushes the pack over its cap.");
+            fresh.insert("kind".into(), json!("lesson"));
+            assert_eq!(svc.add(fresh).unwrap()["forgot"], json!(1000));
+        }
+        let svc = Service::open(Home::new(dir.path())).unwrap();
+        let found: Vec<String> = svc
+            .store()
+            .live_versioned("w")
+            .unwrap()
+            .atoms
+            .iter()
+            .filter(|a| a.get("kind").and_then(Value::as_str) == Some("rule"))
+            .filter_map(|a| a.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(found, vec!["rule0", "rule1", "rule2"]);
+        assert_eq!(
+            svc.store().tombstones_read(),
+            0,
+            "a cold read parsed a tombstone"
+        );
+    }
+
+    /// A retraction keeps its words beside the deed that withdrew them. The
+    /// vector goes: nothing scores a tombstone.
+    #[test]
+    fn a_retraction_keeps_its_words_and_drops_its_vector() {
+        let (_dir, svc) = service();
+        let row = neglected_lesson(7);
+        let id = row["id"].as_str().unwrap();
+        svc.store().upsert(&row).unwrap();
+        svc.delete_atom("w", id, Some("deed-patch-overlay"))
+            .unwrap();
+        let tomb = svc.store().get("w", id).unwrap().unwrap();
+        assert_eq!(tomb["tombstone"], json!(true), "{tomb:?}");
+        assert_eq!(tomb["retracted_by"], json!("deed-patch-overlay"));
+        assert_eq!(tomb["text"], row["text"]);
+        assert!(tomb.get("embedding").is_none(), "{tomb:?}");
     }
 
     #[test]

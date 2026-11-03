@@ -254,6 +254,21 @@ pub fn workspace_prefix(workspace: &str) -> Vec<u8> {
     key
 }
 
+/// The first byte of a key in the tombstone index. UTF-8 never holds this
+/// byte, so no workspace name opens with it: an index key is never a
+/// record's key, and no workspace prefix reaches one.
+const TOMBSTONE_INDEX: u8 = 0xFF;
+
+/// The index entry for a record key, or for a workspace prefix: the same
+/// bytes behind [`TOMBSTONE_INDEX`]. The value is empty. Every reader that
+/// walks the whole database skips a value that is not JSON.
+fn tombstone_key(key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(key.len() + 1);
+    out.push(TOMBSTONE_INDEX);
+    out.extend_from_slice(key);
+    out
+}
+
 /// The atom database, plus the lock that makes it one writer.
 pub struct Store {
     env: Env,
@@ -291,6 +306,8 @@ pub struct Store {
     counted: AtomicU64,
     #[cfg(test)]
     scanned: AtomicU64,
+    #[cfg(test)]
+    tombstones_read: AtomicU64,
 }
 
 /// What `status` reports over one workspace: live, tombstoned and expired
@@ -361,6 +378,8 @@ impl Store {
             counted: AtomicU64::new(0),
             #[cfg(test)]
             scanned: AtomicU64::new(0),
+            #[cfg(test)]
+            tombstones_read: AtomicU64::new(0),
         })
     }
 
@@ -433,6 +452,73 @@ impl Store {
         Ok(())
     }
 
+    /// One workspace's records but its tombstones, for a read that keeps
+    /// only what can be live. A tombstone the index names is passed by on
+    /// its key and its value is not parsed. One parsed here was written
+    /// before the index; it is entered now, so the next cold read passes it
+    /// by too.
+    fn scan_past_tombstones(&self, workspace: &str) -> anyhow::Result<Vec<Record>> {
+        #[cfg(test)]
+        self.scanned.fetch_add(1, Ordering::SeqCst);
+        if workspace.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefix = workspace_prefix(workspace);
+        let mut out = Vec::new();
+        let mut unindexed = Vec::new();
+        {
+            let rtxn = self.env.read_txn()?;
+            // Both walks are in key order, and an entry is its record's key
+            // behind one byte, so the index is read alongside, not looked up.
+            // An entry that fails to read ends the index walk: the
+            // tombstones past it are parsed and dropped, as they were before.
+            let mut buried = self
+                .db
+                .prefix_iter(&rtxn, &tombstone_key(&prefix))?
+                .map_while(Result::ok)
+                .map(|(entry, _)| &entry[1..])
+                .peekable();
+            for item in self.db.prefix_iter(&rtxn, &prefix)? {
+                let (key, raw) = item?;
+                while buried.next_if(|entry| *entry < key).is_some() {}
+                if buried.next_if_eq(&key).is_some() {
+                    continue;
+                }
+                let Ok(Value::Object(atom)) = serde_json::from_slice::<Value>(raw) else {
+                    continue;
+                };
+                if record::is_tombstone(&atom) {
+                    #[cfg(test)]
+                    self.tombstones_read.fetch_add(1, Ordering::SeqCst);
+                    unindexed.push(key.to_vec());
+                } else {
+                    out.push(atom);
+                }
+            }
+        }
+        // The answer stands without the entries. A write that fails leaves
+        // the next cold read to parse these again.
+        if !unindexed.is_empty() {
+            let _ = self.index_tombstones(&unindexed);
+        }
+        Ok(out)
+    }
+
+    /// Enter tombstones written before the index. Each is read again inside
+    /// the write, so a record written live since the scan is not entered.
+    /// No record changes, so the generation stays and the cached snapshot
+    /// is still the store's.
+    fn index_tombstones(&self, keys: &[Vec<u8>]) -> anyhow::Result<()> {
+        let mut wtxn = self.env.write_txn()?;
+        for key in keys {
+            if self.db.get(&wtxn, key)?.is_some_and(is_tombstone) {
+                self.db.put(&mut wtxn, &tombstone_key(key), b"")?;
+            }
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
     /// One record by id, whatever its state.
     ///
     /// # Errors
@@ -502,12 +588,24 @@ impl Store {
                     _ => None,
                 });
             stamp_write(&mut payload, stored.as_ref(), now);
-            // A fire or a grade rewrites the record from the cache, which
-            // does not carry the vector. A null or an empty array is a
-            // clear. A write that leaves the key off keeps what is stored.
-            keep_stored_embedding(&mut payload, stored.as_ref());
+            let buried = record::is_tombstone(&payload);
+            if buried {
+                // Nothing scores a tombstone, and the vector was most of
+                // its bytes.
+                payload.remove("embedding");
+            } else {
+                // A fire or a grade rewrites the record from the cache, which
+                // does not carry the vector. A null or an empty array is a
+                // clear. A write that leaves the key off keeps what is stored.
+                keep_stored_embedding(&mut payload, stored.as_ref());
+            }
             let blob = serde_json::to_vec(&Value::Object(payload.clone()))?;
             self.db.put(&mut wtxn, &key, &blob)?;
+            if buried {
+                self.db.put(&mut wtxn, &tombstone_key(&key), b"")?;
+            } else if stored.as_ref().is_some_and(record::is_tombstone) {
+                self.db.delete(&mut wtxn, &tombstone_key(&key))?;
+            }
             written.push(payload);
         }
         wtxn.commit()?;
@@ -754,6 +852,12 @@ impl Store {
         self.live.read().map(|cache| cache.len()).unwrap_or(0)
     }
 
+    /// How many tombstones a cold read has parsed since the store opened.
+    #[cfg(test)]
+    pub fn tombstones_read(&self) -> u64 {
+        self.tombstones_read.load(Ordering::SeqCst)
+    }
+
     /// How many workspaces the use clock still names.
     #[cfg(test)]
     fn cache_used_len(&self) -> usize {
@@ -974,7 +1078,7 @@ impl Store {
         // original numbers are kept beside the floats for answers.
         let now = packset_core::clock::utcnow();
         let scanned: Vec<Record> = self
-            .scan(Some(workspace))?
+            .scan_past_tombstones(workspace)?
             .into_iter()
             .filter(|atom| shown_at(atom, &now))
             .collect();
@@ -1161,7 +1265,7 @@ impl Store {
         let at = packset_core::clock::canonicalize(at)
             .ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
         let stored: Vec<Record> = self
-            .scan(Some(workspace))?
+            .scan_past_tombstones(workspace)?
             .into_iter()
             .filter(|atom| record::is_live_at(atom, &at))
             .collect();
@@ -1211,8 +1315,9 @@ impl Store {
 
     /// Tombstone one live record, optionally naming the deed that withdrew it.
     ///
-    /// The whole record is carried onto the tombstone, so `why` lands beside
-    /// the text it retracts and a bitemporal read gets both at once.
+    /// The record is carried onto the tombstone, all but its vector, so
+    /// `why` lands beside the text it retracts and a bitemporal read gets
+    /// both at once.
     ///
     /// # Errors
     ///
@@ -2657,6 +2762,59 @@ mod tests {
         assert_eq!(tomb["text"], json!("the claim"));
         let stored = store.get("w", "a").unwrap().unwrap();
         assert_eq!(stored["retracted_by"], json!("deed-patch-overlay"));
+    }
+
+    /// A writer before the index left its tombstones with no entry. The
+    /// first cold read parses one and enters it; the next passes it by.
+    #[test]
+    fn a_tombstone_from_before_the_index_is_parsed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .upsert_many(&[
+                    record(json!({"id": "a", "workspace": "w", "text": "a"})),
+                    record(json!({"id": "b", "workspace": "w", "text": "b", "tombstone": true})),
+                ])
+                .unwrap();
+            let mut wtxn = store.env.write_txn().unwrap();
+            let entry = tombstone_key(&atom_key("w", "b"));
+            assert!(store.db.delete(&mut wtxn, &entry).unwrap());
+            wtxn.commit().unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.live("w").unwrap().len(), 1);
+        assert_eq!(store.tombstones_read(), 1);
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.live("w").unwrap().len(), 1);
+        assert_eq!(store.tombstones_read(), 0, "the entry it was given");
+        assert_eq!(
+            store.get("w", "b").unwrap().unwrap()["tombstone"],
+            json!(true)
+        );
+    }
+
+    /// A record written live over its tombstone leaves the index, so a cold
+    /// read shows it.
+    #[test]
+    fn a_record_written_over_its_tombstone_is_read_cold() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .upsert(&record(
+                    json!({"id": "a", "workspace": "w", "text": "a", "tombstone": true}),
+                ))
+                .unwrap();
+            store
+                .upsert(&record(
+                    json!({"id": "a", "workspace": "w", "text": "a", "tombstone": false}),
+                ))
+                .unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.live("w").unwrap().len(), 1);
     }
 
     #[test]

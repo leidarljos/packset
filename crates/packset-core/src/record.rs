@@ -708,6 +708,31 @@ pub fn is_live_at(atom: &Map<String, Value>, at: &str) -> bool {
     )
 }
 
+/// Whether a record is a tombstone.
+#[must_use]
+pub fn is_tombstone(atom: &Map<String, Value>) -> bool {
+    atom.get("tombstone")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// A claim's words and what was computed from them: the readability report,
+/// the links its shape chose, and its vector.
+const BODY: &[&str] = &["text", "prose", "links", "embedding"];
+
+/// Tombstone a claim the writer forgets, and say why. The id, kind and set,
+/// the provenance and review labels and the times stay, so status still
+/// counts it and its id stays retired. Its words go, with what was computed
+/// from them: a forgotten claim is never read again, and its vector was
+/// most of its bytes.
+pub fn forget(atom: &mut Map<String, Value>, why: &str) {
+    for key in BODY {
+        atom.remove(*key);
+    }
+    atom.insert("tombstone".into(), Value::Bool(true));
+    atom.insert("forgotten".into(), Value::String(why.to_string()));
+}
+
 /// Where the writer keeps the lowest origin and basis a record has held.
 pub const PROVENANCE_FLOOR: &str = "provenance_floor";
 

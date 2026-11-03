@@ -1,0 +1,16 @@
+cargo run --release -p packset-daemon --example cold_rules -- 10000 <home>
+Intel(R) Xeon(R) Processor, 8 cores, CPU only
+before: 947c4985e03c04eceb86a3d32c2808b48ff9049d
+after: the commit that adds this file
+
+32 rules beside 10,000 lessons the live cap forgot, each written with a 384-float vector; the first rule lookup after the store opens, over 7 openings in a process of their own
+
+| code | pack | each tombstone | stored JSON | cold rule lookup, median (fastest to slowest) |
+|---|---|---|---|---|
+| before | built by before | 8522 bytes, vector and text | 81.3 MiB | 318.74 ms (312.87 to 331.97) |
+| after | built by after | 350 bytes, neither | 3.3 MiB | 0.85 ms (0.59 to 1.03) |
+| after | built by before, first opening | 8522 bytes, vector and text | 81.3 MiB | 521.55 ms, once: each tombstone is parsed and indexed |
+| after | built by before, later openings | 8522 bytes, vector and text | 81.3 MiB | 0.56 ms (0.55 to 0.79) |
+| after | 32 rules, no tombstones | none | 0.0 MiB | 0.14 ms (0.13 to 0.21) |
+
+data.mdb: 249,171,968 bytes before, 131,571,712 after. LMDB keeps the pages the lessons held while they lived and reuses them for later writes.
