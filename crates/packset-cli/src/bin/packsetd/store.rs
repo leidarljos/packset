@@ -265,7 +265,9 @@ fn stamp_old(mut atom: Record) -> Option<Record> {
 /// fast as 4 MiB for half the wait.
 ///
 /// The pages a step read leave the map before the next step reads, so
-/// this is also how much of the pack the pass holds at once.
+/// the pass holds a step of the pack at once, with what the kernel maps
+/// around each place the step reads: up to a folio where it maps large
+/// folios whole.
 const STAMP_STEP_BYTES: usize = 1024 * 1024;
 
 /// Steps of free space the pass needs. LMDB reuses the pages a step frees
@@ -286,10 +288,12 @@ struct Stamp {
 impl Store {
     /// Stamp the records a writer from before [`UPDATED`] left, as
     /// [`stamp_old`] does, in steps of [`STAMP_STEP_BYTES`] read. Each step
-    /// drops the pages it read from the map, so the pass holds a step of
-    /// the pack, not the pack. A pass that kept what it read held it all: a
-    /// start over 791 MiB peaked at 799 MiB that way, and at 16 MiB
-    /// dropping each step (`measurements/start.txt`).
+    /// drops the pages it read from the map, so what the pass holds is set
+    /// by a step, not by the pack. A pass that kept what it read held it
+    /// all: a start over 791 MiB peaked at 799 MiB that way, and at 16 MiB
+    /// dropping each step on 4 KiB pages. Where the kernel maps large
+    /// folios whole, a step holds the folios it reads, and the peak grows
+    /// slowly with the pack (`measurements/start.txt`).
     ///
     /// packsetd runs this behind its listener, so an upgraded pack answers
     /// while it is rewritten. Each step commits on its own, and a step that
@@ -3233,15 +3237,30 @@ mod tests {
             .all(|atom| atom.contains_key(UPDATED)));
     }
 
-    /// A start over a pack many times [`STAMP_STEP_BYTES`] holds about one
-    /// step at its peak, whether its pass stamps every claim or none. That
-    /// step is the start's working set: its pages as read through the map,
-    /// its stamped copies, the write transaction's pages for them, and as
-    /// much again for the tree pages around them and the allocator. The
-    /// pack is more than twice that, so a start that held it would be over
-    /// the bound by the pack. Its claims are in one workspace: the pass
-    /// reads the file in order, and the pages the kernel maps around a
-    /// fault are the next ones it reads.
+    /// How many times its bound the pack in
+    /// [`a_start_holds_one_step_not_the_pack`] is. A start that keeps what
+    /// it reads peaks at about the pack (799 MiB over 791 MiB in
+    /// `measurements/start.txt`), so it fails by three bounds, and a start
+    /// that kept a quarter of what it read would fail too.
+    #[cfg(target_os = "linux")]
+    const PACK_OVER_BOUND: usize = 4;
+
+    /// The kernel's `fault_around_bytes` when it cannot be read: the
+    /// default in mm/memory.c. It is in debugfs, which only root reads.
+    #[cfg(target_os = "linux")]
+    const FAULT_AROUND_DEFAULT: usize = 64 * 1024;
+
+    /// What glibc keeps of freed heap at the top before it gives it back:
+    /// the default `M_TRIM_THRESHOLD` in mallopt(3).
+    #[cfg(target_os = "linux")]
+    const TRIM_THRESHOLD: usize = 128 * 1024;
+
+    /// A start over a pack [`PACK_OVER_BOUND`] times [`start_bound`] peaks
+    /// under that bound, whether its pass stamps every claim or none. The
+    /// bound is for the most the kernel maps on one fault on this host,
+    /// from [`fault_unit`], and the pack is written until it is that many
+    /// times its own bound. Its claims are in one workspace, written in key
+    /// order, so the records of a step lie in one run of the file.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_start_holds_one_step_not_the_pack() {
@@ -3249,16 +3268,31 @@ mod tests {
             report_start(Path::new(&home));
             return;
         }
-        let working_set = 4 * STAMP_STEP_BYTES;
-        let working_set_kib = (working_set / 1024) as u64;
         let dir = tempfile::tempdir().unwrap();
-        let per_claim = unstamped(0, 1).1.len();
-        let atoms = 3 * working_set / per_claim;
-        let disk_kib = write_unstamped_pack(dir.path(), atoms, 1) / 1024;
-        assert!(
-            disk_kib > 2 * working_set_kib,
-            "the {disk_kib} KiB pack is not twice the {working_set_kib} KiB bound"
-        );
+        let (unit, why) = fault_unit(dir.path());
+        let (key, value) = unstamped(0, 1);
+        let record = key.len() + value.len();
+        let mut atoms = 0;
+        let (disk, stat, bound, places) = loop {
+            let (disk, stat) = write_unstamped_pack(dir.path(), atoms, 1);
+            let (bound, places) = start_bound(&stat, record, unit);
+            if disk as usize >= PACK_OVER_BOUND * bound {
+                break (disk, stat, bound, places);
+            }
+            atoms = (PACK_OVER_BOUND * bound)
+                .div_ceil(value.len())
+                .max(atoms + 1);
+        };
+        let (disk_kib, bound_kib) = (disk / 1024, (bound / 1024) as u64);
+        log(&format!(
+            "start bound on {}: a fault maps {} KiB ({why}). A tree of depth {} with {} \
+             claims, {} leaves. {bound_kib} KiB for {places} places, over a {disk_kib} KiB pack.",
+            host(),
+            unit / 1024,
+            stat.depth,
+            stat.entries,
+            stat.leaf_pages,
+        ));
         for start in ["stamping", "current"] {
             let got = start_in_child(
                 dir.path(),
@@ -3266,24 +3300,171 @@ mod tests {
             );
             assert!(got.passed, "the {start} start failed: {}", got.line);
             let peak = got.hwm.saturating_sub(got.base);
-            eprintln!(
-                "{start} start peaked {peak} KiB over a {disk_kib} KiB pack, bound {working_set_kib} KiB"
-            );
+            log(&format!(
+                "{start} start peaked {peak} KiB, bound {bound_kib} KiB: {}",
+                got.line
+            ));
             assert!(
-                peak < working_set_kib,
-                "the {start} start peaked {peak} KiB over a {disk_kib} KiB pack, past {working_set_kib} KiB: {}",
+                peak < bound_kib,
+                "the {start} start peaked {peak} KiB over a {disk_kib} KiB pack, past {bound_kib} KiB: {}",
                 got.line
             );
         }
         let store = Store::open(dir.path()).unwrap();
         let all = store.scan(None).unwrap();
-        assert_eq!(all.len(), atoms);
+        assert_eq!(all.len(), stat.entries);
         assert!(
             all.iter()
                 .all(|atom| atom[UPDATED] == json!("2026-10-18T19:31:19.444Z")
                     && atom["ts"] == json!("2026-10-16T10:07:21.644Z")),
             "a claim past the first step was not stamped"
         );
+    }
+
+    /// What a start can hold over its base, of a pack of one workspace
+    /// whose tree is `stat` and whose claims take `record` bytes as a step
+    /// counts them, where a fault maps `unit` bytes. Returns the bound and
+    /// the places in it.
+    ///
+    /// The step a pass is on is live twice: its records as read through
+    /// the map, and the copy its write transaction makes of them, in the
+    /// heap until the commit writes it out (LMDB writes with `write`, not
+    /// `WRITEMAP`). A step is the pages its records fill.
+    ///
+    /// Each place in the file a step reads apart from the rest can map a
+    /// unit beyond its own bytes, and a page of it rewritten is a page in
+    /// the heap. The places are the meta pages at the head of the file,
+    /// read as each transaction begins; each level of the tree from the
+    /// root to the step's first leaf, apart since a rewritten page moves;
+    /// each leaf the step moves on to, with the levels between it and the
+    /// root; the two ends of the run its records fill; and the free list's
+    /// leaf, with the overflow page that holds the page numbers a step
+    /// frees, more than fit in a node, which the next write reads to reuse
+    /// them.
+    ///
+    /// The heap holds up to [`TRIM_THRESHOLD`] more of what the step freed.
+    #[cfg(target_os = "linux")]
+    fn start_bound(stat: &heed::DatabaseStat, record: usize, unit: usize) -> (usize, usize) {
+        const STEPS_LIVE: usize = 2;
+        const META: usize = 1;
+        const RUN_ENDS: usize = 2;
+        const FREE_LIST: usize = 2;
+        let page = stat.page_size as usize;
+        let per_step = STAMP_STEP_BYTES.div_ceil(record);
+        let step = per_step * stat.overflow_pages.div_ceil(stat.entries.max(1)) * page;
+        let per_leaf = (stat.entries / stat.leaf_pages.max(1)).max(1);
+        let depth = stat.depth as usize;
+        let places = META
+            + depth
+            + per_step.div_ceil(per_leaf) * depth.saturating_sub(1)
+            + RUN_ENDS
+            + FREE_LIST;
+        (
+            STEPS_LIVE * step + places * (unit + page) + TRIM_THRESHOLD,
+            places,
+        )
+    }
+
+    /// The most the kernel maps of a file in `dir` on one fault, and why.
+    ///
+    /// A fault maps up to a whole folio of the page cache, and a folio is
+    /// up to `hpage_pmd_size` where transparent huge pages can apply to the
+    /// file. On tmpfs that is the mount's `huge=` option, or
+    /// `shmem_enabled` forcing it. Other filesystems hold large folios as
+    /// they choose, unswitched by the THP settings, and the kernel does not
+    /// say which do, so it applies wherever THP is built. Otherwise a fault
+    /// maps `fault_around_bytes`, and never less than a page.
+    #[cfg(target_os = "linux")]
+    fn fault_unit(dir: &Path) -> (usize, String) {
+        let read = |path: &str| fs::read_to_string(path).ok();
+        let pmd = read("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size")
+            .and_then(|text| text.trim().parse::<usize>().ok());
+        let shmem = read("/sys/kernel/mm/transparent_hugepage/shmem_enabled")
+            .map(|text| chosen(&text))
+            .unwrap_or_default();
+        let (fstype, options) = mount_of(dir);
+        let thp = if fstype == "tmpfs" {
+            shmem == "force"
+                || (shmem != "deny"
+                    && options
+                        .split(',')
+                        .any(|option| matches!(option, "huge=always" | "huge=within_size")))
+        } else {
+            true
+        };
+        if let (true, Some(pmd)) = (thp, pmd) {
+            return (
+                pmd,
+                format!("hpage_pmd_size; THP can apply on {fstype} {options}"),
+            );
+        }
+        // SAFETY: sysconf reads a constant and touches no memory of ours.
+        let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+        match read("/sys/kernel/debug/fault_around_bytes")
+            .and_then(|text| text.trim().parse::<usize>().ok())
+        {
+            Some(bytes) => (
+                bytes.max(page),
+                format!("fault_around_bytes on {fstype} {options}"),
+            ),
+            None => (
+                FAULT_AROUND_DEFAULT.max(page),
+                format!("fault_around_bytes unread, its default, on {fstype} {options}"),
+            ),
+        }
+    }
+
+    /// The setting a sysfs choice file has in brackets.
+    #[cfg(target_os = "linux")]
+    fn chosen(text: &str) -> String {
+        text.split_whitespace()
+            .find_map(|word| word.strip_prefix('[')?.strip_suffix(']'))
+            .unwrap_or(text.trim())
+            .to_string()
+    }
+
+    /// The type and the options of the filesystem `dir` is on: the
+    /// innermost mount above it in `/proc/self/mountinfo`.
+    #[cfg(target_os = "linux")]
+    fn mount_of(dir: &Path) -> (String, String) {
+        let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let info = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        info.lines()
+            .filter_map(|line| {
+                let (mount, filesystem) = line.split_once(" - ")?;
+                let point = mount.split_whitespace().nth(4)?.replace("\\040", " ");
+                let mut filesystem = filesystem.split_whitespace();
+                let fstype = filesystem.next()?.to_string();
+                let options = filesystem.nth(1).unwrap_or_default().to_string();
+                dir.starts_with(&point)
+                    .then_some((point.len(), fstype, options))
+            })
+            .max_by_key(|(len, ..)| *len)
+            .map(|(_, fstype, options)| (fstype, options))
+            .unwrap_or_default()
+    }
+
+    /// The kernel (`uname -r`) and its transparent huge page settings.
+    #[cfg(target_os = "linux")]
+    fn host() -> String {
+        let read = |path: &str| {
+            fs::read_to_string(path).map_or_else(|_| "unread".into(), |text| chosen(&text))
+        };
+        format!(
+            "Linux {}, THP enabled {} shmem_enabled {} hpage_pmd_size {}",
+            read("/proc/sys/kernel/osrelease"),
+            read("/sys/kernel/mm/transparent_hugepage/enabled"),
+            read("/sys/kernel/mm/transparent_hugepage/shmem_enabled"),
+            read("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size"),
+        )
+    }
+
+    /// Write `line` to stderr past the test harness's capture, so a run
+    /// that passes shows it in CI too.
+    #[cfg(target_os = "linux")]
+    fn log(line: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{line}");
     }
 
     /// One claim the size a seat writes, as a writer from before
@@ -3318,11 +3499,15 @@ mod tests {
         (atom_key(&workspace, &id), serde_json::to_vec(&row).unwrap())
     }
 
-    /// Write `atoms` unstamped claims straight into a home's database,
-    /// spread round-robin over `workspaces`, and return the size of the
-    /// data file.
+    /// Write unstamped claims straight into a home's database until it
+    /// holds `atoms`, spread round-robin over `workspaces`, and return the
+    /// size of the data file and the shape of its tree.
     #[cfg(target_os = "linux")]
-    fn write_unstamped_pack(home: &Path, atoms: usize, workspaces: usize) -> u64 {
+    fn write_unstamped_pack(
+        home: &Path,
+        atoms: usize,
+        workspaces: usize,
+    ) -> (u64, heed::DatabaseStat) {
         let dir = home.join("memory.lmdb");
         fs::create_dir_all(&dir).unwrap();
         // SAFETY: a fresh directory no other process has open. The map is
@@ -3336,7 +3521,8 @@ mod tests {
         };
         let mut wtxn = env.write_txn().unwrap();
         let db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, None).unwrap();
-        for n in 0..atoms {
+        let written = db.len(&wtxn).unwrap() as usize;
+        for n in written..atoms {
             let (key, blob) = unstamped(n, workspaces);
             db.put(&mut wtxn, &key, &blob).unwrap();
             if n % 1000 == 999 {
@@ -3345,8 +3531,9 @@ mod tests {
             }
         }
         wtxn.commit().unwrap();
+        let stat = db.stat(&env.read_txn().unwrap()).unwrap();
         env.prepare_for_closing().wait();
-        fs::metadata(dir.join("data.mdb")).unwrap().len()
+        (fs::metadata(dir.join("data.mdb")).unwrap().len(), stat)
     }
 
     /// A field of `/proc/self/status`, in KiB.
@@ -3501,7 +3688,7 @@ mod tests {
             .filter_map(|s| s.trim().parse::<usize>().ok())
         {
             let dir = tempfile::tempdir().unwrap();
-            let disk = write_unstamped_pack(dir.path(), atoms, 8);
+            let (disk, _) = write_unstamped_pack(dir.path(), atoms, 8);
             for start in ["first", "second"] {
                 let got = start_in_child(dir.path(), "store::tests::start_cost_by_pack_size");
                 let err = got.line.split_once(" err=").map_or("", |(_, err)| err);
