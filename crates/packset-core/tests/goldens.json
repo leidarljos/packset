@@ -407,7 +407,24 @@
     "workspace": "w",
     "origin": "agent-derived"
    },
-   "error": "atom has 3 sentences; one claim is at most 2"
+   "ok": {
+    "kind": "voice",
+    "text": "One. Two. Three.",
+    "workspace": "w",
+    "origin": "agent-derived",
+    "prose": {
+     "words": 3,
+     "sentences": 3,
+     "grade": null,
+     "ease": null,
+     "adverbs": 0,
+     "adverb_ratio": 0.0,
+     "passives": 0,
+     "hard_sentences": 0,
+     "very_hard_sentences": 0,
+     "warning": "atom has 3 sentences; one claim is at most 2"
+    }
+   }
   },
   {
    "input": {

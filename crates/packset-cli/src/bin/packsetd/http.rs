@@ -1556,6 +1556,43 @@ mod tests {
         assert!(rotated.body.get("warning").is_none(), "{:?}", rotated.body);
     }
 
+    /// An agent's or a hook's claim past the prose gate is stored and found
+    /// at once, and the answer carries the reason the gate gave.
+    #[test]
+    fn an_agents_hard_prose_is_stored_and_found_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let text = "Payment webhooks retry three times. The backoff starts at 2 seconds. It doubles each time.";
+        for (writer, field) in [
+            ("agent-derived", json!({"origin": "agent-derived"})),
+            ("hook", json!({"hook": true})),
+        ] {
+            let mut body = json!({"workspace": "w", "kind": "lesson", "text": text});
+            body.as_object_mut()
+                .unwrap()
+                .extend(field.as_object().unwrap().clone());
+            let added = post(&svc, "/v1/atoms", &body);
+            assert_eq!(
+                added.body["text"],
+                json!(text),
+                "{writer}: {:?}",
+                added.body
+            );
+            assert_eq!(
+                added.body["prose"]["warning"],
+                json!("atom has 3 sentences; one claim is at most 2"),
+                "{writer}: {:?}",
+                added.body
+            );
+            let id = added.body["id"].clone();
+            let hits = read(&svc, "/v1/search", "webhooks backoff")["hits"].clone();
+            assert!(
+                hits.as_array().unwrap().iter().any(|hit| hit["id"] == id),
+                "{writer}: search misses {id}: {hits:?}"
+            );
+        }
+    }
+
     /// A card is written as given. Its answer carries the labels and one
     /// line to print, and a search hit on the card shows the label.
     #[test]

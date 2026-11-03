@@ -432,8 +432,9 @@ enum OriginWrite {
 /// # Errors
 ///
 /// Returns [`AtomError`] for an unknown kind or level, missing text or
-/// workspace, text past the soft cap, a bad set name, an entity that opens like
-/// an accession and is not one, or prose too complex for one claim.
+/// workspace, text past the soft cap, a bad set name, or an entity that opens
+/// like an accession and is not one. Prose past the gate is kept, with the
+/// reason in `prose.warning`.
 pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     let kind = atom.get("kind").and_then(Value::as_str).unwrap_or("");
     if !KINDS.contains(&kind) {
@@ -552,21 +553,19 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
         }
         atom.insert("prose".into(), prose);
     } else {
+        // Whoever wrote it, the claim is kept as written. The answer
+        // carries the reason the gate gave, so the client can say it once.
         match prose::refuse(&text, prose::Role::Atom) {
             Ok(report) => {
                 atom.insert("prose".into(), prose_value(&report));
             }
-            // A person's own words are kept as written: the gate is for
-            // what an agent proposes. The answer carries the reason the
-            // gate gave, so the client can say it once.
-            Err(why) if !crate::atom::needs_accept(origin_of(atom), hook_of(atom), true) => {
+            Err(why) => {
                 let mut prose = prose_value(&prose::assess(&text));
                 if let Value::Object(fields) = &mut prose {
                     fields.insert("warning".into(), Value::String(why.0));
                 }
                 atom.insert("prose".into(), prose);
             }
-            Err(why) => return Err(why.into()),
         }
     }
     Ok(())
@@ -1726,11 +1725,10 @@ mod tests {
         assert!(MAIL_KINDS.iter().all(|k| UNREVIEWED_KINDS.contains(k)));
     }
 
-    /// A person's own words are stored as written, with the reason the
-    /// prose gate gave; the same words from an agent, or from a hook, are
-    /// refused as before.
+    /// Hard prose is stored as written with the reason the prose gate gave,
+    /// whether a person, an agent or a hook wrote it.
     #[test]
-    fn a_persons_hard_prose_is_kept_with_a_warning() {
+    fn hard_prose_is_kept_with_a_warning_from_every_writer() {
         let hard = [
             "The payments service retries webhooks three times with exponential backoff starting at 2 seconds",
             "Payment webhooks are retried three times. The backoff starts at 2 seconds. It doubles each time.",
@@ -1740,15 +1738,19 @@ mod tests {
             assert!(validate(&mut person).is_ok(), "{text}");
             let warning = person["prose"]["warning"].as_str().unwrap_or("");
             assert!(!warning.is_empty(), "{text}: {:?}", person["prose"]);
-            let mut declared = atom(json!({"kind": "preference", "text": text,
-                "workspace": "seat", "origin": "user-declared"}));
-            assert!(validate(&mut declared).is_ok(), "{text}");
-            let mut agent = atom(json!({"kind": "lesson", "text": text,
-                "workspace": "seat", "origin": "agent-derived"}));
-            assert_eq!(validate(&mut agent).unwrap_err().0, warning, "{text}");
-            let mut hook = atom(json!({"kind": "lesson", "text": text,
-                "workspace": "seat", "hook": true}));
-            assert!(validate(&mut hook).is_err(), "{text}");
+            for writer in [
+                json!({"kind": "preference", "origin": "user-declared"}),
+                json!({"kind": "lesson", "origin": "agent-derived"}),
+                json!({"kind": "lesson", "hook": true}),
+            ] {
+                let mut fields = writer.clone();
+                fields["text"] = json!(text);
+                fields["workspace"] = json!("seat");
+                let mut kept = atom(fields);
+                validate(&mut kept).unwrap_or_else(|e| panic!("{writer}: {text}: {e}"));
+                assert_eq!(kept["text"], json!(text), "{writer}");
+                assert_eq!(kept["prose"]["warning"], json!(warning), "{writer}: {text}");
+            }
         }
         let mut plain =
             atom(json!({"kind": "lesson", "text": "Use pnpm for installs.", "workspace": "seat"}));
@@ -1781,15 +1783,19 @@ The build failed. Look at the log. It is the writer.";
         for kind in MAIL_KINDS {
             assert!(check(kind, header).is_ok(), "{kind}");
         }
-        let lesson = validate(&mut atom(json!({
+        let mut lesson = atom(json!({
             "kind": "lesson",
             "text": header,
             "workspace": "seat",
             "origin": "agent-derived",
-        })));
+        }));
+        validate(&mut lesson).unwrap();
         assert!(
-            lesson.unwrap_err().0.contains("sentences"),
-            "a claim an agent proposes is still at most two sentences"
+            lesson["prose"]["warning"]
+                .as_str()
+                .is_some_and(|w| w.contains("sentences")),
+            "a lesson an agent writes past two sentences carries the reason: {:?}",
+            lesson["prose"]
         );
         let long = "x".repeat(TEXT_SOFT_CAP + 1);
         let over = check("message", &long);
@@ -1800,7 +1806,8 @@ The build failed. Look at the log. It is the writer.";
     }
 
     /// A logbook note keeps three sentences and a long one, and names its
-    /// issue. The same text as an agent's summary or lesson is still refused.
+    /// issue. The same text as an agent's summary or lesson is kept with
+    /// the reason the gate gave.
     #[test]
     fn a_note_keeps_logbook_text_and_needs_its_issue() {
         let three =
@@ -1825,9 +1832,11 @@ The build failed. Look at the log. It is the writer.";
             let kept = write(NOTE_KIND, text, Some("ljos-ensq")).unwrap();
             assert!(kept["prose"].is_object(), "{kept:?}");
             for kind in ["summary", "lesson"] {
+                let claim = write(kind, text, Some("ljos-ensq")).unwrap();
                 assert!(
-                    write(kind, text, Some("ljos-ensq")).is_err(),
-                    "{kind}: {text}"
+                    claim["prose"]["warning"].is_string(),
+                    "{kind}: {text}: {:?}",
+                    claim["prose"]
                 );
             }
         }
