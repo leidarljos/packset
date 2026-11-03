@@ -285,13 +285,20 @@ fn file_hits(field: &str, text: &str, qtoks: &[String], bias: f64) -> Vec<Value>
         .filter_map(|para| {
             let score = text_score(qtoks, &para);
             (score != 0.0).then(|| {
-                json!({
+                // A card is a file the person edits, so its labels are read
+                // off the paragraph rather than stored beside it.
+                let labels = record::flag_labels(&para);
+                let mut hit = json!({
                     "field": field,
                     "id": Value::Null,
                     "kind": field,
                     "text": para,
                     "score": score + bias,
-                })
+                });
+                if !labels.is_empty() {
+                    hit[record::LABELS] = json!(labels);
+                }
+                hit
             })
         })
         .collect()
@@ -384,6 +391,9 @@ fn atom_hit(atom: &Record, score: f64) -> Value {
     // Where the claim was written, for an audit that reads a hit's lineage.
     if let Some(source) = atom.get("source").filter(|s| !s.is_null()) {
         hit["source"] = source.clone();
+    }
+    if let Some(labels) = atom.get(record::LABELS).filter(|l| l.is_array()) {
+        hit[record::LABELS] = labels.clone();
     }
     hit
 }

@@ -127,7 +127,15 @@ fn atom_validation_matches_the_corpus() {
                 let want = case["ok"].as_object().unwrap();
                 // The normalized fields are the ones validate is responsible
                 // for; the rest it must leave alone.
-                for key in ["kind", "level", "text", "workspace", "set", "entities"] {
+                for key in [
+                    "kind",
+                    "level",
+                    "text",
+                    "workspace",
+                    "set",
+                    "entities",
+                    "labels",
+                ] {
                     assert_eq!(atom.get(key), want.get(key), "{key} for {shown}");
                 }
                 assert!(atom.contains_key("prose"), "prose report for {shown}");

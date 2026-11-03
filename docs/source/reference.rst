@@ -110,6 +110,21 @@ The writer listens on ``127.0.0.1`` only. Bodies are JSON.
 A refusal is a 4xx with ``error`` as one line: the reason a claim was not
 stored, quoted back.
 
+Text shaped like a credential (a private key block, an age secret key, a
+GitHub, Slack or AWS token, a JSON Web Token, a bearer token, an ``sk-``
+key, or a secret-ish name assigned a value), text that tells the model
+reading it to ignore its instructions, and text with zero-width or
+bidirectional controls are stored as written, not refused. The record
+carries ``labels`` that name what matched, a search hit and a recall
+carry them too, and the write answers one line in ``warning`` for the
+client to print. A card write answers its ``labels`` and ``warning`` the
+same way, and a search hit on a card paragraph carries the labels.
+
+A label does not hide the text. Anyone who reads the pack or an export
+reads the credential, and a model that recalls an instruction-shaped
+claim reads the instruction. A delete keeps the text on its tombstone,
+so rotate a credential that reached the pack.
+
 The atom
 ========
 
@@ -135,6 +150,8 @@ Schema ``inside.atom/v1``. Fields the writer reads:
 | ``set``                              | optional; a checked name                                                                                                                                                                                                                                                                                                                                             |
 +--------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``entities``                         | names the claim is about; an entity shaped like an accession must be one; ``seat:<name>`` names the seat that wrote the claim and is not a topic, so it links and matches nothing                                                                                                                                                                                    |
++--------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``labels``                           | ``flag:credential-shaped``, ``flag:instruction-shaped`` or ``flag:invisible-unicode`` for what the text matched; the writer sets the ``flag:`` labels from the text on every write, so an update that takes a credential out drops its label, and keeps any other label a client sets                                                                                |
 +--------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``ts``, ``valid_from``, ``valid_to`` | first written, and the window it was true; ``valid_to`` closes on supersession; no rewrite moves ``ts``                                                                                                                                                                                                                                                              |
 +--------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+

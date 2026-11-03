@@ -83,6 +83,21 @@ carry the port the kernel assigned.
 A refusal is a 4xx with =error= as one line: the reason a claim was not
 stored, quoted back.
 
+Text shaped like a credential (a private key block, an age secret key, a
+GitHub, Slack or AWS token, a JSON Web Token, a bearer token, an =sk-=
+key, or a secret-ish name assigned a value), text that tells the model
+reading it to ignore its instructions, and text with zero-width or
+bidirectional controls are stored as written, not refused. The record
+carries =labels= that name what matched, a search hit and a recall
+carry them too, and the write answers one line in =warning= for the
+client to print. A card write answers its =labels= and =warning= the
+same way, and a search hit on a card paragraph carries the labels.
+
+A label does not hide the text. Anyone who reads the pack or an export
+reads the credential, and a model that recalls an instruction-shaped
+claim reads the instruction. A delete keeps the text on its tombstone,
+so rotate a credential that reached the pack.
+
 * The atom
 
 Schema =inside.atom/v1=. Fields the writer reads:
@@ -97,6 +112,7 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =workspace= | required |
 | =set= | optional; a checked name |
 | =entities= | names the claim is about; an entity shaped like an accession must be one; =seat:<name>= names the seat that wrote the claim and is not a topic, so it links and matches nothing |
+| =labels= | =flag:credential-shaped=, =flag:instruction-shaped= or =flag:invisible-unicode= for what the text matched; the writer sets the =flag:= labels from the text on every write, so an update that takes a credential out drops its label, and keeps any other label a client sets |
 | =ts=, =valid_from=, =valid_to= | first written, and the window it was true; =valid_to= closes on supersession; no rewrite moves =ts= |
 | =updated= | the last write: a link rewrite, a review, a closed window, an update or a tombstone; a pack written before 0.15.3 gets it at open, and =ts= goes back to =valid_from= or =source.at= where a rewrite had moved it |
 | =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object; a rewrite never crosses a different =from=, =to=, =about=, =agent=, =issue= or =name=, so two voters' rows or two agents' forecasts stay two records |
