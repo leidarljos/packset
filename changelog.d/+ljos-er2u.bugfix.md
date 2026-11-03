@@ -1,4 +1,3 @@
-A pack no longer stops taking writes when it reaches 1 GiB.
-The map now opens at twice the pack's size on disk.
-It doubles when a write needs room, and that includes the upgrade pass.
-Memory at start no longer grows with the pack: over 791 MiB, a start peaked at 16 MiB, not 799 MiB.
+Starting packsetd on an older pack upgrades it one step at a time.
+On 4 KiB pages its peak memory is 16 MiB over a 791 MiB pack, against 799 MiB before.
+Where the kernel maps large folios whole, the peak grows slowly with the pack, to 35 MiB over 95 MiB.

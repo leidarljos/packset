@@ -37,14 +37,47 @@ After: the commit that adds this file, on 177c9f5333e2613b17f6481a95c7c5c5ac3216
 
 Before, the pass read the pack through the map and kept every page it read, so the peak was the pack and about 7 MiB more, nearly all of it file pages.
 Now a step ends after 1 MiB of records read, stamped or not, and drops the pages it read from the map before the next step reads.
-The peak is 14 to 16 MiB from 79 MiB to 1108 MiB of pack, and the pages read are gone once the pass ends.
+On these 4 KiB pages the peak is 14 to 16 MiB from 79 MiB to 1108 MiB of pack, and the pages read are gone once the pass ends.
 The claims of eight workspaces are interleaved in the file, so a step over one workspace's claims faults in every eighth claim, and the kernel maps the 16 pages around each fault (`fault_around_bytes` 65536).
 A step therefore maps about eight times what it reads before it drops them, which is most of the 8 to 10 MiB over base.
-Over one workspace, `store::tests::a_start_holds_one_step_not_the_pack`, as `cargo test` builds it, peaked 2400 to 2464 KiB over base stamping and 1248 to 1376 KiB current in four runs, on a 12692 KiB pack, against its bound of four steps, 4096 KiB.
-On 177c9f5333e2613b17f6481a95c7c5c5ac321600 the same test peaked 14156 KiB over base stamping, more than the pack, and failed.
+Over one workspace, `store::tests::a_start_holds_one_step_not_the_pack`, as `cargo test` builds it, writes a pack four times a bound it derives from the host and the pack's tree, and asserts both starts peak under it.
+Three runs each at ac5380ab3f61f147b1204d1ed676c8784dc89e81, peak over base, stamping then current:
+
+| pack on | a fault maps | bound KiB | pack KiB | stamping KiB | current KiB | on 177c9f5, stamping KiB |
+|---|---|---|---|---|---|---|
+| ext4 | 2048 KiB, hpage_pmd_size | 26848 | 110756 | 2724 to 2784 | 1372 to 1440 | 112172, failed |
+| tmpfs, huge=always | 2048 KiB, hpage_pmd_size | 26848 | 110756 | 17248 | 16096 to 16160 | 115908, failed |
+| tmpfs | 64 KiB, fault_around_bytes default | 2836 | 12016 | 2332 to 2404 | 1184 to 1248 | 13388, failed |
+
+The kernel does not say which filesystems hold large folios, so on ext4 the bound takes the 2 MiB folio; on this kernel a start over ext4 peaks as one over a plain tmpfs, where a fault maps 64 KiB.
+On 177c9f5333e2613b17f6481a95c7c5c5ac321600 the same test peaked at more than the pack on each and failed.
 The pages a step drops are faulted in again when a later step reads them, so by the medians the pass took 8 to 9% longer on a first start, and a third to a half longer on a current pack: 80 to 106 ms at 79 MiB, 821 to 1214 ms at 791 MiB.
 It runs behind the listener; the open is 0.1 ms at every size, before and after.
 At 140k claims the 1108 MiB in use is past develop's 1 GiB map, and LMDB then opens the map at the pages in use (`mdb_env_open2` in `mdb.c`), which leaves no room to write.
 Every start's pass stopped with MDB_MAP_FULL and left claims unstamped; its time includes the count of what was left.
 After, the map opened at twice the data file and the pass stamped every claim.
 The first start stays open in each child: closing it freed LMDB's 2 MiB list of dirty pages, glibc moved its mmap threshold up to that size, and the next open cleared its list on the heap, which charged 2048 KiB and about 0.7 ms to the open measured.
+
+ac5380ab3f61f147b1204d1ed676c8784dc89e81 TMPDIR=/mnt/hugefs/tmp PACKSET_START_SIZES=1500,6000,12000 cargo test --release -p packset-daemon --lib start_cost_by_pack_size -- --ignored --nocapture
+after `mount -t tmpfs -o huge=always,size=4G tmpfs /mnt/hugefs` and `mkdir /mnt/hugefs/tmp`.
+
+The same starts where a fault maps a whole 2 MiB folio: the pack on a tmpfs mounted `huge=always`, whose page cache is in folios of `hpage_pmd_size`.
+Intel(R) Xeon(R) Processor, 8 cores, one thread a core, Linux 6.12.94+, transparent_hugepage enabled [madvise], shmem_enabled [never], hpage_pmd_size 2097152, tmpfs rw,relatime,size=4194304k,huge=always, CPU only.
+The packs, children, columns and three runs are as above; the test binary is on ext4.
+
+After, huge=always: ac5380ab3f61f147b1204d1ed676c8784dc89e81; Intel(R) Xeon(R) Processor, 8 cores
+
+| atoms | data.mdb MiB | start | open ms | pass ms, median (range) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 1500 | 11 | first | 0.1 | 66 (64 to 90) | 6 | 6 | 1 | 5 | 20 |
+| 1500 | 11 | second | 0.0 | 11 (11 to 12) | 6 | 6 | 0 | 5 | 19 |
+| 6000 | 47 | first | 0.0 | 260 (257 to 262) | 6 | 6 | 1 | 5 | 31 |
+| 6000 | 47 | second | 0.0 | 48 (47 to 68) | 6 | 6 | 0 | 5 | 31 |
+| 12000 | 95 | first | 0.0 | 520 (517 to 527) | 6 | 6 | 1 | 5 | 35 |
+| 12000 | 95 | second | 0.0 | 95 (95 to 97) | 6 | 6 | 0 | 5 | 35 |
+
+The peak grows slowly with the pack: 20, 31 and 35 MiB at 11, 47 and 95 MiB, where on 4 KiB pages it is 14 to 16 MiB from 79 MiB to 1108 MiB.
+The 11 MiB pack is six folios, and a step maps nearly all of it; from 47 MiB the peak is well below the pack.
+A step still drops what it read, but each place it reads maps the whole folio around it: the meta pages, each level of the tree, its leaves, the ends of its run and the free list.
+Over eight interleaved workspaces a step's claims spread over about eight times what it reads, and the tree deepens as the pack grows, so a step touches more folios.
+Over one workspace, the test above, as `cargo test` builds it, peaked 17248 KiB over base on a 110756 KiB pack.
