@@ -1,7 +1,8 @@
 //! The dense projection as a kept child process (`packset-embed`), one per
 //! direction. An absent encoder is a supported state: every failure falls
-//! back to the lexical scorers. A vector is derivable from the text, never
-//! the store.
+//! back to the lexical scorers. `INSIDE_EMBED=off` and `--no-embed` are
+//! that state on purpose: no child is started. A vector is derivable from
+//! the text, never the store.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -16,12 +17,47 @@ use serde_json::{json, Value};
 /// Environment variables naming the encoder.
 pub const BIN_VARS: &[&str] = &["PACKSET_EMBED"];
 
+/// Whether this seat runs the encoder.
+///
+/// On unless the seat turns it off. `INSIDE_EMBED` set to `off`, `0`,
+/// `none`, `false` or `no` is the environment form; `packsetd --no-embed`
+/// is the flag. Those spellings are the ones the other host switches
+/// already take (`PACKSET_STEM` takes `off`, `0`, `no` and `false`; the
+/// caps take `off` and `none`), so a seat does not learn a second dialect
+/// for this one variable. Unset means on: a pack that has an encoder keeps
+/// the dense ballot.
+#[must_use]
+pub fn enabled() -> bool {
+    let raw = std::env::var("INSIDE_EMBED").unwrap_or_else(|_| "on".into());
+    !encoder_switched_off(no_embed_flag(), &raw)
+}
+
+/// `--no-embed` on this process. The arguments do not change after start.
+fn no_embed_flag() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::args().any(|arg| arg == "--no-embed"))
+}
+
+/// The one switch, split so a test can name the flag without the process
+/// having been started with it.
+fn encoder_switched_off(no_embed_flag: bool, env_raw: &str) -> bool {
+    no_embed_flag
+        || matches!(
+            env_raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "none" | "false" | "no"
+        )
+}
+
 /// The encoder binary this seat would run: `PACKSET_EMBED`, else beside the
 /// writer, else on `PATH`. An explicit variable always wins over the kept
 /// discovery below, so a seat or test that names an encoder never sees
-/// the cache.
+/// the cache. A seat that switched the encoder off has nothing to run:
+/// this returns before either lookup, so no caller starts a child.
 #[must_use]
 pub fn binary() -> Option<PathBuf> {
+    if !enabled() {
+        return None;
+    }
     for var in BIN_VARS {
         if let Some(raw) = std::env::var_os(var) {
             let path = PathBuf::from(raw);
@@ -870,6 +906,11 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
     if candidates.is_empty() {
         return Some(Vec::new());
     }
+    // The cross-encoder is the same child as the dense ballot. The switch
+    // that leaves the encoder unstarted leaves this stage unstarted too.
+    if !enabled() {
+        return None;
+    }
     let binary = binary()?;
     // One cross-encoder answers one question at a time. A search that finds
     // it busy for longer than a moment keeps its first-stage order and says
@@ -1264,6 +1305,79 @@ for line in sys.stdin:
 
     fn hit(id: &str, text: &str) -> Value {
         json!({ "id": id, "text": text })
+    }
+
+    /// `INSIDE_EMBED=off` and `--no-embed` are one switch. The off
+    /// spellings are the ones the other host switches already take.
+    /// An empty value and `on` leave the encoder on, which is the
+    /// unset default.
+    #[test]
+    fn the_encoder_switch_is_the_flag_or_the_off_spellings() {
+        assert!(encoder_switched_off(true, "on"));
+        assert!(encoder_switched_off(true, "yes"));
+        assert!(encoder_switched_off(false, "off"));
+        assert!(encoder_switched_off(false, "OFF"));
+        assert!(encoder_switched_off(false, " 0 "));
+        assert!(encoder_switched_off(false, "none"));
+        assert!(encoder_switched_off(false, "false"));
+        assert!(encoder_switched_off(false, "no"));
+        assert!(!encoder_switched_off(false, "on"));
+        assert!(!encoder_switched_off(false, ""));
+        assert!(!encoder_switched_off(false, "yes"));
+    }
+
+    /// A named encoder that would answer is not started when the switch
+    /// is off, and a question with candidates does not start the
+    /// cross-encoder either. Status reads the same switch through
+    /// `enabled`.
+    #[test]
+    fn a_switched_off_encoder_is_not_started() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let old_embed = std::env::var_os("PACKSET_EMBED");
+        let old_inside = std::env::var_os("INSIDE_EMBED");
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("started");
+        let stub = dir.path().join("stub-embed");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nexit 1\n",
+                sentinel.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        // SAFETY: EMBED is held, so no other test reads these variables.
+        unsafe {
+            std::env::set_var("PACKSET_EMBED", &stub);
+            std::env::set_var("INSIDE_EMBED", "off");
+        }
+        reset_for_test();
+        let encoded = encode_query("a question the encoder must not see");
+        let scored = rerank("a question", &["one claim".to_string()]);
+        let on = enabled();
+        unsafe {
+            match old_embed {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+            match old_inside {
+                Some(value) => std::env::set_var("INSIDE_EMBED", value),
+                None => std::env::remove_var("INSIDE_EMBED"),
+            }
+        }
+        reset_for_test();
+        drop(_held);
+        assert!(!on, "status would read the encoder as on");
+        assert!(encoded.is_none());
+        assert!(scored.is_none());
+        assert!(
+            !sentinel.exists(),
+            "the encoder child was started with the switch off"
+        );
     }
 
     /// The second stage is off unless the host asks. An unset env is the

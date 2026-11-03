@@ -2030,9 +2030,18 @@ impl Service {
             let projecting = projection_may_count.then(|| {
                 scope_.spawn(|| crate::milli::search(corpus, query, first_limit, &dir, scope, kind))
             });
-            let meaning = crate::embed::encode_query(query)
-                .map(|vector| packset_core::search::search_dense_at(&ask, &vector, &embedded))
-                .filter(|hits| !hits.is_empty());
+            // The dense ballot is the encoder's. `INSIDE_EMBED=off` and
+            // `--no-embed` leave it out, so this search does not start a
+            // child and does not add a third ranking. Lexical search still
+            // answers. `binary` reads the same switch, which is what keeps
+            // a later caller from starting the child anyway.
+            let meaning = if crate::embed::enabled() {
+                crate::embed::encode_query(query)
+                    .map(|vector| packset_core::search::search_dense_at(&ask, &vector, &embedded))
+                    .filter(|hits| !hits.is_empty())
+            } else {
+                None
+            };
             let projected = projecting.and_then(|handle| handle.join().ok()).flatten();
             (meaning, projected)
         });
@@ -2753,15 +2762,13 @@ impl Service {
 
 /// Whether the dense-rank embedder is switched on.
 ///
-/// Switched on and present are different questions. The runtime behind the
-/// encoder lives in its own binary, so a seat can have it enabled with nothing
-/// to run; keyword search does not depend on either.
+/// The switch is [`crate::embed::enabled`]: `INSIDE_EMBED` and
+/// `packsetd --no-embed`. Switched on and present are different questions.
+/// The runtime behind the encoder lives in its own binary, so a seat can
+/// have it enabled with nothing to run; keyword search does not depend on
+/// either.
 fn embed_enabled() -> bool {
-    let raw = std::env::var("INSIDE_EMBED").unwrap_or_else(|_| "on".into());
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "off" | "none" | "false" | "no"
-    )
+    crate::embed::enabled()
 }
 
 /// The search binary as `/v1/status` reports it.
@@ -4668,6 +4675,114 @@ mod tests {
         assert_eq!(after["embedder"]["answering"], json!(false), "{after}");
         assert_eq!(after["embedder"]["available"], json!(false), "{after}");
         assert_eq!(after["rerank"]["available"], json!(false), "{after}");
+    }
+
+    /// `INSIDE_EMBED=off` leaves the encoder unstarted. An encoder is named
+    /// and would answer, so a switch that only hid a missing binary would
+    /// still put a dense ballot on the search. Write and search answer, the
+    /// engine stays lexical, and status reads the encoder as off. No
+    /// `packset-embed` is required on `PATH`: the named binary is the one
+    /// that must not start.
+    #[test]
+    fn with_the_encoder_off_search_stays_lexical_and_status_says_so() {
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::embed::reset_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("started");
+        let stub = dir.path().join("stub-embed");
+        std::fs::write(
+            &stub,
+            format!(
+                r#"#!/usr/bin/env python3
+import json, pathlib, sys
+pathlib.Path(r"{sentinel}").write_text("started\n")
+if "--rerank" in sys.argv:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        req = json.loads(line)
+        n = len(req.get("d") or [])
+        print(json.dumps({{"id": req.get("id", "q"), "s": [float(i) for i in range(n)]}}), flush=True)
+else:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        print(json.dumps({{"v": [0.2, 0.1]}}), flush=True)
+"#,
+                sentinel = sentinel.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        let old_embed = std::env::var_os("PACKSET_EMBED");
+        let old_inside = std::env::var_os("INSIDE_EMBED");
+        // SAFETY: EMBED is held, so no other test reads these variables.
+        unsafe {
+            std::env::set_var("PACKSET_EMBED", &stub);
+            std::env::set_var("INSIDE_EMBED", "off");
+        }
+        let (_home, svc) = service();
+        svc.add(atom("Reviews open with a check.")).unwrap();
+        svc.add(atom("Prefer ripgrep for search.")).unwrap();
+        let panel = packset_core::Panel::default();
+        let found = svc
+            .search("w", "reviews search", 8, None, &panel, None, true, None)
+            .unwrap();
+        let status = svc.status(Some("w"), &panel).unwrap();
+        unsafe {
+            match old_embed {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+            match old_inside {
+                Some(value) => std::env::set_var("INSIDE_EMBED", value),
+                None => std::env::remove_var("INSIDE_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        drop(_guard);
+        assert_eq!(status["embedder"]["enabled"], json!(false), "{status}");
+        assert_eq!(status["embedder"]["available"], json!(false), "{status}");
+        assert!(
+            status["embedder"]["answering"].is_null(),
+            "a dense call ran: {status}"
+        );
+        assert!(status["embedder"]["binary"].is_null(), "{status}");
+        assert_eq!(status["rerank"]["available"], json!(false), "{status}");
+        assert_ne!(found["engine"], json!("dense"), "{found}");
+        assert_eq!(found["rerank"], json!("absent"), "{found}");
+        let texts: Vec<_> = found["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|hit| hit["text"].as_str())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("Reviews")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("ripgrep")),
+            "{texts:?}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "the encoder child was started with the switch off"
+        );
+        for stored in svc.store.live("w").unwrap().iter() {
+            let embedding = stored.get("embedding");
+            assert!(
+                embedding.is_none() || embedding.is_some_and(Value::is_null),
+                "a write stored a vector with the encoder off: {stored:?}"
+            );
+        }
     }
 
     /// Twenty-four fresh lessons and one from January, all sharing the

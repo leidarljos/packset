@@ -174,11 +174,22 @@ pub fn serve(
     }
     let listener = TcpListener::bind((host, port))
         .map_err(|e| anyhow::anyhow!("cannot bind {host}:{port}: {e}"))?;
+    // Port 0 asks the kernel to assign a free port (POSIX bind). The
+    // listening line and the file beside the database carry the port
+    // the kernel assigned.
+    let port = listener
+        .local_addr()
+        .map_err(|e| anyhow::anyhow!("cannot read the bound port: {e}"))?
+        .port();
     let workers = worker_count();
     let queue = queue_depth();
     eprintln!(
         "packsetd: listening on http://{host}:{port} with {workers} workers and room for {queue} waiting"
     );
+    // Replaced whole, so a reader never sees a partial port. The name is
+    // `port` because that is the word a seat already uses for this number.
+    let port_path = service.home().root().join("port");
+    write_port_file(&port_path, port)?;
     let busy = Arc::new(AtomicU64::new(unix_millis()));
     start_idle_release(Arc::clone(&service), Arc::clone(&busy), idle_trim_after());
     wire::serve(&listener, workers, queue, move |request| {
@@ -186,6 +197,16 @@ pub fn serve(
         handle(&service, &panel, token.as_deref(), request)
     });
     Ok(())
+}
+
+/// Write `port` as one line, by renaming a finished file into place.
+fn write_port_file(path: &std::path::Path, port: u16) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, format!("{port}\n")).map_err(|err| {
+        anyhow::anyhow!("cannot write the bound port to {}: {err}", tmp.display())
+    })?;
+    std::fs::rename(&tmp, path)
+        .map_err(|err| anyhow::anyhow!("cannot write the bound port to {}: {err}", path.display()))
 }
 
 /// Stamp `busy` for a request that can encode, scan or write. A cheap
@@ -930,6 +951,49 @@ fn encode(answer: &Answer) -> wire::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--port 0` asks the kernel for a port. The writer writes that port
+    /// and a client reaches it. The deadline is how long this test waits
+    /// for the accept thread to be scheduled; the socket is already bound
+    /// when the file appears.
+    #[test]
+    fn port_zero_writes_the_assigned_port_and_a_client_reaches_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let svc = Arc::new(Service::open(crate::home::Home::new(&home)).unwrap());
+        let panel = packset_core::Panel::default();
+        let port_path = home.join("port");
+        std::thread::spawn(move || {
+            if let Err(err) = serve(svc, panel, LOOPBACK, 0, None) {
+                panic!("serve: {err}");
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let port = loop {
+            if let Ok(text) = std::fs::read_to_string(&port_path) {
+                if let Ok(port) = text.trim().parse::<u16>() {
+                    if port != 0 {
+                        break port;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer did not write the port it was given"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let body = ureq::get(&format!("http://{LOOPBACK}:{port}/health"))
+            .call()
+            .unwrap_or_else(|err| panic!("a client did not reach {port}: {err}"))
+            .into_string()
+            .unwrap();
+        assert!(body.contains("packsetd"), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(&port_path).unwrap().trim(),
+            port.to_string()
+        );
+    }
 
     #[test]
     fn default_workers_is_four_not_core_count() {

@@ -41,6 +41,9 @@ pub fn run() -> anyhow::Result<()> {
             "--diversify" => diversify = Some(next("--diversify")?),
             "--decay" => decay = Some(next("--decay")?),
             "--owned" => owned = true,
+            // `embed::enabled` reads this argument. The arm is what keeps
+            // the writer from refusing the flag as unknown.
+            "--no-embed" => {}
             "-h" | "--help" => {
                 println!("{}", packsetd_usage());
                 return Ok(());
@@ -86,6 +89,9 @@ pub fn run() -> anyhow::Result<()> {
         panel.diversify.as_str(),
         panel.decay.as_str()
     );
+    if !crate::embed::enabled() {
+        eprintln!("packsetd: encoder off; search is lexical");
+    }
 
     let service = Arc::new(Service::open(Home::new(&root))?);
     if owned {
@@ -108,12 +114,13 @@ fn packsetd_usage() -> String {
          \n\
              -V, --version       the build this is\n\
              --host <addr>       {} only, which is the contract\n\
-             --port <n>          default {}, or PACKSET_PORT\n\
+             --port <n>          default {}, or PACKSET_PORT; 0 prints and writes the assigned port\n\
              --home <dir>        the pack home, or PACKSET_HOME\n\
              --fuse <name>       host fuse voter, or PACKSET_FUSE\n\
              --diversify <name>  host diversify voter, or PACKSET_DIVERSIFY\n\
              --decay <name>      host decay voter, or PACKSET_DECAY\n\
              --owned             exit when stdin closes; Linux also signals this process when its parent dies\n\
+             --no-embed          leave the encoder unstarted; INSIDE_EMBED=off\n\
          \n\
          Every request but GET /health carries the token in <home>/token as\n\
          Authorization: Bearer TOKEN. PACKSET_AUTH=off drops the check.",
@@ -300,5 +307,21 @@ fn wait_for_parent_signal() {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_names_the_encoder_switch_and_port_zero() {
+        let usage = packsetd_usage();
+        assert!(usage.contains("--no-embed"), "{usage}");
+        assert!(usage.contains("INSIDE_EMBED=off"), "{usage}");
+        assert!(
+            usage.contains("0 prints and writes the assigned port"),
+            "{usage}"
+        );
     }
 }
