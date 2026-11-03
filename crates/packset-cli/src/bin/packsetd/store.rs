@@ -3420,8 +3420,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn fault_unit(path: &Path) -> FaultUnit {
         use std::os::fd::AsRawFd;
-        // SAFETY: sysconf reads a constant and touches no memory of ours.
-        let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+        let page = page_size();
         let file = File::open(path).unwrap();
         let len = file.metadata().unwrap().len() as usize;
         let mut most = [0u64; 5];
@@ -3786,16 +3785,13 @@ mod tests {
         }
     }
 
-    /// The child's half of [`start_in_child`]: what packsetd runs at start,
-    /// `Service::open` before it binds and the stamp pass behind the
-    /// listener, one after the other, then what it cost.
+    /// The child's half of [`start_in_child`]: what packsetd runs at start, `Service::open` before it binds and the `stamp` pass behind the listener, one after the other, then what it cost.
     ///
     /// Warm starts come first.
     /// Each one goes through [`measure_start`] over a copy of the pack beside it, on its filesystem.
     /// So the warm starts run the code the measured start runs, readings and all.
-    /// They stop once a warm start finds this test binary's resident pages unchanged.
+    /// The warm-up ends once a start leaves the resident pages of this test binary no higher than before, as [`warm_up`] counts them.
     /// So that code is resident by the time the test reads `base`.
-    /// The binary is finite, so they end.
     /// The parent fails the test if the measured start then grows them.
     /// The peak is reset through `clear_refs` at the base, so `hwm` is the measured start's alone.
     ///
@@ -3813,19 +3809,83 @@ mod tests {
         }
         let exe = std::env::current_exe().unwrap();
         let data = home.join("memory.lmdb").join("data.mdb");
-        let mut rounds = 0;
-        loop {
-            let before = mapped_kib(&exe);
-            let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
-            fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
-            fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
-            let _ = measure_start(dir.path(), &exe, rounds);
-            rounds += 1;
-            if mapped_kib(&exe) == before {
-                break;
+        let pages = fs::metadata(&exe)
+            .unwrap()
+            .len()
+            .div_ceil(page_size() as u64) as usize;
+        let rounds = warm_up(
+            pages,
+            || mapped_kib(&exe),
+            |round| {
+                let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
+                fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
+                fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
+                let _ = measure_start(dir.path(), &exe, round);
+            },
+        );
+        println!("start {}", measure_start(home, &exe, rounds));
+    }
+
+    /// Run `round` until one leaves `resident` no higher than it found it, and return how many ran.
+    /// A round that does not stop maps at least one more of the binary's `pages`.
+    /// So while nothing is evicted, the rounds end by `pages + 1`.
+    /// Eviction can lower `resident` between rounds, so `pages + 1` also caps them.
+    #[cfg(target_os = "linux")]
+    fn warm_up(
+        pages: usize,
+        mut resident: impl FnMut() -> u64,
+        mut round: impl FnMut(usize),
+    ) -> usize {
+        for rounds in 0..=pages {
+            let before = resident();
+            round(rounds);
+            if resident() <= before {
+                return rounds + 1;
             }
         }
-        println!("start {}", measure_start(home, &exe, rounds));
+        pages + 1
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warm_up_stops_once_a_round_leaves_the_binary_as_it_found_it() {
+        let mut readings = [40, 52, 52, 52].into_iter();
+        let mut ran = Vec::new();
+        let rounds = warm_up(100, || readings.next().unwrap(), |round| ran.push(round));
+        assert_eq!(rounds, 2);
+        assert_eq!(ran, [0, 1]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warm_up_stops_when_a_round_ends_with_fewer_pages_resident() {
+        let mut readings = [52, 60, 60, 44].into_iter();
+        assert_eq!(warm_up(100, || readings.next().unwrap(), |_| {}), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warm_up_ends_past_the_binary_page_count_when_eviction_keeps_it_growing() {
+        let pages = 5;
+        let mut grown = false;
+        let resident = || {
+            grown = !grown;
+            if grown {
+                40
+            } else {
+                44
+            }
+        };
+        let mut ran = 0;
+        assert_eq!(warm_up(pages, resident, |_| ran += 1), pages + 1);
+        assert_eq!(ran, pages + 1);
+    }
+
+    /// The size of a page, from sysconf.
+    #[cfg(target_os = "linux")]
+    fn page_size() -> usize {
+        // SAFETY: sysconf reads a constant and touches no memory of ours.
+        usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap()
     }
 
     /// One start over `home`, as [`report_start`] reports it, after `warm` warm starts.
