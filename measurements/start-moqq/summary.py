@@ -83,14 +83,14 @@ def sweeps():
         for log in sorted(HERE.glob(f"{label}-*.log")):
             for line in log.read_text().splitlines():
                 cells = [cell.strip() for cell in line.strip("|").split("|")]
-                if len(cells) == 10 and cells[0].isdigit():
+                if len(cells) == 11 and cells[0].isdigit():
                     rows[(int(cells[0]), cells[2])].append(cells)
         print(f"\n{label}\n")
         print(
             "| atoms | data.mdb MiB | start | n | open ms | pass ms, median (IQR) | base MiB "
-            "| VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB, median (IQR) |"
+            "| VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB, median (IQR) | peak over base KiB, median (IQR) |"
         )
-        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for (atoms, start), got in sorted(rows.items()):
             col = lambda i: [float(m[0]) for run in got if (m := re.match(r"[\d.]+", run[i]))] or ["-"]
             stopped = sum("stopped" in run[4] for run in got)
@@ -98,7 +98,7 @@ def sweeps():
             print(
                 f"| {atoms} | {spread(col(1))} | {start} | {len(got)} | {spread(col(3))} "
                 f"| {spread(col(4))}{note} | {spread(col(5))} | {spread(col(6))} | {spread(col(7))} "
-                f"| {spread(col(8))} | {spread(col(9))} |"
+                f"| {spread(col(8))} | {spread(col(9))} | {spread(col(10))} |"
             )
 
 

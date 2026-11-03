@@ -3970,8 +3970,8 @@ mod tests {
         }
         let sizes =
             std::env::var("PACKSET_START_SIZES").unwrap_or_else(|_| "10000,50000,100000".into());
-        println!("| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |");
-        println!("|---|---|---|---|---|---|---|---|---|---|");
+        println!("| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB | peak over base KiB |");
+        println!("|---|---|---|---|---|---|---|---|---|---|---|");
         let mib = |kib: u64| kib / 1024;
         for atoms in sizes
             .split(',')
@@ -3984,10 +3984,11 @@ mod tests {
                 let err = got.line.split_once(" err=").map_or("", |(_, err)| err);
                 if !got.opened {
                     println!(
-                        "| {atoms} | {} | {start} | did not open: {err} | | {} | | | | {} |",
+                        "| {atoms} | {} | {start} | did not open: {err} | | {} | | | | {} | {} |",
                         disk >> 20,
                         mib(got.base),
                         mib(got.hwm),
+                        got.hwm.saturating_sub(got.base),
                     );
                     continue;
                 }
@@ -3997,7 +3998,7 @@ mod tests {
                     format!("{}, stopped: {err}", got.pass_ms)
                 };
                 println!(
-                    "| {atoms} | {} | {start} | {:.1} | {pass} | {} | {} | {} | {} | {} |",
+                    "| {atoms} | {} | {start} | {:.1} | {pass} | {} | {} | {} | {} | {} | {} |",
                     disk >> 20,
                     got.open_us as f64 / 1000.0,
                     mib(got.base),
@@ -4005,6 +4006,7 @@ mod tests {
                     mib(got.anon),
                     mib(got.file + got.shmem),
                     mib(got.hwm),
+                    got.hwm.saturating_sub(got.base),
                 );
             }
         }
