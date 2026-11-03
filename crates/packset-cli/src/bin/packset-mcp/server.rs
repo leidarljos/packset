@@ -31,6 +31,23 @@ pub struct AtomRow {
     /// The cross-encoder score. Null when this hit was not reranked.
     #[serde(default)]
     pub rerank_score: Option<f64>,
+    /// Labels on the claim, `flag:credential-shaped` and the caller's own.
+    /// Empty when the claim has none.
+    pub labels: Vec<String>,
+}
+
+/// Labels on a stored atom. Empty when the record carries none.
+fn atom_labels(atom: &serde_json::Value) -> Vec<String> {
+    atom.get("labels")
+        .and_then(serde_json::Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What a pack is answering with, or why it is not.
@@ -120,6 +137,7 @@ impl PacksetServer {
                     kind: hit.kind,
                     score: hit.score,
                     rerank_score: hit.rerank_score,
+                    labels: hit.labels,
                 })
                 .collect(),
         ))
@@ -161,6 +179,7 @@ impl PacksetServer {
                         .to_string(),
                     score: 0.0,
                     rerank_score: None,
+                    labels: atom_labels(atom),
                 })
                 .collect(),
         ))
@@ -220,6 +239,7 @@ impl PacksetServer {
                         .to_string(),
                     score: 0.0,
                     rerank_score: None,
+                    labels: atom_labels(atom),
                 })
                 .collect(),
         ))

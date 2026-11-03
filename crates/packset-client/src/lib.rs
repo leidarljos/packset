@@ -296,6 +296,10 @@ pub struct Hit {
     /// Absent, or null, when it did not.
     #[serde(default)]
     pub rerank_score: Option<f64>,
+    /// Labels on the claim, `flag:credential-shaped` and the caller's own.
+    /// Empty when the hit has none, including a writer that omits the field.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// A refusal, carrying the reason the writer gave in its body.

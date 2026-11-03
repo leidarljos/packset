@@ -426,7 +426,7 @@ fn usage() -> String {
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
          migrate-home           move ~/.ljos/memory to $XDG_DATA_HOME/packset; the writer must be stopped\n\
-         remember [--workspace WS] TEXT   one lesson, two sentences at most\n\
+         remember [--workspace WS] TEXT   one lesson\n\
          prefer [--workspace WS] TEXT     one standing preference\n\
          search [--workspace WS] [--as-of TS] [--rerank] [--rank MODE] QUERY  ranked claims live now, or at TS\n\
          due [WORKSPACE]        claims whose review clock has run out\n\
@@ -898,7 +898,17 @@ fn export(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The writer's warning lines, `warning` then `prose.warning`.
+fn warning_lines(stored: &serde_json::Value) -> Vec<&str> {
+    [stored.get("warning"), stored.pointer("/prose/warning")]
+        .into_iter()
+        .filter_map(|line| line.and_then(serde_json::Value::as_str))
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
 /// POST one explicit claim of `kind`; the text is stored as given.
+/// A warning on the answer goes to stderr. Stdout stays the one id line.
 fn write(kind: &str, args: &Args) -> anyhow::Result<()> {
     let text = args.positional.join(" ").trim().to_string();
     if text.is_empty() {
@@ -919,6 +929,9 @@ fn write(kind: &str, args: &Args) -> anyhow::Result<()> {
         kind,
         stored["due_at"].as_str().unwrap_or("-")
     );
+    for line in warning_lines(&stored) {
+        eprintln!("packset: warning: {line}");
+    }
     Ok(())
 }
 
@@ -945,12 +958,20 @@ fn search(args: &Args) -> anyhow::Result<()> {
         let id = hit.id.as_deref().unwrap_or("-");
         // The fifth column is the cross-encoder score, and only when the
         // stage scored this hit. A search without it keeps the four columns.
-        match hit.rerank_score {
-            Some(rerank) => println!(
+        // Labels, when the hit has any, are one more column after that, so
+        // an unlabelled line keeps the columns it had. A comma joins the
+        // names: they are tokens, and the text stays the fourth field.
+        let line = match hit.rerank_score {
+            Some(rerank) => format!(
                 "{:.4}\t{}\t{}\t{}\t{:.4}",
                 hit.score, hit.kind, id, hit.text, rerank
             ),
-            None => println!("{:.4}\t{}\t{}\t{}", hit.score, hit.kind, id, hit.text),
+            None => format!("{:.4}\t{}\t{}\t{}", hit.score, hit.kind, id, hit.text),
+        };
+        if hit.labels.is_empty() {
+            println!("{line}");
+        } else {
+            println!("{line}\t{}", hit.labels.join(","));
         }
     }
     Ok(())
