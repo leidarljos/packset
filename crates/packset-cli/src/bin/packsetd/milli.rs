@@ -736,17 +736,20 @@ mod tests {
 
     /// An explicit search binary beats any kept discovery: naming
     /// `PACKSET_MILLI` answers from the variable without touching the
-    /// cache. `/bin/false` never runs here; `binary` only checks it is
-    /// executable. Serialised with the stub-spawning tests on the shared
-    /// encoder lock, the way every test that mutates these variables is.
+    /// cache. `false` never runs here; `binary` only checks it is
+    /// executable. It is taken from `PATH` because macOS keeps it in
+    /// `/usr/bin` and has no `/bin/false`. Serialised with the
+    /// stub-spawning tests on the shared encoder lock, the way every test
+    /// that mutates these variables is.
     #[test]
     fn an_explicit_milli_binary_beats_any_cached_discovery() {
         let _held = crate::embed::EMBED
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let program = which("false").expect("false is on PATH");
         let old = std::env::var_os("PACKSET_MILLI");
         // SAFETY: the lock is held, so no other test reads this variable.
-        unsafe { std::env::set_var("PACKSET_MILLI", "/bin/false") };
+        unsafe { std::env::set_var("PACKSET_MILLI", &program) };
         let found = binary();
         unsafe {
             match old {
@@ -755,7 +758,7 @@ mod tests {
             }
         }
         drop(_held);
-        assert_eq!(found, Some(std::path::PathBuf::from("/bin/false")));
+        assert_eq!(found, Some(program));
     }
 
     /// Discovery finds the search binary on the path: a planted

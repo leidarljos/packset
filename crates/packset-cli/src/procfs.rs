@@ -1,13 +1,16 @@
 //! Who holds a loopback port, asked of the kernel rather than of `ss`.
 //!
 //! The lifecycle commands need two facts: whether the port is taken, and which
-//! process took it. A connect answers the first. The second is a socket inode
-//! in `/proc/net/tcp` and then a walk of `/proc/<pid>/fd` looking for it, which
-//! is what `ss -ltnp` does and what `lsof` does, without either being present.
+//! process took it. A connect answers the first. On Linux the second is a
+//! socket inode in `/proc/net/tcp` and then a walk of `/proc/<pid>/fd` looking
+//! for it, which is what `ss -ltnp` does and what `lsof` does, without either
+//! being present. macOS has no `/proc`, and there `lsof`, which the base
+//! system ships, answers it.
 
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 use std::time::Duration;
@@ -16,6 +19,7 @@ use std::time::Duration;
 const PROBE: Duration = Duration::from_millis(300);
 
 /// `TCP_LISTEN`, the only state a bound server sits in.
+#[cfg(target_os = "linux")]
 const LISTEN: &str = "0A";
 
 /// Whether anything accepts on `127.0.0.1:port`.
@@ -26,6 +30,7 @@ pub fn listening(port: u16) -> bool {
 }
 
 /// The socket inodes listening on `port`, from one `/proc/net` table.
+#[cfg(target_os = "linux")]
 fn listening_inodes(table: &str, port: u16) -> Vec<u64> {
     let Ok(text) = fs::read_to_string(table) else {
         return Vec::new();
@@ -57,6 +62,7 @@ fn listening_inodes(table: &str, port: u16) -> Vec<u64> {
 }
 
 /// Whether `pid` holds any of `inodes` as an open socket.
+#[cfg(target_os = "linux")]
 fn holds(pid: u32, inodes: &[u64]) -> bool {
     let dir = format!("/proc/{pid}/fd");
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -80,6 +86,7 @@ fn holds(pid: u32, inodes: &[u64]) -> bool {
 ///
 /// `None` covers three cases a caller treats alike: nothing is listening, the
 /// holder belongs to another user, or it exited mid-walk.
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn pid_on_port(port: u16) -> Option<u32> {
     let mut inodes = listening_inodes("/proc/net/tcp", port);
@@ -100,14 +107,36 @@ pub fn pid_on_port(port: u16) -> Option<u32> {
     None
 }
 
+/// The process listening on `port`, as `lsof` reports it.
+///
+/// `None` covers the cases it does on Linux, and a missing `lsof`. macOS
+/// keeps it in `/usr/sbin`, which the login and launchd `PATH` both carry.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn pid_on_port(port: u16) -> Option<u32> {
+    use std::process::{Command, Stdio};
+    // -t prints bare pids, -n and -P skip the host and service lookups, and
+    // -sTCP:LISTEN keeps the bound socket and not a client of it.
+    let out = Command::new("lsof")
+        .args(["-t", "-n", "-P", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| line.trim().parse().ok())
+}
+
 /// Ask `pid` to stop.
 ///
 /// # Errors
 ///
 /// The kernel's, when the process is gone or belongs to another user.
 pub fn terminate(pid: u32) -> io::Result<()> {
-    // SAFETY: kill with a valid signal number; the pid is read back from
-    // /proc, and a stale one fails with ESRCH rather than reaching anything.
+    // SAFETY: kill with a valid signal number; the pid was just read back as
+    // the port's holder, and a stale one fails with ESRCH rather than
+    // reaching anything.
     let rc = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
     if rc == 0 {
         Ok(())

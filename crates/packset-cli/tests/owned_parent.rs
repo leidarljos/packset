@@ -273,7 +273,11 @@ fn a_shared_writer_stays_up_after_ensure_returns() {
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
-    assert!(!answers(port), "stop left the port open");
+    assert!(
+        !answers(port),
+        "stop left the port open: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
 }
 
 #[test]

@@ -1085,14 +1085,16 @@ mod tests {
 
     /// An explicit encoder beats any kept discovery: even if a burst has
     /// already cached the tree lookup, naming `PACKSET_EMBED` answers
-    /// from the variable without touching the cache. `/bin/false` never
-    /// runs here; `binary` only checks it is executable.
+    /// from the variable without touching the cache. `false` never runs
+    /// here; `binary` only checks it is executable. It is taken from
+    /// `PATH` because macOS keeps it in `/usr/bin` and has no `/bin/false`.
     #[test]
     fn an_explicit_encoder_beats_any_cached_discovery() {
         let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let program = which("false").expect("false is on PATH");
         let old = std::env::var_os("PACKSET_EMBED");
         // SAFETY: EMBED is held, so no other test reads this variable.
-        unsafe { std::env::set_var("PACKSET_EMBED", "/bin/false") };
+        unsafe { std::env::set_var("PACKSET_EMBED", &program) };
         let found = binary();
         unsafe {
             match old {
@@ -1101,7 +1103,7 @@ mod tests {
             }
         }
         drop(_held);
-        assert_eq!(found, Some(std::path::PathBuf::from("/bin/false")));
+        assert_eq!(found, Some(program));
     }
 
     /// Discovery finds an encoder on the search path: a planted
@@ -1228,16 +1230,16 @@ for line in sys.stdin:
     #[test]
     fn an_encoder_that_dies_is_recorded_as_not_answering() {
         let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let program = which("false").expect("false is on PATH");
         let before = std::env::var_os("PACKSET_EMBED");
         // SAFETY: EMBED serialises every test that points PACKSET_EMBED.
-        unsafe { std::env::set_var("PACKSET_EMBED", "/bin/false") };
+        unsafe { std::env::set_var("PACKSET_EMBED", &program) };
         // A test that does not hold EMBED can leave a stub child here while
         // another test names the stub; that child would answer for this one.
         *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if binary().is_some() {
-            assert!(encode_now(&["a text".to_string()], false).is_none());
-            assert_eq!(last_dense(), Some(false));
-        }
+        let named = binary();
+        let encoded = encode_now(&["a text".to_string()], false);
+        let dense = last_dense();
         *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
         unsafe {
             match before {
@@ -1245,6 +1247,10 @@ for line in sys.stdin:
                 None => std::env::remove_var("PACKSET_EMBED"),
             }
         }
+        drop(_held);
+        assert_eq!(named, Some(program));
+        assert!(encoded.is_none());
+        assert_eq!(dense, Some(false));
     }
 
     #[test]
