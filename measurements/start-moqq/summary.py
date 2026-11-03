@@ -17,7 +17,7 @@ def spread(values):
     if len(values) < 2:
         return f"{values[0]}"
     q1, q2, q3 = statistics.quantiles(values, n=4, method="inclusive")
-    return f"{q2:g} ({q1:g} to {q3:g})"
+    return f"{q2:.10g} ({q1:.10g} to {q3:.10g})"
 
 
 def tests():

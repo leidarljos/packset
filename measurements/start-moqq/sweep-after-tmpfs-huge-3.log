@@ -1,23 +1,24 @@
+# draw 3 of 6, 15 of 15 in it, started 2026-11-03T08:02:25.587091671Z
 # store code at 6dcab278b0bd1b1356a057d661f37adc8ed8cced, with the start test of measurements/start-moqq
 # Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
 # root through sudo: yes
 # TMPDIR=/mnt/hugefs/tmp on tmpfs  rw,relatime,size=4194304k,huge=always
-# cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+# PACKSET_START_SIZES=1500,6000,12000 cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
    Compiling packset-daemon v0.17.3 (/tmp/wt-after/crates/packset-daemon)
-    Finished `release` profile [optimized] target(s) in 7.37s
-     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-after/release/deps/packset_daemon-7088d49fdeb216b9)
+    Finished `release` profile [optimized] target(s) in 7.60s
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (target/release/deps/packset_daemon-7088d49fdeb216b9)
 
 running 1 test
-| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
-|---|---|---|---|---|---|---|---|---|---|
-| 1500 | 11 | first | 0.0 | 63 | 6 | 6 | 0 | 5 | 21 |
-| 1500 | 11 | second | 0.0 | 11 | 6 | 6 | 0 | 5 | 20 |
-| 6000 | 47 | first | 0.1 | 253 | 6 | 6 | 0 | 5 | 31 |
-| 6000 | 47 | second | 0.0 | 46 | 6 | 6 | 0 | 5 | 32 |
-| 12000 | 95 | first | 0.1 | 510 | 6 | 6 | 0 | 5 | 35 |
-| 12000 | 95 | second | 0.1 | 94 | 6 | 6 | 0 | 5 | 36 |
+| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB | peak over base KiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1500 | 11 | first | 0.1 | 63 | 6 | 6 | 0 | 5 | 21 | 15200 |
+| 1500 | 11 | second | 0.0 | 11 | 6 | 6 | 0 | 5 | 20 | 14232 |
+| 6000 | 47 | first | 0.1 | 257 | 6 | 6 | 0 | 5 | 31 | 25564 |
+| 6000 | 47 | second | 0.0 | 46 | 6 | 6 | 0 | 5 | 32 | 26520 |
+| 12000 | 95 | first | 0.1 | 505 | 6 | 6 | 0 | 5 | 35 | 29548 |
+| 12000 | 95 | second | 0.0 | 92 | 6 | 6 | 0 | 5 | 36 | 30680 |
 test store::tests::start_cost_by_pack_size ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 248 filtered out; finished in 3.59s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 251 filtered out; finished in 3.59s
 
 # exit 0

@@ -1,26 +1,27 @@
+# draw 2 of 6, 2 of 15 in it, started 2026-11-03T07:55:45.881780297Z
 # store code at 6dcab278b0bd1b1356a057d661f37adc8ed8cced, with the start test of measurements/start-moqq
 # Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
 # root through sudo: yes
 # TMPDIR=/tmp on ext4   rw,relatime
-# cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+# PACKSET_START_SIZES=10000,50000,100000,140000 cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
    Compiling packset-daemon v0.17.3 (/tmp/wt-after/crates/packset-daemon)
     Finished `release` profile [optimized] target(s) in 7.44s
-     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-after/release/deps/packset_daemon-7088d49fdeb216b9)
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (target/release/deps/packset_daemon-7088d49fdeb216b9)
 
 running 1 test
-| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
-|---|---|---|---|---|---|---|---|---|---|
-| 10000 | 79 | first | 0.1 | 576 | 6 | 6 | 0 | 5 | 16 |
-| 10000 | 79 | second | 0.1 | 104 | 6 | 6 | 0 | 5 | 15 |
-| 50000 | 395 | first | 0.1 | 2939 | 6 | 6 | 0 | 5 | 16 |
-| 50000 | 395 | second | 0.1 | 550 | 6 | 6 | 0 | 5 | 15 |
-| 100000 | 791 | first | 0.1 | 5973 | 6 | 6 | 0 | 5 | 16 |
-| 100000 | 791 | second | 0.1 | 1173 | 6 | 6 | 0 | 5 | 14 |
+| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB | peak over base KiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10000 | 79 | first | 0.1 | 612 | 6 | 6 | 0 | 5 | 16 | 9936 |
+| 10000 | 79 | second | 0.1 | 102 | 6 | 6 | 0 | 5 | 15 | 8984 |
+| 50000 | 395 | first | 0.1 | 2931 | 6 | 6 | 0 | 5 | 16 | 10004 |
+| 50000 | 395 | second | 0.1 | 540 | 6 | 6 | 0 | 5 | 14 | 8920 |
+| 100000 | 791 | first | 0.1 | 5958 | 6 | 6 | 0 | 5 | 16 | 9948 |
+| 100000 | 791 | second | 0.1 | 1197 | 6 | 6 | 0 | 5 | 15 | 9052 |
 test store::tests::start_cost_by_pack_size has been running for over 60 seconds
-| 140000 | 1108 | first | 0.1 | 8475 | 6 | 6 | 0 | 5 | 16 |
-| 140000 | 1108 | second | 0.1 | 1754 | 6 | 6 | 0 | 5 | 14 |
+| 140000 | 1108 | first | 0.1 | 8350 | 6 | 6 | 0 | 5 | 16 | 10012 |
+| 140000 | 1108 | second | 0.1 | 1703 | 6 | 6 | 0 | 5 | 15 | 8988 |
 test store::tests::start_cost_by_pack_size ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 248 filtered out; finished in 80.64s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 251 filtered out; finished in 79.18s
 
 # exit 0

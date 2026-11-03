@@ -1,23 +1,24 @@
+# draw 5 of 6, 7 of 15 in it, started 2026-11-03T08:06:24.140606848Z
 # store code at 177c9f5333e2613b17f6481a95c7c5c5ac321600, with the start test of measurements/start-moqq
 # Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
 # root through sudo: yes
 # TMPDIR=/mnt/hugefs/tmp on tmpfs  rw,relatime,size=4194304k,huge=always
 # cargo test -p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
    Compiling packset-daemon v0.17.3 (/tmp/wt-before/crates/packset-daemon)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.86s
-     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-before/debug/deps/packset_daemon-5a24cf1e326d0a46)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.88s
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (target/debug/deps/packset_daemon-5a24cf1e326d0a46)
 
 running 1 test
 start bound on Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs, THP enabled madvise shmem_enabled never hpage_pmd_size 2097152, the pack on tmpfs rw,size=4194304k,huge=always. A tree of depth 2 with 5295 claims, 75 leaves, a step of 1048 KiB. 20692 KiB for 9 places, over a 42700 KiB pack, 2.06 bounds.
-stamping start: a fault mapped 2048 KiB, bound 20692 KiB, peak 45832 KiB, headroom 0 KiB (0.0 steps): the most of 48 probes: Rss 2048 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
-stamping start: 45088 KiB over base after the pass by VmRSS, 45096 by smaps: RssAnon +28, RssFile +0 and RssShmem +45060 (test binary +0, data file +45056, the rest +4) KiB
-stamping start: ok open_us=96 pass_ms=2077 base=12816 rss=57904 hwm=58648 anon_base=1400 anon=1428 file_base=11416 file=11416 shmem_base=0 shmem=45060 exe_base=10232 exe=10232 mdb=45056 smaps_base=12816 smaps=57912 warm=2 resident=anon:+36,data.mdb:+45056,lock.mdb:+4
+stamping start: a fault mapped 2048 KiB, bound 20692 KiB, peak 45900 KiB, headroom 0 KiB (0.0 steps): the most of 48 probes: Rss 2048 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
+stamping start: 45108 KiB over base after the pass by VmRSS, 45120 by smaps: RssAnon +52, RssFile +0 and RssShmem +45060 (test binary +0, data file +45056, the rest +4) KiB
+stamping start: ok open_us=116 pass_ms=2134 base=12812 rss=57920 hwm=58712 anon_base=1380 anon=1432 file_base=11432 file=11432 shmem_base=0 shmem=45060 exe_base=10260 exe=10260 mdb=45056 smaps_base=12812 smaps=57932 warm=2 resident=anon:+60,data.mdb:+45056,lock.mdb:+4
 current start: a fault mapped 2048 KiB, bound 20692 KiB, peak 45072 KiB, headroom 0 KiB (0.0 steps): the most of 50 probes: Rss 2048 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
 current start: 45072 KiB over base after the pass by VmRSS, 45072 by smaps: RssAnon +12, RssFile +0 and RssShmem +45060 (test binary +0, data file +45056, the rest +4) KiB
-current start: ok open_us=79 pass_ms=458 base=12048 rss=57120 hwm=57120 anon_base=1176 anon=1188 file_base=10872 file=10872 shmem_base=0 shmem=45060 exe_base=9688 exe=9688 mdb=45056 smaps_base=12048 smaps=57120 warm=2 resident=anon:+12,data.mdb:+45056,lock.mdb:+4
+current start: ok open_us=117 pass_ms=436 base=12092 rss=57164 hwm=57164 anon_base=1176 anon=1188 file_base=10916 file=10916 shmem_base=0 shmem=45060 exe_base=9732 exe=9732 mdb=45056 smaps_base=12092 smaps=57164 warm=2 resident=anon:+12,data.mdb:+45056,lock.mdb:+4
 
-thread 'store::tests::a_start_holds_one_step_not_the_pack' (75528) panicked at crates/packset-daemon/../packset-cli/src/bin/packsetd/store.rs:3100:9:
-the stamping start peaked 45832 KiB over a 42700 KiB pack, past 20692 KiB; the current start peaked 45072 KiB over a 42700 KiB pack, past 20692 KiB
+thread 'store::tests::a_start_holds_one_step_not_the_pack' (52116) panicked at crates/packset-daemon/../packset-cli/src/bin/packsetd/store.rs:3091:9:
+the stamping start peaked 45900 KiB over a 42700 KiB pack, past 20692 KiB; the current start peaked 45072 KiB over a 42700 KiB pack, past 20692 KiB
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 test store::tests::a_start_holds_one_step_not_the_pack ... FAILED
 
@@ -26,7 +27,7 @@ failures:
 failures:
     store::tests::a_start_holds_one_step_not_the_pack
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 246 filtered out; finished in 8.90s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 249 filtered out; finished in 9.04s
 
 error: test failed, to rerun pass `-p packset-daemon --lib`
 # exit 101

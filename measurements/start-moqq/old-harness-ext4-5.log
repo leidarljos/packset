@@ -1,23 +1,24 @@
+# draw 5 of 6, 10 of 15 in it, started 2026-11-03T08:06:54.598500166Z
 # store code at 6dcab278b0bd1b1356a057d661f37adc8ed8cced with old-harness.patch, with the start test of measurements/start-moqq
 # Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
 # root through sudo: yes
 # TMPDIR=/tmp on ext4   rw,relatime
 # cargo test -p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
    Compiling packset-daemon v0.17.3 (/tmp/wt-old-harness/crates/packset-daemon)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
-     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-old-harness/debug/deps/packset_daemon-5a24cf1e326d0a46)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.87s
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (target/debug/deps/packset_daemon-5a24cf1e326d0a46)
 
 running 1 test
 start bound on Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs, THP enabled madvise shmem_enabled never hpage_pmd_size 2097152, the pack on ext4 rw. A tree of depth 2 with 726 claims, 11 leaves, a step of 1048 KiB. 2836 KiB for 9 places, over a 5884 KiB pack, 2.07 bounds.
-stamping start: a fault mapped 64 KiB, bound 2836 KiB, peak 2300 KiB, headroom 536 KiB (0.5 steps): the most of 92 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
-stamping start: 1176 KiB over base after the pass by VmRSS, 1760 by smaps: RssAnon +1172, RssFile +4 and RssShmem +0 (test binary +128, data file +0, the rest -124) KiB
-stamping start: ok open_us=109 pass_ms=293 base=12776 rss=13952 hwm=15076 anon_base=1224 anon=2396 file_base=11552 file=11556 shmem_base=0 shmem=0 exe_base=10236 exe=10364 mdb=0 smaps_base=12200 smaps=13960 warm=0 resident=anon:+1180,lock.mdb:+4,packset_daemon-5a24cf1e326d0a46:+576
-current start: a fault mapped 64 KiB, bound 2836 KiB, peak 1108 KiB, headroom 1728 KiB (1.6 steps): the most of 126 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
-current start: 28 KiB over base after the pass by VmRSS, 544 by smaps: RssAnon +28, RssFile +4 and RssShmem +0 (test binary +128, data file +0, the rest -124) KiB
-current start: ok open_us=83 pass_ms=59 base=12816 rss=12844 hwm=13924 anon_base=1224 anon=1252 file_base=11592 file=11596 shmem_base=0 shmem=0 exe_base=10296 exe=10424 mdb=0 smaps_base=12304 smaps=12848 warm=0 resident=anon:+28,lock.mdb:+4,packset_daemon-5a24cf1e326d0a46:+512
+stamping start: a fault mapped 64 KiB, bound 2836 KiB, peak 2236 KiB, headroom 600 KiB (0.6 steps): the most of 92 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
+stamping start: 1176 KiB over base after the pass by VmRSS, 1632 by smaps: RssAnon +1172, RssFile +4 and RssShmem +0 (test binary +128, data file +0, the rest -124) KiB
+stamping start: ok open_us=113 pass_ms=298 base=12800 rss=13976 hwm=15036 anon_base=1224 anon=2396 file_base=11576 file=11580 shmem_base=0 shmem=0 exe_base=10276 exe=10404 mdb=0 smaps_base=12352 smaps=13984 warm=0 resident=anon:+1180,lock.mdb:+4,packset_daemon-5a24cf1e326d0a46:+448
+current start: a fault mapped 64 KiB, bound 2836 KiB, peak 1044 KiB, headroom 1792 KiB (1.7 steps): the most of 126 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
+current start: 28 KiB over base after the pass by VmRSS, 416 by smaps: RssAnon +28, RssFile +4 and RssShmem +0 (test binary +64, data file +0, the rest -60) KiB
+current start: ok open_us=79 pass_ms=58 base=12672 rss=12700 hwm=13716 anon_base=1224 anon=1252 file_base=11448 file=11452 shmem_base=0 shmem=0 exe_base=10204 exe=10268 mdb=0 smaps_base=12288 smaps=12704 warm=0 resident=anon:+28,lock.mdb:+4,packset_daemon-5a24cf1e326d0a46:+384
 
-thread 'store::tests::a_start_holds_one_step_not_the_pack' (97569) panicked at crates/packset-daemon/../packset-cli/src/bin/packsetd/store.rs:3355:9:
-the test binary's resident pages went from 10236 to 10364 KiB during the stamping start; the test binary's resident pages went from 10296 to 10424 KiB during the current start
+thread 'store::tests::a_start_holds_one_step_not_the_pack' (53050) panicked at crates/packset-daemon/../packset-cli/src/bin/packsetd/store.rs:3346:9:
+the test binary's resident pages went from 10276 to 10404 KiB during the stamping start; the test binary's resident pages went from 10204 to 10268 KiB during the current start
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 test store::tests::a_start_holds_one_step_not_the_pack ... FAILED
 
@@ -26,7 +27,7 @@ failures:
 failures:
     store::tests::a_start_holds_one_step_not_the_pack
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 248 filtered out; finished in 0.95s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 251 filtered out; finished in 0.94s
 
 error: test failed, to rerun pass `-p packset-daemon --lib`
 # exit 101

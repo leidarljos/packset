@@ -1,22 +1,23 @@
+# draw 6 of 6, 11 of 15 in it, started 2026-11-03T08:18:01.619507728Z
 # store code at 6dcab278b0bd1b1356a057d661f37adc8ed8cced, with the start test of measurements/start-moqq
 # Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
 # root through sudo: yes
 # TMPDIR=/mnt/plainfs/tmp on tmpfs  rw,relatime,size=4194304k
 # cargo test -p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
    Compiling packset-daemon v0.17.3 (/tmp/wt-after/crates/packset-daemon)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
-     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-after/debug/deps/packset_daemon-5a24cf1e326d0a46)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (target/debug/deps/packset_daemon-5a24cf1e326d0a46)
 
 running 1 test
 start bound on Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs, THP enabled madvise shmem_enabled never hpage_pmd_size 2097152, the pack on tmpfs rw,size=4194304k. A tree of depth 2 with 726 claims, 11 leaves, a step of 1048 KiB. 2836 KiB for 9 places, over a 5884 KiB pack, 2.07 bounds.
-stamping start: a fault mapped 64 KiB, bound 2836 KiB, peak 2256 KiB, headroom 580 KiB (0.6 steps): the most of 92 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
-stamping start: 20 KiB over base after the pass by VmRSS, 28 by smaps: RssAnon +20, RssFile +0 and RssShmem +4 (test binary +0, data file +0, the rest +4) KiB
-stamping start: ok open_us=78 pass_ms=273 base=13072 rss=13092 hwm=15328 anon_base=1388 anon=1408 file_base=11684 file=11684 shmem_base=0 shmem=4 exe_base=10504 exe=10504 mdb=0 smaps_base=13072 smaps=13100 warm=2 resident=anon:+24,lock.mdb:+4
-current start: a fault mapped 64 KiB, bound 2836 KiB, peak 1192 KiB, headroom 1644 KiB (1.6 steps): the most of 126 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
+stamping start: a fault mapped 64 KiB, bound 2836 KiB, peak 2348 KiB, headroom 488 KiB (0.5 steps): the most of 92 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
+stamping start: 152 KiB over base after the pass by VmRSS, 160 by smaps: RssAnon +148, RssFile +0 and RssShmem +4 (test binary +0, data file +0, the rest +4) KiB
+stamping start: ok open_us=85 pass_ms=285 base=12736 rss=12888 hwm=15084 anon_base=1260 anon=1408 file_base=11476 file=11476 shmem_base=0 shmem=4 exe_base=10292 exe=10292 mdb=0 smaps_base=12736 smaps=12896 warm=2 resident=anon:+156,lock.mdb:+4
+current start: a fault mapped 64 KiB, bound 2836 KiB, peak 1148 KiB, headroom 1688 KiB (1.6 steps): the most of 126 probes: Rss 64 FilePmdMapped 0 AnonHugePages 0 KernelPageSize 4 MMUPageSize 4 KiB
 current start: 12 KiB over base after the pass by VmRSS, 12 by smaps: RssAnon +8, RssFile +0 and RssShmem +4 (test binary +0, data file +0, the rest +4) KiB
-current start: ok open_us=68 pass_ms=57 base=12476 rss=12488 hwm=13668 anon_base=1180 anon=1188 file_base=11296 file=11296 shmem_base=0 shmem=4 exe_base=10124 exe=10124 mdb=0 smaps_base=12476 smaps=12488 warm=2 resident=anon:+8,lock.mdb:+4
+current start: ok open_us=65 pass_ms=60 base=12024 rss=12036 hwm=13172 anon_base=1184 anon=1192 file_base=10840 file=10840 shmem_base=0 shmem=4 exe_base=9656 exe=9656 mdb=0 smaps_base=12024 smaps=12036 warm=2 resident=anon:+8,lock.mdb:+4
 test store::tests::a_start_holds_one_step_not_the_pack ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 248 filtered out; finished in 1.71s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 251 filtered out; finished in 1.77s
 
 # exit 0
