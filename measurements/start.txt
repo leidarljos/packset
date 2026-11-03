@@ -10,7 +10,10 @@ For ext4, runs used `/tmp` on the root filesystem, mounted `rw,relatime`.
 
 Each run's raw output is in `measurements/start-moqq/`, under a header that names the store code, the kernel, the CPU, root and the filesystem.
 Before the fix the store code is at 177c9f5333e2613b17f6481a95c7c5c5ac321600, and after it at 6dcab278b0bd1b1356a057d661f37adc8ed8cced, both on the remote.
-Every run carries the start test of da0de82c9a22ddbe0f05045a08da956332781d14, which adds `measurements/start-moqq/conditions.txt`, and `measurements/start-moqq/before.sh` puts that test into the store at 177c9f5.
+Every run carries the start test of 5080af78bab281c340331faa09717983b3e5229e, the same tree from before the history rewrite.
+Earlier versions of this file cited that tree as da0de82c9a22ddbe0f05045a08da956332781d14, which is not on GitHub.
+The runs are vouched for by the log headers and the 5080af7 harness.
+5080af7 adds `measurements/start-moqq/conditions.txt`, and `measurements/start-moqq/before.sh` puts that test into the store at 177c9f5.
 
 All 90 runs were one session on 2026-11-03, from 07:52 to 08:18 Coordinated Universal Time (UTC): six draws of the 15 conditions in `conditions.txt`.
 Odd draws took the conditions in file order and even draws in reverse.
@@ -37,7 +40,7 @@ That patch keeps 21 MiB of heap through the pass, as much as 20 steps of 1048 Ki
 ```console
 $ sudo mkdir -m 1777 /mnt/hugefs/tmp /mnt/plainfs/tmp
 $ measurements/start-moqq/before.sh 177c9f5333e2613b17f6481a95c7c5c5ac321600 /tmp/wt-before
-$ for v in after hold-21-mib old-harness old-warm-up no-mallopt; do git worktree add --detach /tmp/wt-$v da0de82c9a22ddbe0f05045a08da956332781d14; done
+$ for v in after hold-21-mib old-harness old-warm-up no-mallopt; do git worktree add --detach /tmp/wt-$v 5080af78bab281c340331faa09717983b3e5229e; done
 $ for v in hold-21-mib old-harness old-warm-up no-mallopt; do git -C /tmp/wt-$v apply "$PWD/measurements/start-moqq/$v.patch"; done
 $ measurements/start-moqq/run.sh measurements/start-moqq/conditions.txt 6
 $ python3 measurements/start-moqq/summary.py
