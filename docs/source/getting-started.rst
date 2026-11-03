@@ -40,8 +40,9 @@ to start and names the process with the lock.
 2. Remember two claims
 ======================
 
-An atom is one claim in at most two sentences of at most twenty-five words
-each. The pack refuses anything longer, and it stores a tool dump labelled ``flag:tool-dump``.
+An atom is one claim. Two sentences of at most twenty-nine words each read
+best. A longer claim is stored with the reason in ``prose.warning``. A tool
+dump is stored with the label ``flag:tool-dump``.
 
 .. code:: console
 
