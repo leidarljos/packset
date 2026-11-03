@@ -15,6 +15,7 @@
 //! packset fire [--workspace WS] ID ID...
 //! packset grade ID [--lapsed] [WORKSPACE]
 //! packset forget WORKSPACE
+//! packset retract ID [--workspace WS] [--why ACCESSION]
 //! packset pin [NAME]
 //! packset accessions [WORKSPACE]
 //! packset atoms [--as-of TS] [WORKSPACE]
@@ -148,6 +149,7 @@ fn run() -> anyhow::Result<()> {
         "due" => due(args.first()),
         "sweep" => sweep(args.first()),
         "forget" => forget(args.first()),
+        "retract" => retract(&args),
         "islands" => islands(args.first()),
         "hubs" => hubs(args.first()),
         "island" => island(&args),
@@ -204,6 +206,12 @@ fn spec(verb: &str) -> Option<Spec> {
             ..ONE_WORKSPACE
         },
         "due" | "sweep" | "forget" | "islands" | "hubs" | "pin" | "accessions" => ONE_WORKSPACE,
+        "retract" => Spec {
+            values: &["--workspace", "--why"],
+            switches: &[],
+            most: Some(1),
+            text: false,
+        },
         "remember" | "prefer" => Spec {
             values: &["--workspace"],
             switches: &[],
@@ -412,6 +420,7 @@ fn usage() -> String {
          ensure [--owned]       start if down, then print the URL. With --owned this process stays, and the writer exits when it does\n\
          sweep [WS]             lapse the reviews left due past twice their interval; the third miss forgets a never-recalled lesson\n\
          forget WS              drop a scratch workspace's live atoms, keep its tombstones; smoke and herd runs call this on the way out\n\
+         retract ID [--workspace WS] [--why ACCESSION]  withdraw one claim; the deed that showed it wrong, or none\n\
          start [--owned]        the writer alone. With --owned this process stays, and the writer exits when it does\n\
          stop                   stop the writer\n\
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
@@ -982,6 +991,25 @@ fn forget(given: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Withdraw one claim. `--why` is the deed accession that showed it wrong;
+/// the daemon refuses one that is not an accession. The line is the id,
+/// `retracted`, and that deed, or `-` when the seat named none.
+///
+/// This is not [`forget`]. Forget drops a scratch workspace and names no
+/// deed. A retraction leaves the record, so search from now does not list
+/// the claim and a dated read from before the retraction still does.
+fn retract(args: &Args) -> anyhow::Result<()> {
+    let id = args
+        .first()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("retract needs an atom id"))?;
+    let workspace = workspace(args.value("--workspace"))?;
+    let why = args.value("--why").map(str::trim).filter(|w| !w.is_empty());
+    client()?.delete_atom(&workspace, id, why)?;
+    println!("{id}\tretracted\t{}", why.unwrap_or("-"));
+    Ok(())
+}
+
 fn due(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
     let now = packset_core::clock::utcnow();
@@ -1157,6 +1185,7 @@ mod tests {
         "due",
         "sweep",
         "forget",
+        "retract",
         "islands",
         "hubs",
         "island",
@@ -1213,6 +1242,7 @@ mod tests {
     fn an_unknown_flag_is_refused_not_read_as_a_workspace() {
         for verb in [
             "forget",
+            "retract",
             "sweep",
             "pin",
             "status",
@@ -1341,6 +1371,27 @@ mod tests {
     fn search_as_of_needs_a_timestamp() {
         let err = refused("search", &["--as-of"]);
         assert!(err.contains("--as-of needs a value"), "{err}");
+    }
+
+    #[test]
+    fn retract_keeps_the_id_and_the_deed_apart() {
+        let args = run_args("retract", &["abc", "--why", "deed-test-x"]);
+        assert_eq!(args.first(), Some("abc"));
+        assert_eq!(args.value("--why"), Some("deed-test-x"));
+        assert!(args.value("--workspace").is_none());
+        let args = run_args(
+            "retract",
+            &["--workspace", "seat", "--why", "deed-test-x", "abc"],
+        );
+        assert_eq!(args.value("--workspace"), Some("seat"));
+        assert_eq!(args.value("--why"), Some("deed-test-x"));
+        assert_eq!(args.first(), Some("abc"));
+        let args = run_args("retract", &["abc"]);
+        assert!(args.value("--why").is_none());
+        assert_eq!(args.first(), Some("abc"));
+        let err = refused("retract", &["abc", "extra"]);
+        assert!(err.contains("at most 1 argument"), "{err}");
+        assert!(verb_usage("retract").contains("packset retract ID"));
     }
 
     #[test]

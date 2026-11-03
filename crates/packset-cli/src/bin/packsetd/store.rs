@@ -1602,7 +1602,11 @@ impl Store {
     ///
     /// The record is carried onto the tombstone, all but its vector, so
     /// `why` lands beside the text it retracts and a bitemporal read gets
-    /// both at once.
+    /// both at once. An open window closes at this write. The dated read
+    /// is the half-open window, so a moment before this still has the
+    /// claim and a moment after does not. A window that was already closed
+    /// stays closed. A forget's tombstone has no `valid_to` and stays out
+    /// of that read.
     ///
     /// # Errors
     ///
@@ -1614,6 +1618,18 @@ impl Store {
             .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
         tomb.insert("tombstone".into(), Value::Bool(true));
+        let now = packset_core::clock::utcnow();
+        // An open window closes at this retraction. One that already ended
+        // stays ended, so the claim is not live again for the stretch
+        // between that end and this write. The compare is the same string
+        // order `is_live` uses.
+        let still_open = tomb
+            .get("valid_to")
+            .and_then(Value::as_str)
+            .is_none_or(|until| until.is_empty() || until > now.as_str());
+        if still_open {
+            record::close_valid_to(&mut tomb, &now);
+        }
         if let Some(accession) = why {
             tomb.insert("retracted_by".into(), Value::String(accession.to_string()));
         }

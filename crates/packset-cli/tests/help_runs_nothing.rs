@@ -157,7 +157,7 @@ fn help_on_any_verb_writes_nothing_and_stops_nothing() {
     seed(&writer, "help-test", "The one claim this workspace holds.");
     for verb in [
         "remember", "prefer", "sweep", "pin", "grade", "fire", "stop", "start", "ensure", "status",
-        "search", "island", "export", "atoms",
+        "search", "island", "export", "atoms", "retract",
     ] {
         let out = packset(&writer, &[verb, "--help"]);
         assert!(out.status.success(), "{verb}: {}", text(&out));

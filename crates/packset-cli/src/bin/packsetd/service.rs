@@ -614,6 +614,37 @@ fn origin_is_blank(value: Option<&Value>) -> bool {
     }
 }
 
+/// A retraction's window, read as [`packset_core::atom::is_live_at`] would
+/// read a record that is not a tombstone.
+///
+/// That predicate treats every tombstone as absent. That is right for a
+/// forget: the words are gone and there is no `valid_to`. A retraction
+/// keeps the words and closes the window at `valid_to`. Passing the
+/// tombstone bit as false reuses the same half-open window without
+/// letting a forget back into a dated read.
+fn retraction_live_at(atom: &Record, at: &str) -> bool {
+    if !record::is_tombstone(atom) {
+        return false;
+    }
+    let Some(until) = atom
+        .get("valid_to")
+        .and_then(Value::as_str)
+        .filter(|until| !until.is_empty())
+    else {
+        return false;
+    };
+    let from = atom
+        .get("valid_from")
+        .and_then(Value::as_str)
+        .filter(|from| !from.is_empty())
+        .or_else(|| {
+            atom.get("ts")
+                .and_then(Value::as_str)
+                .filter(|ts| !ts.is_empty())
+        });
+    packset_core::atom::is_live_at(false, from, Some(until), at)
+}
+
 impl Service {
     /// Open the pack at `home`.
     ///
@@ -2132,7 +2163,17 @@ impl Service {
     pub fn as_of(&self, workspace: &str, at: &str) -> anyhow::Result<Value> {
         let at =
             clock::canonicalize(at).ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
-        let atoms = self.store.as_of(workspace, &at)?;
+        let mut atoms = self.store.as_of(workspace, &at)?;
+        // The store's dated scan skips tombstones, so a forget is not parsed
+        // into the answer. A retraction is a tombstone whose window still
+        // answers: the text and the deed stay, and this is the read that
+        // returns them. Search keeps the store's scan, which drops the
+        // tombstone, so a live search does not list the claim.
+        for record in self.store.scan(Some(workspace))? {
+            if retraction_live_at(&record, &at) {
+                atoms.push(Arc::new(record));
+            }
+        }
         let atoms: Vec<_> = atoms.iter().map(|atom| record::shown(atom)).collect();
         Ok(json!({ "atoms": atoms, "as_of": at }))
     }

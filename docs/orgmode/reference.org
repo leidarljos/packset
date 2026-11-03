@@ -19,6 +19,7 @@
 | =packset island [--workspace WS] [--fire] CUE= | the memories a cue activates: activation, seed mark, id, text; =--fire= wires the top eight together, held within an hour of the same cue's last fire. The verb takes no persona: a persona's weights come through =as= on =GET /v1/activate=, which =ljos island --as NAME= sets |
 | =packset sweep [WS]= | the neglect sweep now: reviews left due past twice their interval lapse; a never-recalled forgettable claim missed three times is tombstoned =forgotten: neglect= |
 | =packset forget WS= | drop a scratch workspace's atoms whole, no deed; a tombstone stays, so a deleted id is not posted again; per-run scratch workspaces call this on the way out so the long-lived writer does not keep every run's atoms |
+| =packset retract ID [--workspace WS] [--why ACCESSION]= | withdraw one claim. =--why= is the deed that showed it wrong, or it is omitted. Search stops listing it, and =atoms --as-of= from before the retraction still has it |
 | =packset fire [--workspace WS] ID ID...= | these claims fired together; their links gain weight, their other links lose a little |
 | =packset grade ID [--lapsed] [WS]= | mark a review recalled, or lapsed |
 | =packset pin [NAME]= | read or set the pinned set; an empty name clears it |
