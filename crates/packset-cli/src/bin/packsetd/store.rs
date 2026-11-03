@@ -792,6 +792,17 @@ impl Store {
         }
     }
 
+    /// Flush committed pages to disk.
+    ///
+    /// An owned writer exits from its parent watcher with `process::exit`,
+    /// which does not run destructors on the thread that opened this
+    /// environment. A commit already syncs; this is the flush a close
+    /// would issue, so that exit does not depend on the destructor.
+    pub fn sync(&self) -> anyhow::Result<()> {
+        self.env.force_sync()?;
+        Ok(())
+    }
+
     fn release_pages(&self) {
         // Linux only. The map is read-only: LMDB writes with `write`,
         // not `WRITEMAP`, so there are no dirty pages to discard. This

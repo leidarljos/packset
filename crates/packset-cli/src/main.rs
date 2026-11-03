@@ -5,7 +5,7 @@
 //! is either that question or a thin read of `/v1`.
 //!
 //! ```console
-//! packset ensure | start | stop | status | port | url | which
+//! packset ensure [--owned] | start [--owned] | stop | status | port | url | which
 //! packset remember [--workspace WS] TEXT...
 //! packset prefer [--workspace WS] TEXT...
 //! packset search [--workspace WS] [--as-of TS] [--rerank] [--rank MODE] QUERY...
@@ -27,9 +27,10 @@ mod procfs;
 
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use packset_client::PacksetClient;
@@ -97,17 +98,33 @@ fn run() -> anyhow::Result<()> {
 
     match verb {
         "ensure" => {
+            let owned = args.switch("--owned");
             if procfs::listening(port) && !is_ours(port) {
                 anyhow::bail!("port {port} is held by something else; set PACKSET_PORT");
             }
-            if !procfs::listening(port) {
-                start(port)?;
-            }
+            let held = if procfs::listening(port) {
+                if owned {
+                    eprintln!(
+                        "packset: a writer is already listening on 127.0.0.1:{port}; --owned leaves it running"
+                    );
+                }
+                None
+            } else {
+                start(port, owned)?
+            };
             wait_healthy(port)?;
             print_url(port);
+            if let Some(held) = held {
+                wait_for_owned(held)?;
+            }
             Ok(())
         }
-        "start" => start(port),
+        "start" => {
+            if let Some(held) = start(port, args.switch("--owned"))? {
+                wait_for_owned(held)?;
+            }
+            Ok(())
+        }
         "stop" => stop(port),
         "status" => status(port, args.switch("--all"), args.first()),
         "port" => {
@@ -177,7 +194,11 @@ const ONE_WORKSPACE: Spec = Spec {
 /// The arguments each verb takes, or `None` for a verb packset does not have.
 fn spec(verb: &str) -> Option<Spec> {
     Some(match verb {
-        "ensure" | "start" | "stop" | "port" | "url" | "which" | "migrate-home" => NOTHING,
+        "ensure" | "start" => Spec {
+            switches: &["--owned"],
+            ..NOTHING
+        },
+        "stop" | "port" | "url" | "which" | "migrate-home" => NOTHING,
         "status" => Spec {
             switches: &["--all"],
             ..ONE_WORKSPACE
@@ -388,10 +409,11 @@ fn verb_usage(verb: &str) -> String {
 fn usage() -> String {
     "packset: start, stop and inspect the pack writer\n\
      \n\
-         ensure                 start if down, then print the URL\n\
+         ensure [--owned]       start if down, then print the URL. With --owned this process stays, and the writer exits when it does\n\
          sweep [WS]             lapse the reviews left due past twice their interval; the third miss forgets a never-recalled lesson\n\
          forget WS              drop a scratch workspace's live atoms, keep its tombstones; smoke and herd runs call this on the way out\n\
-         start | stop\n\
+         start [--owned]        the writer alone. With --owned this process stays, and the writer exits when it does\n\
+         stop                   stop the writer\n\
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
          migrate-home           move ~/.ljos/memory to $XDG_DATA_HOME/packset; the writer must be stopped\n\
@@ -533,12 +555,28 @@ fn resolve_daemon() -> Option<PathBuf> {
         .find(|path| procfs::executable(path))
 }
 
+/// The write end of an owned writer's pipe, held for this process's life.
+///
+/// The writer has the read end as its stdin. This end is close-on-exec, so
+/// the writer does not inherit it. When this process dies, including by a
+/// signal it cannot catch, the kernel closes the end and the writer sees
+/// EOF.
+struct OwnedHold {
+    child: Child,
+    pipe: std::io::PipeWriter,
+}
+
 /// Start the daemon and wait for it to bind.
-fn start(port: u16) -> anyhow::Result<()> {
+///
+/// `owned` keeps the returned pipe open in this process and passes the read
+/// end as the writer's stdin. The caller waits on the child, so the pipe
+/// stays open until this process dies. A shared start returns `None` and
+/// detaches, as before.
+fn start(port: u16, owned: bool) -> anyhow::Result<Option<OwnedHold>> {
     if procfs::listening(port) {
         if is_ours(port) {
             eprintln!("packset: already listening on 127.0.0.1:{port}");
-            return Ok(());
+            return Ok(None);
         }
         anyhow::bail!("port {port} is held by something else; set PACKSET_PORT");
     }
@@ -556,11 +594,24 @@ fn start(port: u16) -> anyhow::Result<()> {
     command
         .arg("--port")
         .arg(port.to_string())
-        .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(errs));
-    // A new session, so closing the terminal that ran `packset ensure` does not
-    // take the writer with it.
+    // The read end becomes the writer's stdin. The write end stays here.
+    // `std::io::pipe` marks both ends close-on-exec, and only the read end
+    // is handed to the child, so the writer's own copy of the write end
+    // cannot keep the pipe open after we die.
+    let pipe = if owned {
+        let (reader, writer) = std::io::pipe()?;
+        command.arg("--owned").stdin(Stdio::from(reader));
+        Some(writer)
+    } else {
+        command.stdin(Stdio::null());
+        None
+    };
+    // A new session, so a hangup reaches this process and not the writer.
+    // A shared writer then stays up. An owned writer still exits: this
+    // process holds its pipe, the hangup or any other signal kills us, the
+    // kernel closes the pipe, and the writer flushes.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -575,18 +626,21 @@ fn start(port: u16) -> anyhow::Result<()> {
     while Instant::now() < deadline {
         if procfs::listening(port) {
             eprintln!("packset: listening on 127.0.0.1:{port}");
-            return Ok(());
+            return match pipe {
+                Some(pipe) => Ok(Some(OwnedHold { child, pipe })),
+                None => Ok(None),
+            };
         }
         if let Ok(Some(code)) = child.try_wait() {
             // Many seats run `ensure` at once when a herd starts; the losers
             // exit on the port or the store lock while the winner is coming
             // up. A writer listening on our port is the outcome asked for,
-            // whichever process it is.
+            // whichever process it is. It is not owned by us.
             let sibling = Instant::now() + STARTUP;
             while Instant::now() < sibling {
                 if procfs::listening(port) {
                     eprintln!("packset: another seat's writer came up on 127.0.0.1:{port}");
-                    return Ok(());
+                    return Ok(None);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -599,6 +653,26 @@ fn start(port: u16) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     anyhow::bail!("did not come up; see {}{}", log.display(), tail(&log))
+}
+
+/// Block until the owned writer exits. The pipe in `held` stays open until
+/// then, which is what keeps the writer alive.
+fn wait_for_owned(mut held: OwnedHold) -> anyhow::Result<()> {
+    // The URL was just printed. On a pipe, stdout is block-buffered, and
+    // the next line waits until this process dies, so the seat would never
+    // see the URL it is waiting on.
+    let _ = std::io::stdout().flush();
+    let status = held.child.wait()?;
+    drop(held.pipe);
+    if status.success() {
+        return Ok(());
+    }
+    let log = log_path();
+    anyhow::bail!(
+        "packsetd exited {status}; see {}{}",
+        log.display(),
+        tail(&log)
+    )
 }
 
 /// A bound port is not yet an answering writer: the store opens after the

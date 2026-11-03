@@ -26,6 +26,9 @@ path = "../packset-cli/src/bin/packsetd/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+# Parent death on Linux asks the kernel for a signal. The same source is
+# built into the `packset` binary, which already depends on libc.
+libc = "0.2"
 heed = "0.20"
 # serde_json carries preserve_order, so its map type is the one to keep a
 # proposal log in insertion order without a second sort.
