@@ -13,7 +13,8 @@ The branch binary is `packsetd` built from the sources in this commit.
 Both were release builds, encoder off.
 
 The raw logs are the `*.log` files here. Each header names the draw, the start time, the binary, the seed, the kernel, the CPU and the filesystem.
-`summary.py` pools every traced write. Quartiles are `statistics.quantiles(n=4, method="inclusive")`.
+`summary.py` reports pooled writes and per-draw medians, each with its interquartile range.
+Quartiles are `statistics.quantiles(n=4, method="inclusive")`.
 
 ## How a draw was made
 

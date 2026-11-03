@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Median and interquartile range of the jo0g write traces.
 
-Quartiles use statistics.quantiles(n=4, method="inclusive"), the same cut
-as measurements/start-moqq/summary.py. A stage time is the milliseconds
-the writer recorded for that write. Wall rate is the probe's write_req_s.
+Quartiles use statistics.quantiles(n=4, method="inclusive").
+That is the same cut as measurements/start-moqq/summary.py.
+A stage time is the milliseconds the writer recorded for that write.
+Wall rate is the probe's write_req_s.
+The pooled figure treats every traced write as its own sample.
+Each draw contributes its own median.
+The summary then reports the median and interquartile range of those medians.
 """
 
 import statistics
@@ -78,7 +82,18 @@ def main() -> None:
             if not xs:
                 continue
             med, lo, hi = iqr(xs)
-            print(f"  {stage:10} median {med:7.2f}  IQR {lo:.2f}..{hi:.2f}")
+            # One median per draw, then the median and IQR across draws.
+            # n is the number of draws that recorded the stage.
+            draw_medians = []
+            for _, rows in draws:
+                stage_rows = [row[stage] for row in rows if stage in row]
+                if stage_rows:
+                    draw_medians.append(iqr(stage_rows)[0])
+            dmed, dlo, dhi = iqr(draw_medians)
+            print(
+                f"  {stage:10} median {med:7.2f}  IQR {lo:.2f}..{hi:.2f}"
+                f"  draw-median {dmed:7.2f}  IQR {dlo:.2f}..{dhi:.2f}  n={len(draw_medians)}"
+            )
 
 
 if __name__ == "__main__":
