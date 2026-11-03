@@ -15,7 +15,13 @@ pub const SCHEMA: &str = crate::atom::SCHEMA;
 pub const USER_CAP: usize = 1375;
 /// Characters allowed in a workspace `MEMORY.md`.
 pub const MEMORY_CAP: usize = 2200;
-/// Characters allowed in one atom's text.
+/// Characters in one atom's text before it carries [`OVER_SOFT_CAP`].
+///
+/// The bound a claim was written to. Past it the text is stored whole and
+/// labelled: dropping it lost the claim. Recall skips once its character
+/// budget is spent, and a card write refuses its own cap, so neither path
+/// panics on a longer atom. Counted in characters, the same way the cap
+/// was applied when it still refused.
 pub const TEXT_SOFT_CAP: usize = 500;
 /// Jaccard at or above which two atoms link.
 pub const LINK_THRESHOLD: f64 = 0.3;
@@ -336,6 +342,12 @@ pub const INSTRUCTION_SHAPED: &str = "flag:instruction-shaped";
 pub const INVISIBLE_UNICODE: &str = "flag:invisible-unicode";
 /// The text is a tool dump ([`crate::extract::is_tool_dump`]).
 pub const TOOL_DUMP: &str = "flag:tool-dump";
+/// The text is longer than [`TEXT_SOFT_CAP`]. The text is stored whole.
+pub const OVER_SOFT_CAP: &str = "flag:over-soft-cap";
+/// The post named an origin outside [`crate::atom::ORIGINS`]. The record
+/// is stored as [`crate::atom::UNKNOWN_ORIGIN`], the lowest rank, so the
+/// write cannot raise provenance. The warning names the value that was sent.
+pub const UNKNOWN_ORIGIN_FLAG: &str = "flag:unknown-origin";
 
 /// What the text matched: each label beside what it found. None of these
 /// stops a write; the record is stored and carries the labels.
@@ -382,11 +394,14 @@ pub fn flag_warning(found: &[(&str, &str)]) -> Option<String> {
     ))
 }
 
-/// Write the labels `text` earns into [`LABELS`], after the caller's own.
-/// A [`FLAG_PREFIX`] label the text no longer earns goes, so an update that
-/// takes a credential out takes its label too.
-fn mark_flags(atom: &mut Map<String, Value>, text: &str) {
-    let found = flag_labels(text);
+/// Write the labels `text` earns into [`LABELS`], after the caller's own,
+/// then `extra` ([`OVER_SOFT_CAP`], [`UNKNOWN_ORIGIN_FLAG`]). A
+/// [`FLAG_PREFIX`] label the write no longer earns goes, so an update that
+/// takes a credential out, shortens the text under the cap, or names a
+/// known origin takes that label too.
+fn mark_flags(atom: &mut Map<String, Value>, text: &str, extra: &[&str]) {
+    let mut found = flag_labels(text);
+    found.extend(extra.iter().copied());
     let held = atom.get(LABELS).and_then(Value::as_array);
     if found.is_empty() && held.is_none() {
         return;
@@ -399,6 +414,80 @@ fn mark_flags(atom: &mut Map<String, Value>, text: &str) {
         .collect();
     labels.extend(found.into_iter().map(|label| Value::String(label.into())));
     atom.insert(LABELS.into(), Value::Array(labels));
+}
+
+/// The origin a previous warning named, when this record already carries
+/// [`UNKNOWN_ORIGIN_FLAG`]. A later write that leaves the origin unknown
+/// keeps that name, so an update of another field does not forget the
+/// value that was sent. The value is quoted the way [`quoted`] writes it.
+fn named_unknown_origin(atom: &Map<String, Value>) -> Option<String> {
+    let labelled = atom
+        .get(LABELS)
+        .and_then(Value::as_array)
+        .is_some_and(|labels| {
+            labels
+                .iter()
+                .any(|label| label.as_str() == Some(UNKNOWN_ORIGIN_FLAG))
+        });
+    if !labelled {
+        return None;
+    }
+    let warning = atom.get("warning").and_then(Value::as_str)?;
+    let marker = format!("{UNKNOWN_ORIGIN_FLAG} (");
+    let rest = warning.split_once(&marker)?.1;
+    unquote_prefix(rest)
+}
+
+/// The quoted string [`quoted`] would have written at the start of `text`.
+fn unquote_prefix(text: &str) -> Option<String> {
+    let mut chars = text.chars();
+    let quote = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next()? {
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other if other == quote => out.push(other),
+                _ => return None,
+            }
+        } else if c == quote {
+            return Some(out);
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}
+
+/// The one warning line for an unknown origin or text past [`TEXT_SOFT_CAP`],
+/// including any label [`flags`] already found, in that same sentence.
+/// None when this write earned neither, so a content-flag line stays the
+/// one the answer adds from the text alone.
+fn admission_warning(text: &str, sent_origin: Option<&str>, over_cap: bool) -> Option<String> {
+    if sent_origin.is_none() && !over_cap {
+        return None;
+    }
+    // The same character count the cap uses. The line names it and the cap
+    // so a client can see how far past the bound the text is.
+    let n = text.chars().count();
+    let length_what = format!("{n} characters, the cap is {TEXT_SOFT_CAP}");
+    // [`quoted`] keeps the warning one line and names the value a client
+    // can parse back, including one that contains a quote or a line break.
+    let origin_what = sent_origin.map(quoted);
+    let mut found: Vec<(&str, &str)> = flags(text).into_iter().collect();
+    if over_cap {
+        found.push((OVER_SOFT_CAP, length_what.as_str()));
+    }
+    if let Some(what) = origin_what.as_deref() {
+        found.push((UNKNOWN_ORIGIN_FLAG, what));
+    }
+    flag_warning(&found)
 }
 
 fn refusal_message(value: &str, why: EntityRefusal) -> String {
@@ -427,10 +516,15 @@ fn refusal_message(value: &str, why: EntityRefusal) -> String {
 }
 
 /// What `validate` does with `origin`. The decision is taken before the
-/// map is borrowed again to insert the default.
+/// map is borrowed again to insert the stored value.
 enum OriginWrite {
     Default,
     Keep,
+    /// A string outside the five known origins. Stored as
+    /// [`crate::atom::UNKNOWN_ORIGIN`], which is the lowest rank, so the
+    /// claim is kept and the write cannot raise provenance. The string is
+    /// what the warning names.
+    Unknown(String),
     Refuse(String),
 }
 
@@ -439,9 +533,13 @@ enum OriginWrite {
 /// # Errors
 ///
 /// Returns [`AtomError`] for an unknown kind or level, missing text or
-/// workspace, text past the soft cap, a bad set name, or an entity that opens
-/// like an accession and is not one. Prose past the gate is kept, with the
-/// reason in `prose.warning`.
+/// workspace, a non-string origin, a bad set name, or an entity that opens
+/// like an accession and is not one. An origin string outside the five
+/// known ones is stored as [`crate::atom::UNKNOWN_ORIGIN`], with
+/// [`UNKNOWN_ORIGIN_FLAG`] and a warning that names the value. Text past
+/// [`TEXT_SOFT_CAP`] is stored whole, with [`OVER_SOFT_CAP`] and a warning
+/// that gives the length and the cap. Prose past the gate is kept, with
+/// the reason in `prose.warning`.
 pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
     let kind = atom.get("kind").and_then(Value::as_str).unwrap_or("");
     if !KINDS.contains(&kind) {
@@ -463,11 +561,28 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
         let shown = atom.get("level").map_or("None".into(), value_repr);
         return Err(AtomError(format!("unknown atom level: {shown}")));
     }
+    // Read the name a previous warning carries before this write replaces
+    // the field. A record already stored as unknown would otherwise be
+    // named "unknown" on the next update and lose the value that was sent.
+    let prior_named = named_unknown_origin(atom);
     let origin_write = match atom.get("origin") {
         None | Some(Value::Null) => OriginWrite::Default,
         Some(Value::String(s)) if s.is_empty() => OriginWrite::Default,
         Some(Value::String(s)) if crate::atom::known_origin(s) => OriginWrite::Keep,
+        Some(Value::String(s)) => OriginWrite::Unknown(s.clone()),
+        // A number, a bool or an object is not an origin name. An update
+        // uses this refusal so one of those cannot replace a stored origin.
+        // A blank origin is refused before validate, for the same reason.
         Some(other) => OriginWrite::Refuse(value_repr(other)),
+    };
+    // A string outside the five is stored as unknown. One that is already
+    // unknown keeps the name the warning carries, when there is one.
+    let sent_origin = match &origin_write {
+        OriginWrite::Unknown(sent) if sent != crate::atom::UNKNOWN_ORIGIN => Some(sent.clone()),
+        OriginWrite::Unknown(_) => {
+            Some(prior_named.unwrap_or_else(|| crate::atom::UNKNOWN_ORIGIN.to_string()))
+        }
+        _ => None,
     };
     match origin_write {
         OriginWrite::Default => {
@@ -477,6 +592,12 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
             );
         }
         OriginWrite::Keep => {}
+        OriginWrite::Unknown(_) => {
+            atom.insert(
+                "origin".into(),
+                Value::String(crate::atom::UNKNOWN_ORIGIN.to_string()),
+            );
+        }
         OriginWrite::Refuse(shown) => {
             return Err(AtomError(format!("unknown atom origin: {shown}")));
         }
@@ -485,11 +606,25 @@ pub fn validate(atom: &mut Map<String, Value>) -> Result<(), AtomError> {
         Some(t) if !t.trim().is_empty() => t.to_string(),
         _ => return Err(AtomError("atom text is required".into())),
     };
-    mark_flags(atom, &text);
-    if text.chars().count() > TEXT_SOFT_CAP {
-        return Err(AtomError(format!(
-            "atom text exceeds soft cap {TEXT_SOFT_CAP}"
-        )));
+    // Past the cap the text is stored whole. Recall skips once its
+    // character budget is spent, and a card write refuses its own cap,
+    // so neither path panics on a longer claim.
+    let over_cap = text.chars().count() > TEXT_SOFT_CAP;
+    let mut extra: Vec<&str> = Vec::new();
+    if over_cap {
+        extra.push(OVER_SOFT_CAP);
+    }
+    if sent_origin.is_some() {
+        extra.push(UNKNOWN_ORIGIN_FLAG);
+    }
+    mark_flags(atom, &text, &extra);
+    match admission_warning(&text, sent_origin.as_deref(), over_cap) {
+        Some(line) => {
+            atom.insert("warning".into(), Value::String(line));
+        }
+        None => {
+            atom.remove("warning");
+        }
     }
     if atom
         .get("workspace")
@@ -1765,9 +1900,10 @@ mod tests {
         assert!(plain["prose"].get("warning").is_none());
     }
 
-    /// The header ljos writes is several sentences. The soft cap still holds.
+    /// The header ljos writes is several sentences. Text past the soft cap
+    /// is stored whole, with the label and a warning that gives the length.
     #[test]
-    fn mail_keeps_a_header_and_stops_at_the_soft_cap() {
+    fn mail_keeps_a_header_and_text_past_the_soft_cap() {
         let header = "\
 msg 0123456789abcdef0123456789abcdef
 from inky
@@ -1805,10 +1941,27 @@ The build failed. Look at the log. It is the writer.";
             lesson["prose"]
         );
         let long = "x".repeat(TEXT_SOFT_CAP + 1);
-        let over = check("message", &long);
+        let mut over = atom(json!({
+            "kind": "message",
+            "level": "explicit",
+            "text": long,
+            "workspace": "seat",
+            "entities": ["seat:inky", "from:inky", "to:scratch", "msg:abc"],
+        }));
+        validate(&mut over).unwrap();
         assert_eq!(
-            over.unwrap_err().0,
-            format!("atom text exceeds soft cap {TEXT_SOFT_CAP}")
+            over["text"].as_str().unwrap().chars().count(),
+            TEXT_SOFT_CAP + 1
+        );
+        assert_eq!(over[LABELS], json!([OVER_SOFT_CAP]));
+        let line = over["warning"].as_str().unwrap();
+        assert!(!line.contains('\n'), "{line}");
+        assert!(
+            line.contains(&format!(
+                "{OVER_SOFT_CAP} ({} characters, the cap is {TEXT_SOFT_CAP})",
+                TEXT_SOFT_CAP + 1
+            )),
+            "{line}"
         );
     }
 
@@ -1849,8 +2002,12 @@ The build failed. Look at the log. It is the writer.";
         }
         let bare = write(NOTE_KIND, three, None).unwrap_err();
         assert!(bare.0.contains("issue"), "{bare:?}");
-        let over = write(NOTE_KIND, &"x".repeat(TEXT_SOFT_CAP + 1), Some("ljos-ensq"));
-        assert!(over.is_err());
+        let over = write(NOTE_KIND, &"x".repeat(TEXT_SOFT_CAP + 1), Some("ljos-ensq")).unwrap();
+        assert_eq!(
+            over["text"].as_str().unwrap().chars().count(),
+            TEXT_SOFT_CAP + 1
+        );
+        assert_eq!(over[LABELS], json!([OVER_SOFT_CAP]));
     }
 
     #[test]
@@ -2406,23 +2563,73 @@ The build failed. Look at the log. It is the writer.";
     }
 
     #[test]
-    fn an_origin_is_kept_and_an_unknown_one_is_refused() {
+    fn an_unknown_origin_is_stored_as_unknown_with_its_label() {
         let mut kept = atom(json!({
             "kind": "voice", "text": "A claim.", "workspace": "w", "origin": "peer"
         }));
         validate(&mut kept).unwrap();
         assert_eq!(kept["origin"], json!("peer"));
+        assert!(kept.get("warning").is_none());
 
         let mut bare = atom(json!({"kind": "voice", "text": "A claim.", "workspace": "w"}));
         validate(&mut bare).unwrap();
         assert_eq!(bare["origin"], json!("user-declared"));
 
+        let mut empty = atom(json!({
+            "kind": "voice", "text": "A claim.", "workspace": "w", "origin": ""
+        }));
+        validate(&mut empty).unwrap();
+        assert_eq!(empty["origin"], json!("user-declared"));
+
         let mut forged = atom(json!({
             "kind": "voice", "text": "A claim.", "workspace": "w", "origin": "forged"
         }));
+        validate(&mut forged).unwrap();
+        assert_eq!(forged["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
+        assert_eq!(forged[LABELS], json!([UNKNOWN_ORIGIN_FLAG]));
+        let line = forged["warning"].as_str().unwrap().to_string();
         assert_eq!(
-            validate(&mut forged).unwrap_err().0,
-            "unknown atom origin: forged"
+            line,
+            format!(
+                "stored with {UNKNOWN_ORIGIN_FLAG} ({}); anyone who reads this pack reads the text",
+                quoted("forged")
+            )
+        );
+        // A later write that does not name a new origin keeps the value.
+        forged.insert("text".into(), json!("A revised claim."));
+        validate(&mut forged).unwrap();
+        assert_eq!(forged["origin"], json!(crate::atom::UNKNOWN_ORIGIN));
+        assert_eq!(forged["warning"].as_str(), Some(line.as_str()));
+
+        // Naming a known origin drops the label and the warning, and the
+        // rise itself is still refused by the provenance floor.
+        let stored = forged.clone();
+        forged.insert("origin".into(), json!("user-declared"));
+        validate(&mut forged).unwrap();
+        assert_eq!(forged["origin"], json!("user-declared"));
+        assert!(forged.get(LABELS).is_none() || forged[LABELS].as_array().unwrap().is_empty());
+        assert!(forged.get("warning").is_none());
+        let err = hold_provenance(&stored, &mut forged, "an update").unwrap_err();
+        assert!(err.0.contains("cannot raise origin"), "{err:?}");
+
+        // A line break in the sent value stays inside the one warning line.
+        let mut broken = atom(json!({
+            "kind": "voice", "text": "A claim.", "workspace": "w", "origin": "A\ngent"
+        }));
+        validate(&mut broken).unwrap();
+        let named = broken["warning"].as_str().unwrap().to_string();
+        assert!(!named.contains('\n'), "{named}");
+        assert!(named.contains(&quoted("A\ngent")), "{named}");
+        validate(&mut broken).unwrap();
+        assert_eq!(broken["warning"].as_str(), Some(named.as_str()));
+
+        // A non-string is not an origin name.
+        let mut number = atom(json!({
+            "kind": "voice", "text": "A claim.", "workspace": "w", "origin": 1
+        }));
+        assert_eq!(
+            validate(&mut number).unwrap_err().0,
+            "unknown atom origin: 1"
         );
     }
 
@@ -2487,10 +2694,55 @@ The build failed. Look at the log. It is the writer.";
     fn the_text_cap_counts_characters_not_bytes() {
         let wide = "\u{4e00}".repeat(TEXT_SOFT_CAP);
         let mut ok = atom(json!({"kind": "voice", "text": wide, "workspace": "w"}));
-        assert!(validate(&mut ok).is_ok());
+        validate(&mut ok).unwrap();
+        assert!(ok.get(LABELS).is_none(), "{ok:?}");
+        assert!(ok.get("warning").is_none(), "{ok:?}");
         let over = "\u{4e00}".repeat(TEXT_SOFT_CAP + 1);
-        let mut bad = atom(json!({"kind": "voice", "text": over, "workspace": "w"}));
-        assert!(validate(&mut bad).is_err());
+        let mut kept = atom(json!({"kind": "voice", "text": over, "workspace": "w"}));
+        validate(&mut kept).unwrap();
+        assert_eq!(
+            kept["text"].as_str().unwrap().chars().count(),
+            TEXT_SOFT_CAP + 1
+        );
+        assert!(kept["text"].as_str().unwrap().len() > TEXT_SOFT_CAP + 1);
+        assert_eq!(kept[LABELS], json!([OVER_SOFT_CAP]));
+        let line = kept["warning"].as_str().unwrap();
+        assert!(
+            line.contains(&format!(
+                "{} characters, the cap is {TEXT_SOFT_CAP}",
+                TEXT_SOFT_CAP + 1
+            )),
+            "{line}"
+        );
+        // Under the cap again, the label and the warning go.
+        kept.insert("text".into(), json!("A short claim."));
+        validate(&mut kept).unwrap();
+        // The field stays, empty, once a flag label has been written.
+        assert_eq!(kept[LABELS], json!([]));
+        assert!(kept.get("warning").is_none(), "{kept:?}");
+    }
+
+    /// A credential past the cap keeps both labels in the one warning line.
+    #[test]
+    fn a_long_credential_keeps_both_labels_on_one_line() {
+        let text = format!("api_key=abcd1234 {}", "x".repeat(TEXT_SOFT_CAP));
+        let mut kept = atom(json!({"kind": "voice", "text": text, "workspace": "w"}));
+        validate(&mut kept).unwrap();
+        assert_eq!(kept["text"], json!(text));
+        assert_eq!(kept[LABELS], json!([CREDENTIAL_SHAPED, OVER_SOFT_CAP]));
+        let line = kept["warning"].as_str().unwrap();
+        assert!(!line.contains('\n'), "{line}");
+        assert!(
+            line.contains(CREDENTIAL_SHAPED) && line.contains(OVER_SOFT_CAP),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!(
+                "{} characters, the cap is {TEXT_SOFT_CAP}",
+                text.chars().count()
+            )),
+            "{line}"
+        );
     }
 
     #[test]

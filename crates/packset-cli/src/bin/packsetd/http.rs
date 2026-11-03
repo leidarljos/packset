@@ -807,9 +807,12 @@ fn written(mut atom: Map<String, Value>) -> Map<String, Value> {
 /// on the record already.
 fn stored(atom: Map<String, Value>) -> Map<String, Value> {
     let mut atom = written(atom);
-    // A retired id already named itself in `warning`. A flagged text has
-    // its own line. The client prints one line, so the two are joined
-    // rather than one of them dropped.
+    // A retired id already named itself in `warning`. validate may also
+    // have written the line for an unknown origin or text past the soft
+    // cap, and that line already names every flag the text earned. A
+    // content-flag line is joined onto a warning that does not already
+    // carry it, so neither line is dropped and the flag line is not said
+    // twice. The client prints one line.
     let prior = atom
         .get("warning")
         .and_then(Value::as_str)
@@ -819,6 +822,7 @@ fn stored(atom: Map<String, Value>) -> Map<String, Value> {
     let found = packset_core::record::flags(text);
     if let Some(line) = packset_core::record::flag_warning(&found) {
         let line = match prior {
+            Some(prev) if prev.starts_with("stored with ") => prev,
             Some(prev) => format!("{prev} {line}"),
             None => line,
         };
@@ -1651,6 +1655,151 @@ mod tests {
                 "{writer}: search misses {id}: {hits:?}"
             );
         }
+    }
+
+    /// An origin outside the five known ones, and text past the soft cap,
+    /// are stored and found. The answer carries the label and one warning
+    /// line. The stored origin reads unknown, and an update cannot raise it.
+    #[test]
+    fn an_unknown_origin_and_text_past_the_soft_cap_are_stored_and_found() {
+        use packset_core::record::{OVER_SOFT_CAP, TEXT_SOFT_CAP, UNKNOWN_ORIGIN_FLAG};
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let added = post(
+            &svc,
+            "/v1/atoms",
+            &json!({
+                "workspace": "w",
+                "kind": "lesson",
+                "origin": "Agent",
+                "text": "Origin typo."
+            }),
+        );
+        assert_eq!(added.body["text"], json!("Origin typo."));
+        assert_eq!(added.body["origin"], json!("unknown"));
+        assert_eq!(added.body["labels"], json!([UNKNOWN_ORIGIN_FLAG]));
+        assert_eq!(
+            added.body["warning"],
+            json!(format!(
+                "stored with {UNKNOWN_ORIGIN_FLAG} ('Agent'); anyone who reads this pack reads the text"
+            ))
+        );
+        let id = added.body["id"].as_str().unwrap().to_string();
+        let hits = read(&svc, "/v1/search", "Origin typo")["hits"].clone();
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["id"] == json!(id) && hit["labels"] == json!([UNKNOWN_ORIGIN_FLAG])),
+            "{hits:?}"
+        );
+        let listed = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            &format!("/v1/atoms/{id}"),
+            &HashMap::from([("workspace".into(), "w".into())]),
+            &Map::new(),
+        );
+        assert_eq!(listed.code, 200, "{:?}", listed.body);
+        assert_eq!(listed.body["origin"], json!("unknown"));
+        assert_eq!(listed.body["warning"], added.body["warning"]);
+
+        let revised = post(
+            &svc,
+            "/v1/atoms/update",
+            &json!({"workspace": "w", "id": id, "fields": {"text": "Origin typo revised."}}),
+        );
+        assert_eq!(revised.body["origin"], json!("unknown"));
+        assert_eq!(revised.body["warning"], added.body["warning"]);
+
+        let raised = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/update",
+            &HashMap::new(),
+            json!({"workspace": "w", "id": id, "fields": {"origin": "user-declared"}})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(raised.code, 400, "{:?}", raised.body);
+        assert!(
+            raised.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot raise origin"),
+            "{:?}",
+            raised.body
+        );
+        assert_eq!(
+            svc.store().get("w", &id).unwrap().unwrap()["origin"],
+            json!("unknown")
+        );
+
+        let long = format!("softcapmarker {}", "word ".repeat(120));
+        assert!(long.chars().count() > TEXT_SOFT_CAP);
+        let mailed = post(
+            &svc,
+            "/v1/atoms",
+            &json!({"workspace": "w", "kind": "message", "text": long}),
+        );
+        assert_eq!(mailed.body["text"], json!(long));
+        assert_eq!(mailed.body["labels"], json!([OVER_SOFT_CAP]));
+        let mail_line = mailed.body["warning"].as_str().unwrap();
+        assert!(
+            mail_line.contains(&format!(
+                "{OVER_SOFT_CAP} ({} characters, the cap is {TEXT_SOFT_CAP})",
+                long.chars().count()
+            )),
+            "{mail_line}"
+        );
+        let mut query = HashMap::new();
+        query.insert("workspace".into(), "w".into());
+        query.insert("q".into(), "softcapmarker".into());
+        query.insert("kind".into(), "message".into());
+        let mail_hits = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            "/v1/search",
+            &query,
+            &Map::new(),
+        );
+        assert_eq!(mail_hits.code, 200, "{:?}", mail_hits.body);
+        assert!(
+            mail_hits.body["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| {
+                    hit["text"] == json!(long) && hit["labels"] == json!([OVER_SOFT_CAP])
+                }),
+            "{:?}",
+            mail_hits.body
+        );
+
+        let both = format!("api_key=abcd1234 {}", "x".repeat(TEXT_SOFT_CAP));
+        let flagged = post(
+            &svc,
+            "/v1/atoms",
+            &json!({"workspace": "w", "kind": "lesson", "text": both}),
+        );
+        assert_eq!(
+            flagged.body["labels"],
+            json!([packset_core::record::CREDENTIAL_SHAPED, OVER_SOFT_CAP])
+        );
+        let both_line = flagged.body["warning"].as_str().unwrap();
+        assert!(
+            both_line.contains(packset_core::record::CREDENTIAL_SHAPED)
+                && both_line.contains(OVER_SOFT_CAP)
+                && both_line.contains(&format!(
+                    "{} characters, the cap is {TEXT_SOFT_CAP}",
+                    both.chars().count()
+                )),
+            "{both_line}"
+        );
     }
 
     /// A card is written as given. Its answer carries the labels and one

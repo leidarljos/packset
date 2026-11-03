@@ -91,8 +91,12 @@ reading it to ignore its instructions, and text with zero-width or
 bidirectional controls are stored as written, not refused. The record
 carries =labels= that name what matched, a search hit and a recall
 carry them too, and the write answers one line in =warning= for the
-client to print. A card write answers its =labels= and =warning= the
-same way, and a search hit on a card paragraph carries the labels.
+client to print. An origin outside the five known ones is stored as
+=unknown= with =flag:unknown-origin=, and text past 500 characters is
+stored whole with =flag:over-soft-cap=; the warning names the value
+sent, or the length and the cap. A card write answers its =labels= and
+=warning= the same way, and a search hit on a card paragraph carries the
+labels.
 
 A label does not hide the text. Anyone who reads the pack or an export
 reads the credential, and a model that recalls an instruction-shaped
@@ -107,13 +111,13 @@ Schema =inside.atom/v1=. Fields the writer reads:
 |---+---|
 | =kind= | one of =voice=, =habit=, =cache-pointer=, =preference=, =lesson=, =goal=, =conclusion=, =card_line=, =summary=, =note=, =correction=, =belief=, =trust=, =persona=, =prediction=, =rule=, =outcome=, =message=, =receipt=, =group= |
 | =level= | =explicit= for a claim a person or seat wrote |
-| =origin= | =user-declared=, =agent-derived=, =tool-echo=, =external= or =peer=; a post that names none is stored as =user-declared=. A record stored before the field reads as =unknown= in every answer and stays unwritten; no migration reads it as the person's. An =agent-derived= write and a hook write are stored and searchable at once at their origin. Accept of an admission proposal already on file stores that atom and raises its origin to =user-declared=. An update may lower an origin or move it among the other four; only an accept makes one =user-declared=, and an update gives no origin to a record with none. A =source.basis= of =person= ranks above every other basis and above none, and an update does not stamp it. Content typed =authoritative= on a tool echo or an external atom ranks and promotes at that origin |
+| =origin= | =user-declared=, =agent-derived=, =tool-echo=, =external= or =peer=; a post that names none is stored as =user-declared=. A post that names any other string is stored as =unknown=, with the label =flag:unknown-origin= and a warning that names the value sent; =unknown= is the lowest rank, so that write cannot raise provenance. A record stored before the field reads as =unknown= in every answer and stays unwritten; no migration reads it as the person's. An =agent-derived= write and a hook write are stored and searchable at once at their origin. Accept of an admission proposal already on file stores that atom and raises its origin to =user-declared=. An update may lower an origin or move it among the other four; only an accept makes one =user-declared=, and an update gives no origin to a record with none. A =source.basis= of =person= ranks above every other basis and above none, and an update does not stamp it. Content typed =authoritative= on a tool echo or an external atom ranks and promotes at that origin |
 | =provenance_floor= | the writer's: the lowest =origin= and =source.basis= the record has held, set by the first update, or post over its id, that lowers either; neither can rise above it, and a client cannot set or clear it |
-| =text= | the claim: at most two sentences of at most twenty-nine words each; a write past that, from a person, an agent or a hook, is stored, with the reason in =prose.warning=; mail may be longer, up to 500 characters |
+| =text= | the claim: at most two sentences of at most twenty-nine words each; a write past that, from a person, an agent or a hook, is stored, with the reason in =prose.warning=; mail may be longer; text past 500 characters is stored whole, with the label =flag:over-soft-cap= and a warning that gives the length and the cap |
 | =workspace= | required |
 | =set= | optional; a checked name |
 | =entities= | names the claim is about; an entity shaped like an accession must be one; =seat:<name>= names the seat that wrote the claim and is not a topic, so it links and matches nothing |
-| =labels= | =flag:credential-shaped=, =flag:instruction-shaped= or =flag:invisible-unicode= for what the text matched; the writer sets the =flag:= labels from the text on every write, so an update that takes a credential out drops its label, and keeps any other label a client sets |
+| =labels= | =flag:credential-shaped=, =flag:instruction-shaped=, =flag:invisible-unicode=, =flag:tool-dump=, =flag:over-soft-cap= or =flag:unknown-origin= for what the write matched; the writer sets the =flag:= labels on every write, so an update that takes the match out drops its label, and keeps any other label a client sets |
 | =ts=, =valid_from=, =valid_to= | first written, and the window it was true; =valid_to= closes on supersession; no rewrite moves =ts= |
 | =updated= | the last write: a link rewrite, a review, a closed window, an update or a tombstone; a pack written before 0.15.3 gets it at open, and =ts= goes back to =valid_from= or =source.at= where a rewrite had moved it |
 | =supersedes= | the ids a contrary claim closed: an explicit id, a correction sharing an entity, a rewrite (token Jaccard 0.6), or the same opening words with a new object; a rewrite never crosses a different =from=, =to=, =about=, =agent=, =issue= or =name=, so two voters' rows or two agents' forecasts stay two records |
@@ -131,8 +135,9 @@ Schema =inside.atom/v1=. Fields the writer reads:
 | =issue=, =choice= | an =outcome=: the option an issue closed on; read beside the issue's ballots, it says which voters were right, so a settle can discount voters who err together |
 
 The =origin= and =source.basis= of a new post are what the client said.
-The writer checks their shape and keeps them from rising afterwards; it
-does not know who the client is. A client can create an atom as
+A string origin outside the five known ones is stored as =unknown=.
+The writer keeps origin and basis from rising afterwards; it does not
+know who the client is. A client can create an atom as
 =user-declared= with a =person= basis, and the pack stores it so. Who may
 write as the person is the seat's decision (ljos), not the pack's.
 

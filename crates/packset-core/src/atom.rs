@@ -114,8 +114,9 @@ pub const ORIGINS: &[&str] = &[
 /// The person's origin, and the one a new write that names none is given.
 pub const USER_DECLARED: &str = "user-declared";
 
-/// What a record whose origin is missing or empty reads as, and the rank
-/// of any origin not one of [`ORIGINS`]. A writer may not store it.
+/// What a record whose origin is missing or empty reads as, and what a
+/// write that names an origin outside [`ORIGINS`] is stored as. It is the
+/// lowest rank in [`origin_rank`], so storing it cannot raise provenance.
 pub const UNKNOWN_ORIGIN: &str = "unknown";
 
 /// The `source.basis` that names the person standing behind a claim.

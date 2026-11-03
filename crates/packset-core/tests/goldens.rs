@@ -144,6 +144,11 @@ fn atom_validation_matches_the_corpus() {
                     want["prose"].get("warning"),
                     "prose warning for {shown}"
                 );
+                assert_eq!(
+                    atom.get("warning"),
+                    want.get("warning"),
+                    "warning for {shown}"
+                );
             }
         }
     }
