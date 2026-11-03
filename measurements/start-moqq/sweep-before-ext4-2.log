@@ -1,0 +1,25 @@
+# store code at 177c9f5333e2613b17f6481a95c7c5c5ac321600, with the start test of measurements/start-moqq
+# Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
+# root through sudo: yes
+# TMPDIR=/tmp on ext4   rw,relatime
+# cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+   Compiling packset-daemon v0.17.3 (/tmp/wt-before/crates/packset-daemon)
+    Finished `release` profile [optimized] target(s) in 6.97s
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-before/release/deps/packset_daemon-7088d49fdeb216b9)
+
+running 1 test
+| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 10000 | 79 | first | 0.1 | 588 | 6 | 85 | 0 | 85 | 86 |
+| 10000 | 79 | second | 0.1 | 81 | 6 | 87 | 0 | 86 | 87 |
+| 50000 | 395 | first | 0.1 | 2770 | 6 | 402 | 0 | 401 | 403 |
+| 50000 | 395 | second | 0.1 | 407 | 6 | 404 | 0 | 403 | 404 |
+| 100000 | 791 | first | 0.1 | 5517 | 6 | 798 | 0 | 797 | 799 |
+| 100000 | 791 | second | 0.1 | 815 | 6 | 800 | 0 | 799 | 800 |
+| 140000 | 1108 | first | 0.1 | 1133, stopped: MDB_MAP_FULL: Environment mapsize limit reached | 6 | 1114 | 0 | 1113 | 1114 |
+| 140000 | 1108 | second | 0.1 | 1132, stopped: MDB_MAP_FULL: Environment mapsize limit reached | 6 | 1114 | 0 | 1114 | 1114 |
+test store::tests::start_cost_by_pack_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 52.49s
+
+# exit 0

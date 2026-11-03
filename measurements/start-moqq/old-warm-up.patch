@@ -1,0 +1,32 @@
+Warm up as the start test did before: one start over a one-claim pack, kept open.
+
+--- a/crates/packset-cli/src/bin/packsetd/store.rs
++++ b/crates/packset-cli/src/bin/packsetd/store.rs
+@@ -3813,18 +3813,15 @@
+         }
+         let exe = std::env::current_exe().unwrap();
+         let data = home.join("memory.lmdb").join("data.mdb");
+-        let mut rounds = 0;
+-        loop {
+-            let before = mapped_kib(&exe);
+-            let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
+-            fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
+-            fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
+-            let _ = measure_start(dir.path(), &exe, rounds);
+-            rounds += 1;
+-            if mapped_kib(&exe) == before {
+-                break;
+-            }
+-        }
++        let rounds = 0;
++        let _ = &data;
++        let warm = tempfile::tempdir().unwrap();
++        write_unstamped_pack(warm.path(), 1, 1);
++        let warm_start =
++            crate::service::Service::open(crate::home::Home::new(warm.path())).unwrap();
++        warm_start.store().restore_created().unwrap();
++        std::mem::forget(warm_start);
++        std::mem::forget(warm);
+         println!("start {}", measure_start(home, &exe, rounds));
+     }
+ 

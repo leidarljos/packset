@@ -1,0 +1,18 @@
+Leave glibc's trim and mmap thresholds dynamic in the start child.
+
+--- a/crates/packset-cli/src/bin/packsetd/store.rs
++++ b/crates/packset-cli/src/bin/packsetd/store.rs
+@@ -3804,13 +3804,6 @@
+     /// The kernel counts that exactly, where `VmRSS` and `VmHWM` are per-CPU counters read without their CPUs' pending counts (`get_mm_counter` in include/linux/mm.h), so the two can differ.
+     #[cfg(target_os = "linux")]
+     fn report_start(home: &Path) {
+-        #[cfg(target_env = "gnu")]
+-        {
+-            let threshold = libc::c_int::try_from(TRIM_THRESHOLD).unwrap();
+-            // SAFETY: sets one allocator parameter; nothing is allocated across the call.
+-            let set = unsafe { libc::mallopt(libc::M_TRIM_THRESHOLD, threshold) };
+-            assert_eq!(set, 1, "mallopt(M_TRIM_THRESHOLD) refused");
+-        }
+         let exe = std::env::current_exe().unwrap();
+         let data = home.join("memory.lmdb").join("data.mdb");
+         let mut rounds = 0;

@@ -1,0 +1,41 @@
+The start child as the start test had it before: glibc's thresholds dynamic, and one start over a one-claim pack, kept open, as the warm-up.
+
+--- a/crates/packset-cli/src/bin/packsetd/store.rs
++++ b/crates/packset-cli/src/bin/packsetd/store.rs
+@@ -3804,27 +3804,17 @@
+     /// The kernel counts that exactly, where `VmRSS` and `VmHWM` are per-CPU counters read without their CPUs' pending counts (`get_mm_counter` in include/linux/mm.h), so the two can differ.
+     #[cfg(target_os = "linux")]
+     fn report_start(home: &Path) {
+-        #[cfg(target_env = "gnu")]
+-        {
+-            let threshold = libc::c_int::try_from(TRIM_THRESHOLD).unwrap();
+-            // SAFETY: sets one allocator parameter; nothing is allocated across the call.
+-            let set = unsafe { libc::mallopt(libc::M_TRIM_THRESHOLD, threshold) };
+-            assert_eq!(set, 1, "mallopt(M_TRIM_THRESHOLD) refused");
+-        }
+         let exe = std::env::current_exe().unwrap();
+         let data = home.join("memory.lmdb").join("data.mdb");
+-        let mut rounds = 0;
+-        loop {
+-            let before = mapped_kib(&exe);
+-            let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
+-            fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
+-            fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
+-            let _ = measure_start(dir.path(), &exe, rounds);
+-            rounds += 1;
+-            if mapped_kib(&exe) == before {
+-                break;
+-            }
+-        }
++        let rounds = 0;
++        let _ = &data;
++        let warm = tempfile::tempdir().unwrap();
++        write_unstamped_pack(warm.path(), 1, 1);
++        let warm_start =
++            crate::service::Service::open(crate::home::Home::new(warm.path())).unwrap();
++        warm_start.store().restore_created().unwrap();
++        std::mem::forget(warm_start);
++        std::mem::forget(warm);
+         println!("start {}", measure_start(home, &exe, rounds));
+     }
+ 

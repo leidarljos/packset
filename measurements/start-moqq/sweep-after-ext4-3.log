@@ -1,0 +1,26 @@
+# store code at 6dcab278b0bd1b1356a057d661f37adc8ed8cced, with the start test of measurements/start-moqq
+# Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
+# root through sudo: yes
+# TMPDIR=/tmp on ext4   rw,relatime
+# cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+   Compiling packset-daemon v0.17.3 (/tmp/wt-after/crates/packset-daemon)
+    Finished `release` profile [optimized] target(s) in 7.43s
+     Running unittests ../packset-cli/src/bin/packsetd/lib.rs (/tmp/target-after/release/deps/packset_daemon-7088d49fdeb216b9)
+
+running 1 test
+| atoms | data.mdb MiB | start | open ms | pass ms | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 10000 | 79 | first | 0.1 | 611 | 6 | 6 | 0 | 5 | 16 |
+| 10000 | 79 | second | 0.1 | 106 | 6 | 6 | 0 | 5 | 14 |
+| 50000 | 395 | first | 0.1 | 2965 | 6 | 6 | 0 | 5 | 16 |
+| 50000 | 395 | second | 0.1 | 563 | 6 | 6 | 0 | 5 | 14 |
+| 100000 | 791 | first | 0.1 | 5929 | 6 | 6 | 0 | 5 | 16 |
+| 100000 | 791 | second | 0.1 | 1189 | 6 | 6 | 0 | 5 | 15 |
+test store::tests::start_cost_by_pack_size has been running for over 60 seconds
+| 140000 | 1108 | first | 0.1 | 8410 | 6 | 6 | 0 | 5 | 16 |
+| 140000 | 1108 | second | 0.1 | 1757 | 6 | 6 | 0 | 5 | 14 |
+test store::tests::start_cost_by_pack_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 248 filtered out; finished in 80.12s
+
+# exit 0

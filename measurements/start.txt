@@ -1,83 +1,252 @@
-177c9f5333e2613b17f6481a95c7c5c5ac321600 PACKSET_START_SIZES=10000,50000,100000,140000 cargo test --release -p packset-daemon --lib start_cost_by_pack_size -- --ignored --nocapture
+What a start costs as the pack grows, and what the start test checks.
+`Service::open` runs before packsetd binds, and the `stamp` pass runs behind the listener, one after the other in one process.
 
-What a start costs as the pack grows: `Service::open`, which packsetd runs before it binds, then the stamp pass it runs behind the listener, one after the other in one process.
-Intel(R) Xeon(R) Processor, 8 cores, one thread a core, Linux 6.12.94+, 4 KiB pages, ext4, CPU only, the pack in the page cache.
-Each pack is written by the test: claims of about 8 KiB as JSON, each with a 384-d embedding, round-robin over eight workspaces, as a writer from before `updated` left them.
-The first start stamps every claim; the second opens the same pack, now current.
-Each start runs in a child process; base is its VmRSS before the open, after a start over a one-claim pack, still open, has made the code resident.
-VmRSS, RssAnon and RssFile (with RssShmem) are read after the pass; VmHWM is the peak.
-Three runs, develop and this commit in turn; pass ms is the median and the range, and the memory columns, the median, agreed within 1 MiB across the three.
-140000 claims is past the 1 GiB map.
+## Where these runs happened
 
-Before: 177c9f5333e2613b17f6481a95c7c5c5ac321600, develop, with the measurement test added; Intel(R) Xeon(R) Processor, 8 cores
+Every run in this file ran on one Kernel-based Virtual Machine (KVM) guest: `Intel(R) Xeon(R) Processor`, 8 cores, one thread a core, 4 KiB pages, CPU only.
+Its kernel was Linux 6.12.94+, with glibc 2.39 and rustc 1.97.1.
+Its `transparent_hugepage` settings were `enabled [madvise]`, `shmem_enabled [never]` and `hpage_pmd_size 2097152`.
+It had root through sudo, and root mounted the two tmpfs filesystems: `mount -t tmpfs -o huge=always,size=4G tmpfs /mnt/hugefs` and `mount -t tmpfs -o size=4G tmpfs /mnt/plainfs`.
+The ext4 runs used `/tmp` on the root filesystem, mounted `rw,relatime`.
+The raw output of each run is in `measurements/start-moqq/`, under a header that names the store code, the kernel, the CPU, root and the filesystem.
+The store code is at a commit on the remote: 177c9f5333e2613b17f6481a95c7c5c5ac321600 before the fix, and 6dcab278b0bd1b1356a057d661f37adc8ed8cced after it.
+Each run carries the start test of the commit that adds `measurements/start-moqq/`.
+For the runs before the fix, `measurements/start-moqq/before.sh` puts that test into the store at 177c9f5.
+Earlier versions of this file cited runs at ac5380ab3f61f147b1204d1ed676c8784dc89e81, a commit that is not on the remote, and did not say where any run happened.
+The runs below replace all of them.
+No run in this file is from CI.
 
-| atoms | data.mdb MiB | start | open ms | pass ms, median (range) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
-|---|---|---|---|---|---|---|---|---|---|
-| 10000 | 79 | first | 0.1 | 586 (581 to 601) | 6 | 85 | 1 | 84 | 86 |
-| 10000 | 79 | second | 0.1 | 80 (79 to 81) | 5 | 87 | 0 | 86 | 87 |
-| 50000 | 395 | first | 0.1 | 2867 (2865 to 2903) | 6 | 402 | 1 | 401 | 403 |
-| 50000 | 395 | second | 0.1 | 410 (409 to 414) | 6 | 404 | 0 | 403 | 404 |
-| 100000 | 791 | first | 0.1 | 5710 (5650 to 5731) | 5 | 798 | 1 | 797 | 798 |
-| 100000 | 791 | second | 0.1 | 821 (817 to 830) | 5 | 799 | 0 | 799 | 799 |
-| 140000 | 1108 | first | 0.1 | stopped, MDB_MAP_FULL: 1135 (1130 to 1144) | 6 | 1114 | 0 | 1113 | 1114 |
-| 140000 | 1108 | second | 0.1 | stopped, MDB_MAP_FULL: 1129 (1125 to 1132) | 5 | 1114 | 0 | 1113 | 1114 |
+## The start test
 
-After: the commit that adds this file, on 177c9f5333e2613b17f6481a95c7c5c5ac321600; Intel(R) Xeon(R) Processor, 8 cores
+`store::tests::a_start_holds_one_step_not_the_pack` writes a pack of one workspace, starts the writer over it in a child process twice, and asserts that each start peaks under a bound.
+The first start runs the `stamp` pass over every claim, and the second opens the same pack, now current.
+The test runs as `cargo test` builds it, unoptimised:
 
-| atoms | data.mdb MiB | start | open ms | pass ms, median (range) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
-|---|---|---|---|---|---|---|---|---|---|
-| 10000 | 79 | first | 0.1 | 636 (613 to 657) | 5 | 6 | 1 | 5 | 15 |
-| 10000 | 79 | second | 0.1 | 106 (104 to 126) | 6 | 6 | 0 | 5 | 14 |
-| 50000 | 395 | first | 0.1 | 3108 (3094 to 3157) | 6 | 6 | 1 | 5 | 16 |
-| 50000 | 395 | second | 0.1 | 600 (582 to 636) | 6 | 6 | 0 | 5 | 14 |
-| 100000 | 791 | first | 0.1 | 6247 (6035 to 6354) | 6 | 6 | 1 | 5 | 16 |
-| 100000 | 791 | second | 0.1 | 1214 (1205 to 1279) | 6 | 6 | 0 | 5 | 14 |
-| 140000 | 1108 | first | 0.1 | 8646 (8430 to 8754) | 6 | 6 | 1 | 5 | 16 |
-| 140000 | 1108 | second | 0.1 | 1745 (1742 to 1818) | 6 | 6 | 0 | 5 | 14 |
+```console
+$ TMPDIR=<dir on the filesystem> cargo test -p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+```
 
-Before, the pass read the pack through the map and kept every page it read, so the peak was the pack and about 7 MiB more, nearly all of it file pages.
-Now a step ends after 1 MiB of records read, stamped or not, and drops the pages it read from the map before the next step reads.
-On these 4 KiB pages the peak is 14 to 16 MiB from 79 MiB to 1108 MiB of pack, and the pages read are gone once the pass ends.
-The claims of eight workspaces are interleaved in the file, so a step over one workspace's claims faults in every eighth claim, and the kernel maps the 16 pages around each fault (`fault_around_bytes` 65536).
-A step therefore maps about eight times what it reads before it drops them, which is most of the 8 to 10 MiB over base.
-Over one workspace, `store::tests::a_start_holds_one_step_not_the_pack`, as `cargo test` builds it, writes a pack four times a bound it derives from the host and the pack's tree, and asserts both starts peak under it.
-Three runs each at ac5380ab3f61f147b1204d1ed676c8784dc89e81, peak over base, stamping then current:
+Each filesystem ran it six times with the store before the fix, six times after it, and six times after it with `measurements/start-moqq/hold-21-mib.patch` applied.
+With that patch the pass keeps 21 MiB of heap.
+A pass that kept 20 steps of 1048 KiB would keep as much.
+`measurements/start-moqq/run.sh` ran each set, in a worktree of its own, and `measurements/start-moqq/summary.py` gives the medians and interquartile ranges below:
 
-| pack on | a fault maps | bound KiB | pack KiB | stamping KiB | current KiB | on 177c9f5, stamping KiB |
+```console
+$ measurements/start-moqq/before.sh 177c9f5333e2613b17f6481a95c7c5c5ac321600 /tmp/wt-before
+$ git worktree add --detach /tmp/wt-hold-21-mib HEAD && git -C /tmp/wt-hold-21-mib apply "$PWD/measurements/start-moqq/hold-21-mib.patch"
+$ cd /tmp/wt-before && "$OLDPWD/measurements/start-moqq/run.sh" "$OLDPWD/measurements/start-moqq/before-ext4" 6 /tmp 177c9f5333e2613b17f6481a95c7c5c5ac321600 -p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+$ python3 measurements/start-moqq/summary.py
+```
+
+The quartiles are `statistics.quantiles(n=4, method="inclusive")`.
+
+### The fault unit
+
+The test measures what one fault maps of the pack, on the filesystem the pack is on, before each start.
+Each probe maps the data file afresh, reads one byte, and takes that mapping's fields from `/proc/self/smaps`.
+The next probe reads the byte past what the last one mapped, so the probes step through the whole file.
+The unit is the most that any probe mapped.
+
+| pack on | probes | Rss KiB | FilePmdMapped KiB | AnonHugePages KiB | KernelPageSize KiB | MMUPageSize KiB |
 |---|---|---|---|---|---|---|
-| ext4 | 2048 KiB, hpage_pmd_size | 26848 | 110756 | 2724 to 2784 | 1372 to 1440 | 112172, failed |
-| tmpfs, huge=always | 2048 KiB, hpage_pmd_size | 26848 | 110756 | 17248 | 16096 to 16160 | 115908, failed |
-| tmpfs | 64 KiB, fault_around_bytes default | 2836 | 12016 | 2332 to 2404 | 1184 to 1248 | 13388, failed |
+| ext4 | 92 before the stamping start, 126 before the current one | 64 | 0 | 0 | 4 | 4 |
+| tmpfs | 92 and 126 | 64 | 0 | 0 | 4 | 4 |
+| tmpfs, `huge=always` | 48 and 50 | 2048 | 0 | 0 | 4 | 4 |
 
-The kernel does not say which filesystems hold large folios, so on ext4 the bound takes the 2 MiB folio; on this kernel a start over ext4 peaks as one over a plain tmpfs, where a fault maps 64 KiB.
-On 177c9f5333e2613b17f6481a95c7c5c5ac321600 the same test peaked at more than the pack on each and failed.
-The pages a step drops are faulted in again when a later step reads them, so by the medians the pass took 8 to 9% longer on a first start, and a third to a half longer on a current pack: 80 to 106 ms at 79 MiB, 821 to 1214 ms at 791 MiB.
-It runs behind the listener; the open is 0.1 ms at every size, before and after.
-At 140k claims the 1108 MiB in use is past develop's 1 GiB map, and LMDB then opens the map at the pages in use (`mdb_env_open2` in `mdb.c`), which leaves no room to write.
-Every start's pass stopped with MDB_MAP_FULL and left claims unstamped; its time includes the count of what was left.
-After, the map opened at twice the data file and the pass stamped every claim.
-The first start stays open in each child: closing it freed LMDB's 2 MiB list of dirty pages, glibc moved its mmap threshold up to that size, and the next open cleared its list on the heap, which charged 2048 KiB and about 0.7 ms to the open measured.
+On ext4 a fault maps the 64 KiB of `fault_around_bytes`, as it does on a plain tmpfs.
+On a tmpfs mounted `huge=always` one fault brings in the whole 2 MiB folio, with 4 KiB page table entries rather than one page middle directory (PMD) entry.
+Before this change the bound also took 2 MiB on ext4.
+The reason is that the kernel does not say which filesystems use large folios.
+That gave 12 places of 2052 KiB each, 24624 KiB of a 26848 KiB bound, where this kernel maps 68 KiB a place.
 
-ac5380ab3f61f147b1204d1ed676c8784dc89e81 TMPDIR=/mnt/hugefs/tmp PACKSET_START_SIZES=1500,6000,12000 cargo test --release -p packset-daemon --lib start_cost_by_pack_size -- --ignored --nocapture
-after `mount -t tmpfs -o huge=always,size=4G tmpfs /mnt/hugefs` and `mkdir /mnt/hugefs/tmp`.
+### The bound
 
-The same starts where a fault maps a whole 2 MiB folio: the pack on a tmpfs mounted `huge=always`, whose page cache is in folios of `hpage_pmd_size`.
-Intel(R) Xeon(R) Processor, 8 cores, one thread a core, Linux 6.12.94+, transparent_hugepage enabled [madvise], shmem_enabled [never], hpage_pmd_size 2097152, tmpfs rw,relatime,size=4194304k,huge=always, CPU only.
-The packs, children, columns and three runs are as above; the test binary is on ext4.
+The bound is 2 steps, plus one fault unit and one page for each place a step reads, plus glibc's 128 KiB trim threshold.
+A step is 131 claims of 2 overflow pages each, which is 1048 KiB.
+On a tree of depth 2 with 66 or 70 claims a leaf, a step reads 9 places: the meta page, 2 levels, 2 more leaves with the level above them, 2 run ends and 2 free-list pages.
+So the bound is 2096 + 9 * (64 + 4) + 128 = 2836 KiB with a 64 KiB unit, and 2096 + 9 * (2048 + 4) + 128 = 20692 KiB with a 2048 KiB unit.
 
-After, huge=always: ac5380ab3f61f147b1204d1ed676c8784dc89e81; Intel(R) Xeon(R) Processor, 8 cores
+### Peak over base, before and after
 
-| atoms | data.mdb MiB | start | open ms | pass ms, median (range) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
+The store code is at 177c9f5333e2613b17f6481a95c7c5c5ac321600 before and 6dcab278b0bd1b1356a057d661f37adc8ed8cced after; `Intel(R) Xeon(R) Processor`, 8 cores.
+Each row is six runs.
+
+| pack on | store | start | fault unit KiB | bound KiB | pack KiB | peak over base KiB, median (IQR) | test |
+|---|---|---|---|---|---|---|---|
+| ext4 | before | stamping | 64 | 2836 | 5884 | 6484 (6484 to 6484) | failed 6 of 6 |
+| ext4 | before | current | 64 | 2836 | 5884 | 6120 (6120 to 6120) | failed 6 of 6 |
+| ext4 | after | stamping | 64 | 2836 | 5884 | 2112 (2112 to 2112) | passed 6 of 6 |
+| ext4 | after | current | 64 | 2836 | 5884 | 1152 (1104 to 1152) | passed 6 of 6 |
+| ext4 | after, holding 21 MiB | stamping | 64 | 2836 | 5884 | 23588 (23556 to 23620) | failed 6 of 6 |
+| ext4 | after, holding 21 MiB | current | 64 | 2836 | 5884 | 22664 (22632 to 22696) | failed 6 of 6 |
+| tmpfs | before | stamping | 64 | 2836 | 5884 | 6544 (6496 to 6544) | failed 6 of 6 |
+| tmpfs | before | current | 64 | 2836 | 5884 | 6120 (6120 to 6120) | failed 6 of 6 |
+| tmpfs | after | stamping | 64 | 2836 | 5884 | 2166 (2128 to 2243) | passed 6 of 6 |
+| tmpfs | after | current | 64 | 2836 | 5884 | 1140 (1128 to 1182) | passed 6 of 6 |
+| tmpfs | after, holding 21 MiB | stamping | 64 | 2836 | 5884 | 23532 (23526 to 23628) | failed 6 of 6 |
+| tmpfs | after, holding 21 MiB | current | 64 | 2836 | 5884 | 22616 (22604 to 22658) | failed 6 of 6 |
+| tmpfs, `huge=always` | before | stamping | 2048 | 20692 | 42700 | 45832 (45814 to 45832) | failed 6 of 6 |
+| tmpfs, `huge=always` | before | current | 2048 | 20692 | 42700 | 45072 (45072 to 45072) | failed 6 of 6 |
+| tmpfs, `huge=always` | after | stamping | 2048 | 20692 | 42700 | 15116 (15116 to 15116) | passed 6 of 6 |
+| tmpfs, `huge=always` | after | current | 2048 | 20692 | 42700 | 14120 (14120 to 14120) | passed 6 of 6 |
+| tmpfs, `huge=always` | after, holding 21 MiB | stamping | 2048 | 20692 | 42700 | 36584 (36536 to 36632) | failed 6 of 6 |
+| tmpfs, `huge=always` | after, holding 21 MiB | current | 2048 | 20692 | 42700 | 35656 (35600 to 35712) | failed 6 of 6 |
+
+Before the fix a start kept the pages it read, so it peaked at about the pack.
+On ext4, 6056 KiB of the data file was still resident after the pass.
+After it, no data-file page stayed resident after a pass.
+
+### The smallest regression the bound catches
+
+A start fails when what it keeps beyond a correct start is more than the headroom.
+The headroom is the bound less the correct start's peak.
+
+| pack on | start | headroom KiB, median (IQR) | largest headroom KiB | in steps of 1048 KiB |
+|---|---|---|---|---|
+| ext4 | stamping | 724 (724 to 724) | 788 | 0.8 |
+| ext4 | current | 1684 (1684 to 1732) | 1748 | 1.7 |
+| tmpfs | stamping | 670 (593 to 708) | 708 | 0.7 |
+| tmpfs | current | 1696 (1654 to 1708) | 1772 | 1.7 |
+| tmpfs, `huge=always` | stamping | 5576 (5576 to 5576) | 5640 | 5.4 |
+| tmpfs, `huge=always` | current | 6572 (6572 to 6572) | 6636 | 6.3 |
+
+On ext4 and plain tmpfs, a start that keeps 1772 KiB or two steps more than a correct one fails in every run.
+On a tmpfs mounted `huge=always` the same goes for 6636 KiB or seven steps more.
+The 21 MiB mutation fails on all three filesystems: 19.3 to 20.3 MiB past the bound on ext4 and plain tmpfs, and 14.6 to 15.5 MiB past it on `huge=always`.
+
+### Why the pack is twice its bound
+
+The pack has to be as large as what a correct start keeps plus the smallest regression past it, so that a pass has that much to keep.
+A correct start peaks above its base and under its bound.
+So its headroom is less than one bound.
+A pack of twice the bound is therefore large enough on any host, and a pass that keeps what it reads then ends more than a headroom past the bound.
+Here the largest headroom for its bound was 1772 of 2836 KiB, 0.62 of it, so 1.63 bounds would have done on this host.
+
+### What a start leaves after the pass
+
+The start child reads `RssAnon`, `RssFile` and `RssShmem` from `/proc/self/status` at the base and after the pass, and the `Rss` of every mapping from `/proc/self/smaps`.
+`VmRSS` and `VmHWM` are per-CPU counters that the kernel reads without each CPU's pending counts (`get_mm_counter` in include/linux/mm.h), while the `smaps` total counts each mapped page.
+On ext4, with the store after the fix, six runs of each variant left this much over the base:
+
+| start child | start | VmRSS KiB | smaps total KiB | RssAnon KiB | test binary KiB | peak over base KiB | test |
+|---|---|---|---|---|---|---|---|
+| as the test was at 6dcab27 (`old-harness.patch`) | stamping | 1176 | 1696 (1648 to 1744) | 1172 | 128 | 2300 (2252 to 2348) | failed 6 of 6, the binary grew |
+| as the test was at 6dcab27 (`old-harness.patch`) | current | 28 | 480 (432 to 528) | 28 | 128 | 1108 (1108 to 1111) | failed 6 of 6, the binary grew |
+| thresholds pinned, the old warm-up (`old-warm-up.patch`) | stamping | 180 | 636 (588 to 636) | 176 | 128 | 2304 (2286 to 2343) | failed 6 of 6, the binary grew |
+| thresholds pinned, the old warm-up (`old-warm-up.patch`) | current | 16 | 464 (464 to 464) | 12 | 128 | 1120 (1120 to 1120) | failed 6 of 6, the binary grew |
+| thresholds dynamic, warm-up over a copy (`no-mallopt.patch`) | stamping | 2596 (2596 to 2605) | 2604 (2604 to 2613) | 2592 (2592 to 2601) | 0 | 4264 (4232 to 4296) | failed 6 of 6, past the bound |
+| thresholds dynamic, warm-up over a copy (`no-mallopt.patch`) | current | 2044 | 2044 | 2040 | 0 | 3116 (3116 to 3116) | failed 6 of 6, past the bound |
+| this test | stamping | 52 | 60 | 48 | 0 | 2112 (2112 to 2112) | passed 6 of 6 |
+| this test | current | 12 | 12 | 8 | 0 | 1152 (1104 to 1152) | passed 6 of 6 |
+
+A cell without a range had an interquartile range of zero.
+With the start child as it was at 6dcab27, a `stamping` start left 1176 KiB over its base, and 1172 KiB of it was `RssAnon`.
+Less the 128 KiB the test binary grew by, that is 1048 KiB, inside the 1016 to 1612 KiB that the CI logs for 6dcab27 show; CI was not rerun for this file.
+Pinning glibc's trim threshold with `mallopt` takes the `RssAnon` to 176 KiB, so about 1 MiB of it came with glibc's dynamic thresholds.
+Setting `M_TRIM_THRESHOLD` turns off the dynamic mmap threshold too (mallopt(3)), so the start child now sets it to the 128 KiB that the bound counts.
+This file does not identify which freed chunk moved the threshold, or which allocation then took that 1 MiB from the arena.
+Warming up over a copy of the pack takes the remaining `RssAnon` from 176 KiB to 48 KiB.
+So 128 KiB was allocated the first time a start ran over a pack this size, which a one-claim warm start did not do.
+Without the `mallopt` call, the warm starts close their environments, and the 2 MiB list of dirty pages that Lightning Memory-Mapped Database (LMDB) frees then moves glibc's mmap threshold to that size.
+The next open takes its list from the heap and clears it.
+That is the 2040 KiB in that row, and the test fails.
+With this test, nothing yet accounts for 20 to 140 KiB of `RssAnon` after a `stamping` start, or for 8 to 12 KiB after a current one.
+
+### Warm-up
+
+The old warm-up was one start over a one-claim pack, kept open.
+In the two variants that use it, the test binary grew inside every measured start, by 64 to 192 KiB, and by 128 KiB in 21 of the 24.
+In CI at 6dcab27, one `stamping` start grew it by 2868 KiB.
+The start child now runs warm starts through the same function that measures the start, each over a copy of the pack beside it on the same filesystem.
+It runs them until one leaves the binary's resident pages as it found them, which took 2 warm starts in every run here.
+The test fails if the measured start then grows the binary, and in the 36 starts after the fix it grew by 0 KiB.
+The peak is reset through `/proc/self/clear_refs` at the base, so the warm starts do not count in `VmHWM`.
+
+### macOS
+
+The start test reads `/proc/self/status`, `/proc/self/smaps`, `/proc/self/mountinfo` and sysfs, which macOS does not have.
+On macOS it is ignored, and `cargo test` prints the reason beside it.
+These runs were all on Linux, and the macOS build was not run for this file.
+
+## Start cost by pack size
+
+`store::tests::start_cost_by_pack_size` writes packs of claims of about 8 KiB as JSON, each with a 384-d embedding, round-robin over eight workspaces, as a writer from before `updated` left them.
+The first start runs the `stamp` pass over every claim, and the second opens the same pack, now current.
+Each start runs in a child, after the warm starts above, and `base` is its `VmRSS` before the open.
+`VmRSS`, `RssAnon` and `RssFile` (with `RssShmem`) are read after the pass, and `VmHWM` is the peak.
+Each is truncated to whole MiB, and gives the median of the six runs, whose interquartile range was within 1 MiB.
+Six runs of each, built with `--release`:
+
+```console
+$ PACKSET_START_SIZES=10000,50000,100000,140000 cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+```
+
+Before: 177c9f5333e2613b17f6481a95c7c5c5ac321600, ext4; `Intel(R) Xeon(R) Processor`, 8 cores
+
+| atoms | data.mdb MiB | start | open ms | pass ms, median (IQR) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB |
 |---|---|---|---|---|---|---|---|---|---|
-| 1500 | 11 | first | 0.1 | 66 (64 to 90) | 6 | 6 | 1 | 5 | 20 |
-| 1500 | 11 | second | 0.0 | 11 (11 to 12) | 6 | 6 | 0 | 5 | 19 |
-| 6000 | 47 | first | 0.0 | 260 (257 to 262) | 6 | 6 | 1 | 5 | 31 |
-| 6000 | 47 | second | 0.0 | 48 (47 to 68) | 6 | 6 | 0 | 5 | 31 |
-| 12000 | 95 | first | 0.0 | 520 (517 to 527) | 6 | 6 | 1 | 5 | 35 |
-| 12000 | 95 | second | 0.0 | 95 (95 to 97) | 6 | 6 | 0 | 5 | 35 |
+| 10000 | 79 | first | 0.1 | 585 (574 to 589) | 6 | 85 | 0 | 84 | 86 |
+| 10000 | 79 | second | 0.1 | 81 (80 to 81) | 6 | 87 | 0 | 86 | 87 |
+| 50000 | 395 | first | 0.1 | 2789 (2772 to 2805) | 6 | 402 | 0 | 401 | 403 |
+| 50000 | 395 | second | 0.1 | 411 (408 to 414) | 6 | 404 | 0 | 403 | 404 |
+| 100000 | 791 | first | 0.1 | 5599 (5570 to 5623) | 6 | 798 | 0 | 797 | 799 |
+| 100000 | 791 | second | 0.1 | 820 (816 to 823) | 6 | 800 | 0 | 799 | 800 |
+| 140000 | 1108 | first | 0.1 | stopped, MDB_MAP_FULL: 1139 (1134 to 1141) | 6 | 1114 | 0 | 1114 | 1114 |
+| 140000 | 1108 | second | 0.1 | stopped, MDB_MAP_FULL: 1134 (1131 to 1135) | 6 | 1114 | 0 | 1114 | 1114 |
 
-The peak grows slowly with the pack: 20, 31 and 35 MiB at 11, 47 and 95 MiB, where on 4 KiB pages it is 14 to 16 MiB from 79 MiB to 1108 MiB.
+After: 6dcab278b0bd1b1356a057d661f37adc8ed8cced, ext4; `Intel(R) Xeon(R) Processor`, 8 cores
+
+| atoms | data.mdb MiB | start | open ms | pass ms, median (IQR) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB, median (IQR) |
+|---|---|---|---|---|---|---|---|---|---|
+| 10000 | 79 | first | 0.1 | 613 (610 to 614) | 6 | 6 | 0 | 5 | 16 (16 to 16) |
+| 10000 | 79 | second | 0.1 | 105 (104 to 105) | 6 | 6 | 0 | 5 | 14 (14 to 14) |
+| 50000 | 395 | first | 0.1 | 2943 (2934 to 2960) | 6 | 6 | 0 | 5 | 16 (16 to 16) |
+| 50000 | 395 | second | 0.1 | 553 (550 to 561) | 6 | 6 | 0 | 5 | 14.5 (14 to 15) |
+| 100000 | 791 | first | 0.1 | 5952 (5935 to 5968) | 6 | 6 | 0 | 5 | 16 (16 to 16) |
+| 100000 | 791 | second | 0.1 | 1185 (1183 to 1189) | 6 | 6 | 0 | 5 | 14.5 (14 to 15) |
+| 140000 | 1108 | first | 0.1 | 8466 (8422 to 8502) | 6 | 6 | 0 | 5 | 16 (16 to 16) |
+| 140000 | 1108 | second | 0.1 | 1753 (1743 to 1756) | 6 | 6 | 0 | 5 | 14 (14 to 15) |
+
+Before the fix, the pass read the pack through the map and kept every page it read.
+The peak was the pack and about 7 MiB more, nearly all of it file pages.
+Now a step ends after reading 1 MiB of records, whether they needed a `stamp` or not, and drops the pages it read from the map before the next step reads.
+On these 4 KiB pages the peak is 8 to 10 MiB over a 6 MiB base, from 79 MiB to 1108 MiB of pack, and the pages read are gone once the pass ends.
+The claims of eight workspaces are interleaved in the file, so a step over one workspace's claims faults in every eighth claim.
+The kernel maps the 16 pages around each fault, the 64 KiB measured above.
+So a step maps about eight times what it reads before it drops them.
+That is most of the 8 to 10 MiB over base.
+The pages a step drops are faulted in again when a later step reads them.
+By the medians, the pass took 5 to 6% longer on a first start, and 30 to 45% longer on a current pack: 81 and 105 ms at 79 MiB, 820 and 1185 ms at 791 MiB.
+It runs behind the listener, and the open is 0.1 ms at every size, before and after.
+At 140k claims the 1108 MiB in use is past the 1 GiB map that 177c9f5 opened, and Lightning Memory-Mapped Database (LMDB) then opens the map at the pages in use (`mdb_env_open2` in `mdb.c`), which leaves no room to write.
+Before the fix, every start's pass stopped with MDB_MAP_FULL and left claims unstamped.
+Its time includes the count of what was left.
+After the fix, the map opened at twice the data file, and the pass left no claim unstamped.
+
+## Start cost where a fault maps a whole folio
+
+This sweep is the same as the last, with the pack on the tmpfs mounted `huge=always`, whose page cache is in folios of `hpage_pmd_size`.
+The test binary is on ext4.
+
+```console
+$ TMPDIR=/mnt/hugefs/tmp PACKSET_START_SIZES=1500,6000,12000 cargo test --release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+```
+
+After: 6dcab278b0bd1b1356a057d661f37adc8ed8cced, tmpfs `rw,size=4194304k,huge=always`; `Intel(R) Xeon(R) Processor`, 8 cores
+
+| atoms | data.mdb MiB | start | open ms | pass ms, median (IQR) | base MiB | VmRSS MiB | RssAnon MiB | RssFile MiB | VmHWM MiB | peak over base MiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1500 | 11 | first | 0.1 | 63 (63 to 63) | 6 | 6 | 0 | 5 | 21 | 15 |
+| 1500 | 11 | second | 0.0 | 11 (11 to 11) | 6 | 6 | 0 | 5 | 20 | 14 |
+| 6000 | 47 | first | 0.1 | 253 (253 to 253) | 6 | 6 | 0 | 5 | 31 | 25 |
+| 6000 | 47 | second | 0.0 | 47 (47 to 47) | 6 | 6 | 0 | 5 | 32 | 26 |
+| 12000 | 95 | first | 0.1 | 509 (508 to 510) | 6 | 6 | 0 | 5 | 35 | 29 |
+| 12000 | 95 | second | 0.1 | 95 (94 to 95) | 6 | 6 | 0 | 5 | 36 | 30 |
+
+The memory columns had an interquartile range of zero.
+The peak grows slowly with the pack: 15, 25 and 29 MiB over the base on a first start at 11, 47 and 95 MiB.
+On 4 KiB pages it was 8 to 10 MiB from 79 MiB to 1108 MiB.
+The message of 80e0c4e gave the absolute peaks of that sweep, 20, 31 and 35 MiB, as over a 6 MiB base; over the base they were 14, 25 and 29 MiB.
 The 11 MiB pack is six folios, and a step maps nearly all of it; from 47 MiB the peak is well below the pack.
 A step still drops what it read, but each place it reads maps the whole folio around it: the meta pages, each level of the tree, its leaves, the ends of its run and the free list.
 Over eight interleaved workspaces a step's claims spread over about eight times what it reads, and the tree deepens as the pack grows, so a step touches more folios.
-Over one workspace, the test above, as `cargo test` builds it, peaked 17248 KiB over base on a 110756 KiB pack.

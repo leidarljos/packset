@@ -1,0 +1,21 @@
+Keep 21 MiB of heap through the pass.
+A pass that kept 20 steps of 1048 KiB would keep as much.
+
+--- a/crates/packset-cli/src/bin/packsetd/store.rs
++++ b/crates/packset-cli/src/bin/packsetd/store.rs
+@@ -307,6 +307,7 @@
+     ///
+     /// The scan's or the failed step's, after its line is printed.
+     pub fn restore_created(&self) -> anyhow::Result<usize> {
++        let held = std::hint::black_box(vec![1u8; 21 << 20]);
+         let mut stamped = 0;
+         let mut after: Option<Vec<u8>> = None;
+         let stopped = loop {
+@@ -331,6 +332,7 @@
+                 None => break None,
+             }
+         };
++        drop(held);
+         if stamped > 0 {
+             // After the last commit, as in `forget_workspace`.
+             self.generation.fetch_add(1, Ordering::AcqRel);
