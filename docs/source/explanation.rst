@@ -26,8 +26,8 @@ fifth. The lexical scores still add the fourteen-day half-life, and
 the fuse reads those scores, then scales them by retrievability.
 ``rank=relevance`` (``packset search --rank relevance``, or
 ``GET /v1/search?rank=relevance``) chooses the top k from the lexical,
-BM25 and cosine scores alone, so a lesson from January is not cut for
-a fresher lookalike that shares its words. The shipped order stays
+BM25 and cosine scores alone, so a lesson from January that scores
+above a fresher lookalike is not cut for it. The shipped order stays
 the default. ``GET /v1/status`` lists ``search.ranks``; an older writer
 omits ``search``. The panel fuses the ballots by CombMNZ
 and diversifies by maximal marginal relevance (MMR).
@@ -187,6 +187,30 @@ numbers do not compare across papers; the comparison this table supports
 is between retrievers under one reader, which is how the retrieval half of
 those systems is measured too. The interned table is
 ``docs/orgmode/results/longmemeval-s-qa.org`` in this repository.
+
+A tie goes to the newer claim
+=============================
+
+Equal scores take one order on the lexical, dense and fused paths: the
+newer first write leads, then the field (``atom``, or a card's name) and
+the id that sort first. The first write is ``ts``, which a rewrite does
+not move. A hit without one, such as a card's paragraph, comes after
+every hit that has one. Recall breaks its ties the same way, for the
+reason a seat wants: of two claims a question cannot tell apart, the
+later was written knowing the earlier. The shipped score already
+leans that way: the half-life on the lexical
+ballots lifts the newer of two equal claims, so the tie never argues
+with it. ``rank=relevance`` takes age out of the score, not out of
+the tie: an older lesson stays in that cut by scoring above the
+lookalike. The id makes the order total, so an answer does not depend
+on the order its atoms were stored in.
+
+The fuse breaks an equal vote by the order it first met the hits, and
+each ballot arrives in this order, so hits tied on every ballot leave
+the panel in it. An equal vote between hits that different ballots
+ranked goes to the ballot passed first. The ties in
+``crates/packset-core/tests/goldens.json`` hold this order across every
+path, every voter and every order the atoms are stored in.
 
 What differs in the write path
 ==============================

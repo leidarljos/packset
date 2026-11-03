@@ -765,5 +765,116 @@
     "last": "2026-01-01T00:00:00.000Z"
    }
   }
- ]
+ ],
+ "ties": {
+  "now": "2026-06-01T00:00:00.000Z",
+  "query": "lease token",
+  "vector": [
+   1.0,
+   0.0
+  ],
+  "atoms": [
+   {
+    "id": "c3",
+    "kind": "lesson",
+    "text": "The lease token is renewed by its holder.",
+    "trust": 1.0,
+    "ts": "2026-05-01T00:00:00Z",
+    "embedding": [
+     0.8,
+     0.6
+    ]
+   },
+   {
+    "id": "a1",
+    "kind": "lesson",
+    "text": "The lease token is renewed by its holder.",
+    "trust": 1.0,
+    "ts": "2026-04-01T00:00:00.000Z",
+    "embedding": [
+     0.8,
+     0.6
+    ]
+   },
+   {
+    "id": "e5",
+    "kind": "lesson",
+    "text": "The lease token is renewed by its holder.",
+    "trust": 1.0,
+    "embedding": [
+     0.8,
+     0.6
+    ]
+   },
+   {
+    "id": "z9",
+    "kind": "lesson",
+    "text": "The lease token is renewed by its holder.",
+    "trust": 2.0,
+    "ts": "2025-01-01T00:00:00.000Z",
+    "embedding": [
+     0.8,
+     0.6
+    ]
+   },
+   {
+    "id": "b2",
+    "kind": "lesson",
+    "text": "The lease token is renewed by its holder.",
+    "trust": 1.0,
+    "ts": "2026-05-01T00:00:00.000Z",
+    "embedding": [
+     0.8,
+     0.6
+    ]
+   },
+   {
+    "id": "d4",
+    "kind": "lesson",
+    "text": "The lease token is renewed by its holder.",
+    "trust": 1.0,
+    "ts": "2026-05-20T00:00:00.000Z",
+    "embedding": [
+     0.8,
+     0.6
+    ]
+   }
+  ],
+  "cases": [
+   {
+    "rank": "relevance",
+    "atoms": [
+     "c3",
+     "a1",
+     "e5",
+     "z9",
+     "b2",
+     "d4"
+    ],
+    "order": [
+     "z9",
+     "d4",
+     "b2",
+     "c3",
+     "a1",
+     "e5"
+    ]
+   },
+   {
+    "rank": "fused",
+    "atoms": [
+     "c3",
+     "a1",
+     "b2",
+     "d4"
+    ],
+    "order": [
+     "d4",
+     "b2",
+     "c3",
+     "a1"
+    ]
+   }
+  ]
+ }
 }

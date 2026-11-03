@@ -4678,12 +4678,15 @@ mod tests {
     fn relevance_returns_the_older_lesson_the_default_cuts() {
         let (_dir, svc) = service();
         // The fresh lessons share the query words and nothing else, so none
-        // is a rewrite of another. The january lesson is the short one:
-        // BM25 likes it, and the half-life still puts the fresh ones ahead.
+        // is a rewrite of another. The january lesson is the short one and
+        // is held with twice the trust: BM25 likes it, the scan puts it a
+        // tenth ahead rather than tied, and the half-life still puts the
+        // fresh ones ahead. Tied, it would go behind them as the older write.
         let old = {
             let mut row = atom("Zeta quorum kept.");
             row.insert("id".into(), json!("a-january"));
             row.insert("kind".into(), json!("lesson"));
+            row.insert("trust".into(), json!(2.0));
             row.insert("ts".into(), json!("2025-01-15T00:00:00.000Z"));
             row.insert("entities".into(), json!([]));
             row

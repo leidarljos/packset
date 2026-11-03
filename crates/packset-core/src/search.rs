@@ -17,8 +17,9 @@ pub const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 /// [`Rank::Fused`] is the shipped order: a lexical ballot adds the
 /// fourteen-day half-life, and the fuse then scales by retrievability.
 /// [`Rank::Relevance`] keeps the lexical, BM25 and cosine scores and
-/// leaves that decay off, so an older lesson that shares the question's
-/// words is not cut for a fresher lookalike.
+/// leaves that decay off, so an older lesson that scores above a fresher
+/// lookalike is not cut for it. Age leaves the score, not the tie: at an
+/// equal score the newer write still leads, as in every mode ([`Tie`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rank {
     /// Recency on the lexical ballots, then the panel's retrievability.
@@ -300,7 +301,7 @@ fn file_hits(field: &str, text: &str, qtoks: &[String], bias: f64) -> Vec<Value>
 /// survivors only. Order matches `sort_hits`.
 struct TopK<'a> {
     k: usize,
-    // A min-heap on (score, id) through `Reverse`, so the root is the weakest
+    // A min-heap on (score, tie) through `Reverse`, so the root is the weakest
     // survivor and is what a stronger candidate displaces.
     heap: std::collections::BinaryHeap<std::cmp::Reverse<Candidate<'a>>>,
 }
@@ -309,7 +310,7 @@ struct TopK<'a> {
 #[derive(Debug, Clone, Copy)]
 struct Candidate<'a> {
     score: f64,
-    id: &'a str,
+    tie: Tie<'a>,
     ordinal: usize,
 }
 
@@ -325,12 +326,12 @@ impl PartialOrd for Candidate<'_> {
     }
 }
 impl Ord for Candidate<'_> {
-    /// Greater is better: higher score, then the id that sorts first.
+    /// Greater is better: higher score, then the [`Tie`] that goes first.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.score
             .partial_cmp(&other.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| other.id.cmp(self.id))
+            .then_with(|| other.tie.order(self.tie))
             .then_with(|| other.ordinal.cmp(&self.ordinal))
     }
 }
@@ -387,30 +388,61 @@ fn atom_hit(atom: &Record, score: f64) -> Value {
     hit
 }
 
-/// The id an atom sorts by on a tie.
-fn id_of(atom: &Record) -> &str {
-    atom.get("id").and_then(Value::as_str).unwrap_or("")
+/// What two equal scores are told apart by, on the lexical, dense and
+/// fused paths alike: the newer first write (`ts`) leads, then the field
+/// and the id that sort first. Recall orders its ties the same way.
+///
+/// Newer first, because of two claims a question cannot tell apart the
+/// later was written knowing the earlier, and because the shipped score
+/// leans the same way: the lexical half-life lifts the newer of two equal
+/// claims, so the tie never runs against it. A hit with no `ts` that
+/// parses, a card's paragraph among them, follows every hit that has one.
+/// The id makes the order total, so an answer does not depend on the
+/// order its atoms were stored in.
+#[derive(Debug, Clone, Copy)]
+struct Tie<'a> {
+    ts: Option<&'a str>,
+    field: &'a str,
+    id: &'a str,
 }
 
-/// Score descending, then field, then id: a total order.
+impl<'a> Tie<'a> {
+    fn of_atom(atom: &'a Record) -> Self {
+        Self {
+            ts: atom.get("ts").and_then(Value::as_str),
+            field: "atom",
+            id: atom.get("id").and_then(Value::as_str).unwrap_or(""),
+        }
+    }
+
+    fn of_hit(hit: &'a Value) -> Self {
+        Self {
+            ts: hit["ts"].as_str(),
+            field: hit["field"].as_str().unwrap_or(""),
+            id: hit["id"].as_str().unwrap_or(""),
+        }
+    }
+
+    /// `Less` when `self` goes first.
+    fn order(self, other: Self) -> std::cmp::Ordering {
+        // Read as instants: a caller's own stamp is stored as written, and
+        // as text `00Z` sorts after `00.000Z`, the same instant.
+        let written = |ts: Option<&str>| ts.and_then(clock::parse_millis);
+        written(other.ts)
+            .cmp(&written(self.ts))
+            .then_with(|| self.field.cmp(other.field))
+            .then_with(|| self.id.cmp(other.id))
+    }
+}
+
+/// Score descending, then [`Tie`]: a total order.
 fn sort_hits(hits: &mut [Value]) {
     hits.sort_by(|a, b| {
         let sa = a["score"].as_f64().unwrap_or(0.0);
         let sb = b["score"].as_f64().unwrap_or(0.0);
         sb.partial_cmp(&sa)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                a["field"]
-                    .as_str()
-                    .unwrap_or("")
-                    .cmp(b["field"].as_str().unwrap_or(""))
-            })
-            .then_with(|| {
-                a["id"]
-                    .as_str()
-                    .unwrap_or("")
-                    .cmp(b["id"].as_str().unwrap_or(""))
-            })
+            .then_with(|| Tie::of_hit(a).order(Tie::of_hit(b)))
     });
 }
 
@@ -528,7 +560,7 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
                 + 0.1 * trust_of(atom)
                 + age_weight(ts, now, rank)
                 + if due { 2.0 } else { 0.0 },
-            id: id_of(atom),
+            tie: Tie::of_atom(atom),
             ordinal,
         });
     }
@@ -633,7 +665,18 @@ pub fn search_bm25_expanded<R: Borrow<Record>>(
         return Vec::new();
     }
     let mut first = index.score(&qtoks);
-    first.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let tie = |ordinal: usize| {
+        ask.atoms
+            .get(ordinal)
+            .map(|atom| Tie::of_atom(atom.borrow()))
+    };
+    first.sort_by(|a, b| {
+        b.1.total_cmp(&a.1).then_with(|| {
+            tie(a.0)
+                .zip(tie(b.0))
+                .map_or(std::cmp::Ordering::Equal, |(x, y)| x.order(y))
+        })
+    });
     first.truncate(RM3_DOCS);
     let feedback: Vec<(&[String], f64)> = first
         .iter()
@@ -706,7 +749,7 @@ fn bm25_hits<R: Borrow<Record>>(
         let ts = atom.get("ts").and_then(Value::as_str);
         best.offer(Candidate {
             score: relevance + 0.1 * trust_of(atom) + age_weight(ts, now, rank),
-            id: id_of(atom),
+            tie: Tie::of_atom(atom),
             ordinal,
         });
     }
@@ -855,7 +898,7 @@ pub fn search_dense_at<R: Borrow<Record>>(
         // usual distance between the first cosine and the fifth.
         best.offer(Candidate {
             score: relevance + 0.1 * trust_of(atom),
-            id: id_of(atom),
+            tie: Tie::of_atom(atom),
             ordinal,
         });
     }
@@ -927,18 +970,7 @@ pub fn due_hits<R: Borrow<Record>>(atoms: &[R], set: Option<&str>, now: &str) ->
             })
         })
         .collect();
-    hits.sort_by(|a, b| {
-        let sa = a["score"].as_f64().unwrap_or(0.0);
-        let sb = b["score"].as_f64().unwrap_or(0.0);
-        sb.partial_cmp(&sa)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                a["id"]
-                    .as_str()
-                    .unwrap_or("")
-                    .cmp(b["id"].as_str().unwrap_or(""))
-            })
-    });
+    sort_hits(&mut hits);
     hits
 }
 
@@ -1163,19 +1195,30 @@ mod tests {
         assert!(!fresh.is_empty());
     }
 
-    /// The bounded heap gives the list the full sort gives, ties included.
+    /// The bounded heap gives the list the full sort gives, ties included:
+    /// written times in both stamp forms, and none at all.
     #[test]
     fn the_bounded_heap_agrees_with_the_full_sort() {
+        let stamps = [
+            None,
+            Some("2026-03-01T00:00:00.000Z"),
+            Some("2026-03-01T00:00:00Z"),
+            Some("2026-02-01T00:00:00.000Z"),
+        ];
         let atoms: Vec<Record> = (0..200)
             .map(|n| {
-                json!({
+                let mut atom = json!({
                     "id": format!("atom-{:03}", (n * 37) % 200),
                     "kind": "conclusion",
                     "text": "lease token holder",
                 })
                 .as_object()
                 .expect("object")
-                .clone()
+                .clone();
+                if let Some(ts) = stamps[n % stamps.len()] {
+                    atom.insert("ts".into(), json!(ts));
+                }
+                atom
             })
             .collect();
         // Scores with plenty of ties, and a few negatives that must lose.
@@ -1185,7 +1228,7 @@ mod tests {
             for (ordinal, atom) in atoms.iter().enumerate() {
                 best.offer(Candidate {
                     score: score_of(ordinal),
-                    id: id_of(atom),
+                    tie: Tie::of_atom(atom),
                     ordinal,
                 });
             }
@@ -1605,9 +1648,11 @@ mod tests {
     }
 
     /// Twenty-four fresh lessons and one from January, all sharing the
-    /// query words. The half-life puts the fresh ones in the top k. Relevance
-    /// mode keeps the older lesson, which ties them on the words and sorts
-    /// first by id.
+    /// query words. The January lesson is held with twice the trust, a
+    /// tenth of a point ahead of them; the half-life lifts the fresh ones by
+    /// a whole point and puts them in the top k. Relevance mode leaves age
+    /// out of the score and keeps the older lesson first. Without that
+    /// tenth it ties them, and a tie goes to the newer write in either mode.
     #[test]
     fn relevance_keeps_an_older_lesson_the_half_life_cuts() {
         let now = "2026-10-22T00:00:00.000Z";
@@ -1615,6 +1660,7 @@ mod tests {
             "id": "a-january",
             "text": "zeta quorum kept january borda lesson intact here",
             "kind": "lesson",
+            "trust": 2.0,
             "ts": "2025-01-15T00:00:00.000Z",
         }))];
         for i in 0..24 {
@@ -1622,6 +1668,7 @@ mod tests {
                 "id": format!("f-{i:02}"),
                 "text": format!("zeta quorum note{i:02} willow cedar maple birch pine"),
                 "kind": "lesson",
+                "trust": 1.0,
                 "ts": now,
             })));
         }
@@ -1640,6 +1687,37 @@ mod tests {
         let rel_ids = hit_ids(&rel);
         assert_eq!(rel_ids.len(), 20, "{rel_ids:?}");
         assert_eq!(rel_ids[0], "a-january", "{rel_ids:?}");
+    }
+
+    /// The expansion learns its words from the first pass's best
+    /// [`RM3_DOCS`]. Fourteen atoms tie on the question, so which of them it
+    /// learns from must not depend on the order they were stored in.
+    #[test]
+    fn the_expansion_does_not_depend_on_the_order_atoms_were_stored_in() {
+        let atoms: Vec<Record> = (0..14)
+            .map(|n| {
+                atom(json!({
+                    "id": format!("atom-{n:02}"),
+                    "kind": "lesson",
+                    "text": format!("lease token mark{n:02}"),
+                    "ts": NOW,
+                }))
+            })
+            .collect();
+        let expanded = |atoms: &[Record]| -> Vec<String> {
+            let documents: Vec<Vec<String>> = atoms.iter().map(atom_tokens).collect();
+            let index = crate::bm25::Index::build(documents.iter().map(Vec::as_slice));
+            let asked = ask("", "", atoms, "lease token", atoms.len(), None);
+            hit_ids(&search_bm25_expanded(&asked, &index, &documents))
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        let stored = expanded(&atoms);
+        assert_eq!(stored.len(), 14, "{stored:?}");
+        let mut reversed = atoms.clone();
+        reversed.reverse();
+        assert_eq!(expanded(&reversed), stored);
     }
 
     fn hit_ids(hits: &[Value]) -> Vec<&str> {
@@ -1683,7 +1761,10 @@ fn ballot_keys(hits: &[Value]) -> Vec<String> {
 const RRF_K0: usize = 60;
 
 /// Run the named voter; a key's weight is its position, since the voters
-/// share no score scale. Ties keep first-seen order.
+/// share no score scale. Ties keep first-seen order. Each ballot arrives
+/// in [`Tie`] order, so hits tied on every ballot leave in it; an equal
+/// vote between hits that different ballots ranked goes to the ballot
+/// passed first.
 fn fuse_scores(
     fuse: crate::panel::Fuse,
     ballots: &[Vec<String>],

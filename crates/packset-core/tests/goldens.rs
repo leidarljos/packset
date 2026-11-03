@@ -2,9 +2,11 @@
 //!
 //! `goldens.json` is checked-in data rather than generated output: it fixes
 //! which records the writer stores, which it refuses, and the exact words it
-//! refuses them with. Read a diff here as a change in what the daemon accepts,
-//! not as a test being updated to match the code.
+//! refuses them with, and the order a search gives equal scores. Read a diff
+//! here as a change in what the daemon accepts or answers, not as a test
+//! being updated to match the code.
 
+use packset_core::search::{self, Ask, Rank, Record};
 use serde_json::Value;
 
 fn goldens() -> Value {
@@ -276,6 +278,112 @@ fn claim_extraction_matches_the_corpus() {
                 );
             }
             None => assert!(got.is_none(), "{line:?} should not be a claim"),
+        }
+    }
+}
+
+/// Every voter the panel answers to.
+const FUSES: [&str; 9] = [
+    "borda", "rrf", "combsum", "combmnz", "dowdall", "kemeny", "schulze", "copeland", "tideman",
+];
+
+/// Every rotation of `atoms` and of its reverse: each atom stored first,
+/// last and in between, with no seed to report.
+fn storage_orders(atoms: &[Record]) -> Vec<Vec<Record>> {
+    let mut reversed = atoms.to_vec();
+    reversed.reverse();
+    let mut orders = Vec::new();
+    for base in [atoms.to_vec(), reversed] {
+        for shift in 0..base.len() {
+            let mut turned = base.clone();
+            turned.rotate_left(shift);
+            orders.push(turned);
+        }
+    }
+    orders
+}
+
+fn hit_ids(hits: &[Value]) -> Vec<&str> {
+    hits.iter().filter_map(|hit| hit["id"].as_str()).collect()
+}
+
+/// Equal scores take one order on every path: the newer first write, then
+/// the id. Each case is searched by the scan, BM25, the dense ballot and
+/// every voter's fuse of the three, over its atoms in every storage order,
+/// cut at every k.
+#[test]
+fn tie_order_matches_the_corpus() {
+    let all = goldens();
+    let ties = &all["ties"];
+    let now = ties["now"].as_str().unwrap();
+    let query = ties["query"].as_str().unwrap();
+    let vector: Vec<f32> = ties["vector"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    let atom = |id: &Value| -> Record {
+        ties["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == *id)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("no atom {id}"))
+            .clone()
+    };
+    for case in ties["cases"].as_array().unwrap() {
+        let rank = Rank::parse(case["rank"].as_str()).unwrap();
+        let want: Vec<&str> = case["order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let atoms: Vec<Record> = case["atoms"].as_array().unwrap().iter().map(atom).collect();
+        for stored in storage_orders(&atoms) {
+            let shown: Vec<&str> = stored
+                .iter()
+                .filter_map(|a| a.get("id").and_then(Value::as_str))
+                .collect();
+            let documents: Vec<Vec<String>> = stored.iter().map(search::atom_tokens).collect();
+            let index = packset_core::bm25::Index::build(documents.iter().map(Vec::as_slice));
+            for k in 1..=stored.len() {
+                let ask = Ask {
+                    user: "",
+                    memory: "",
+                    atoms: &stored,
+                    query,
+                    limit: k,
+                    set: None,
+                    kind: None,
+                    now,
+                };
+                let ballots = vec![
+                    search::search_linear_with_ranked(&ask, &documents, rank),
+                    search::search_bm25_ranked(&ask, &index, rank),
+                    search::search_dense(&ask, &vector),
+                ];
+                for (path, hits) in ["scan", "bm25", "dense"].iter().zip(&ballots) {
+                    assert_eq!(
+                        hit_ids(hits),
+                        want[..k],
+                        "{path}, rank {}, k {k}, stored {shown:?}",
+                        rank.as_str()
+                    );
+                }
+                for fuse in FUSES {
+                    let panel = packset_core::panel::Panel::parse(fuse, "mmr").unwrap();
+                    let fused = search::merge_ballots_ranked(&ballots, k, &panel, now, rank);
+                    assert_eq!(
+                        hit_ids(&fused),
+                        want[..k],
+                        "{fuse}, rank {}, k {k}, stored {shown:?}",
+                        rank.as_str()
+                    );
+                }
+            }
         }
     }
 }
