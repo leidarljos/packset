@@ -429,6 +429,19 @@ struct WorkspaceLive {
     sets: HashMap<SetGroup, SetLive>,
     /// The set each live id sits in.
     place: HashMap<String, SetGroup>,
+    /// Soonest `valid_to` that can still drop a claim, when any indexed
+    /// claim has one still open.
+    ///
+    /// A write walks the set only once `now` reaches this stamp. Walking
+    /// every member on every write took 2.60 ms of the snapshot stage at
+    /// 20,000 claims, against 0.00 ms with no walk
+    /// (`measurements/ljos-11jv/notes.txt`). A claim still shown after its
+    /// `valid_to` is on the review clock, and that clock does not drop it
+    /// later, so a stamp that has passed is not kept here.
+    earliest_expiry: Option<String>,
+    /// The claim that held [`Self::earliest_expiry`] left, or its stamp
+    /// moved later. The next write walks once and stores the new soonest.
+    expiry_dirty: bool,
 }
 
 impl WorkspaceLive {
@@ -460,16 +473,27 @@ impl WorkspaceLive {
         let Some(id) = atom.get("id").and_then(Value::as_str) else {
             return;
         };
+        let previous = self.indexed_valid_to(id);
         let group = Self::group_of(atom);
         let members = self.sets.entry(group.clone()).or_default();
         let shared = Arc::new(atom.clone());
         if let Some(&i) = members.at.get(id) {
             members.order[i] = shared;
-            return;
+        } else {
+            members.at.insert(id.to_string(), members.order.len());
+            members.order.push(shared);
+            self.place.insert(id.to_string(), group);
         }
-        members.at.insert(id.to_string(), members.order.len());
-        members.order.push(shared);
-        self.place.insert(id.to_string(), group);
+        if let Some(until) = Self::valid_to_of(atom) {
+            self.consider_expiry(until);
+        }
+        if let Some(old) = previous {
+            if Self::valid_to_of(atom) != Some(old.as_str())
+                && self.earliest_expiry.as_deref() == Some(old.as_str())
+            {
+                self.expiry_dirty = true;
+            }
+        }
     }
 
     fn upsert_written(&mut self, mut record: Record, now: &str) {
@@ -483,6 +507,8 @@ impl WorkspaceLive {
         // The snapshot parks the vector. Dedupe reads the text, and a second
         // copy of the floats would sit beside the store's.
         record.remove("embedding");
+        let new_until = Self::valid_to_of(&record).map(str::to_string);
+        let previous = self.indexed_valid_to(&id);
         let group = Self::group_of(&record);
         if self.place.get(&id).is_some_and(|old| old != &group) {
             self.remove_id(&id);
@@ -491,14 +517,27 @@ impl WorkspaceLive {
         let shared = Arc::new(record);
         if let Some(&i) = members.at.get(&id) {
             members.order[i] = shared;
-            return;
+        } else {
+            members.at.insert(id.clone(), members.order.len());
+            members.order.push(shared);
+            self.place.insert(id, group);
         }
-        members.at.insert(id.clone(), members.order.len());
-        members.order.push(shared);
-        self.place.insert(id, group);
+        if let Some(until) = new_until.as_deref() {
+            self.consider_expiry(until);
+        }
+        // The soonest stamp moved later, or left this claim. The cache still
+        // names it, so the next write walks and stores the new soonest.
+        if let Some(old) = previous {
+            if new_until.as_deref() != Some(old.as_str())
+                && self.earliest_expiry.as_deref() == Some(old.as_str())
+            {
+                self.expiry_dirty = true;
+            }
+        }
     }
 
     fn remove_id(&mut self, id: &str) {
+        let held = self.indexed_valid_to(id);
         let Some(group) = self.place.remove(id) else {
             return;
         };
@@ -507,6 +546,36 @@ impl WorkspaceLive {
             if members.order.is_empty() {
                 self.sets.remove(&group);
             }
+        }
+        if let Some(until) = held {
+            if self.earliest_expiry.as_deref() == Some(until.as_str()) {
+                self.expiry_dirty = true;
+            }
+        }
+    }
+
+    /// `valid_to` as the live check reads it: a missing or empty stamp does
+    /// not close the window.
+    fn valid_to_of(atom: &Record) -> Option<&str> {
+        match atom.get("valid_to") {
+            Some(Value::String(stamp)) if !stamp.is_empty() => Some(stamp.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The indexed claim's `valid_to`, when it has one.
+    fn indexed_valid_to(&self, id: &str) -> Option<String> {
+        let group = self.place.get(id)?;
+        let members = self.sets.get(group)?;
+        let &i = members.at.get(id)?;
+        Self::valid_to_of(&members.order[i]).map(str::to_string)
+    }
+
+    /// Lower the cached stamp when `until` closes sooner than it.
+    fn consider_expiry(&mut self, until: &str) {
+        match self.earliest_expiry.as_deref() {
+            Some(have) if until >= have => {}
+            _ => self.earliest_expiry = Some(until.to_string()),
         }
     }
 
@@ -551,20 +620,44 @@ impl WorkspaceLive {
     /// It drops what a rebuilt snapshot would, and cuts links that named
     /// a claim that left.
     fn prune_expired(&mut self, now: &str) {
-        let stale: Vec<String> = self
-            .sets
-            .values()
-            .flat_map(|members| members.order.iter())
-            .filter(|rec| !Self::shown(rec, now))
-            .filter_map(|rec| rec.get("id").and_then(Value::as_str).map(str::to_string))
-            .collect();
-        if stale.is_empty() {
+        // `valid_to` is exclusive, the same comparison as `atom::is_live`:
+        // the window is still open while the stamp is greater than `now`.
+        let due = self.expiry_dirty
+            || self
+                .earliest_expiry
+                .as_deref()
+                .is_some_and(|until| until <= now);
+        if !due {
             return;
         }
-        for id in &stale {
-            self.remove_id(id);
+        let mut stale: Vec<String> = Vec::new();
+        let mut soonest: Option<String> = None;
+        for rec in self.sets.values().flat_map(|members| members.order.iter()) {
+            if !Self::shown(rec, now) {
+                if let Some(id) = rec.get("id").and_then(Value::as_str) {
+                    stale.push(id.to_string());
+                }
+                continue;
+            }
+            let Some(until) = Self::valid_to_of(rec) else {
+                continue;
+            };
+            if until <= now {
+                continue;
+            }
+            match soonest.as_deref() {
+                Some(have) if until >= have => {}
+                _ => soonest = Some(until.to_string()),
+            }
         }
-        self.cut_every_link();
+        if !stale.is_empty() {
+            for id in &stale {
+                self.remove_id(id);
+            }
+            self.cut_every_link();
+        }
+        self.earliest_expiry = soonest;
+        self.expiry_dirty = false;
     }
 }
 
@@ -4104,6 +4197,84 @@ mod tests {
         assert_eq!(status["live"], json!(2), "{status}");
         assert_eq!(status["expired"], json!(1), "{status}");
         assert_eq!(status["tombstone"], json!(0), "{status}");
+    }
+
+    /// Writes while the window is open keep the claim. Once `valid_to` has
+    /// passed, the same words are stored again.
+    #[test]
+    fn a_claim_is_kept_until_its_window_closes_and_then_stored_again() {
+        // The same one-second window as the cap test above. `clock::shift`
+        // moves by whole seconds, and the bound is that window plus one
+        // more second, in the millisecond unit `parse_millis` returns.
+        const OPEN_S: i64 = 1;
+        const MILLIS_PER_SEC: i64 = 1000;
+        let (_dir, svc) = service();
+        let text = "The same words come back once the window has closed.";
+        let until = clock::shift(&clock::utcnow(), OPEN_S).expect("valid_to");
+        let mut expiring = atom(text);
+        expiring.insert("valid_to".into(), json!(until));
+        let first = svc.add(expiring).unwrap();
+        let first_id = first["id"].as_str().unwrap().to_string();
+        let due = first["due_at"].as_str().unwrap();
+        assert!(
+            due > until.as_str(),
+            "a due claim stays indexed after valid_to: due {due}, until {until}"
+        );
+
+        let other = svc
+            .add(atom("A second claim is written while the window is open."))
+            .unwrap();
+        let other_id = other["id"].as_str().unwrap().to_string();
+        let early = svc.add(atom(text)).unwrap();
+        assert_eq!(
+            early["id"].as_str().unwrap(),
+            first_id.as_str(),
+            "the open window was treated as closed: {early:?}"
+        );
+
+        let left_ms =
+            clock::parse_millis(&until).unwrap() - clock::parse_millis(&clock::utcnow()).unwrap();
+        assert!(left_ms > 0, "the window closed while the claim was stored");
+        let past_end_ms = left_ms + 1;
+        let bound_ms = (OPEN_S + 1) * MILLIS_PER_SEC;
+        assert!(
+            past_end_ms <= bound_ms,
+            "remaining wait {past_end_ms} ms is not the one-second window"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(past_end_ms as u64));
+        assert!(
+            clock::utcnow().as_str() >= until.as_str(),
+            "still inside the window"
+        );
+
+        let again = svc.add(atom(text)).unwrap();
+        assert_ne!(
+            again["id"].as_str().unwrap(),
+            first_id.as_str(),
+            "the expired claim was returned as the live copy: {again:?}"
+        );
+        assert!(
+            record::is_live(&again, &clock::utcnow()),
+            "the new claim is not live: {again:?}"
+        );
+        let kept = svc.store().get("w", &other_id).unwrap().unwrap();
+        assert!(
+            record::is_live(&kept, &clock::utcnow()),
+            "the other claim left with the expired one: {kept:?}"
+        );
+        let copies: Vec<_> = svc
+            .store()
+            .scan(Some("w"))
+            .unwrap()
+            .into_iter()
+            .filter(|peer| peer.get("text").and_then(Value::as_str) == Some(text))
+            .collect();
+        assert_eq!(copies.len(), 2, "the repeat was not stored: {copies:?}");
+        let live_copies = copies
+            .iter()
+            .filter(|peer| record::is_live(peer, &clock::utcnow()))
+            .count();
+        assert_eq!(live_copies, 1, "{copies:?}");
     }
 
     /// A lesson a seat wrote a year ago and nobody asked for since, with a

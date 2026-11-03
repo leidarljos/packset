@@ -1,0 +1,2 @@
+20k-parent-tmpfs|/tmp/ljos11jv-bins/parent/packsetd|/dev/shm/ljos11jv-seed/20000|/dev/shm/ljos11jv|8791
+20k-develop-tmpfs|/tmp/ljos11jv-bins/develop/packsetd|/dev/shm/ljos11jv-seed/20000|/dev/shm/ljos11jv|8791

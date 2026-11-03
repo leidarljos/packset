@@ -1,0 +1,133 @@
+What a write spends dropping claims whose window has closed, once a workspace already holds 20,000 live claims.
+The writer keeps the soonest `valid_to` in the workspace and walks the live set only once that stamp has passed.
+Before that, every write walked every live claim under the lock. The walk is the snapshot stage: it runs before that stage is marked.
+
+## Where these runs happened
+
+Every run was one Kernel-based Virtual Machine guest: Intel(R) Xeon(R) Processor, family 6 model 207 stepping 2, 8 cores, one thread a core, 2400.000 MHz, BogoMIPS 4800.00, CPU only.
+`/proc/cpuinfo` reports `cpu MHz` 2400.000 on every core. There is no `cpufreq` directory. The flags include `constant_tsc` and `tsc_known_freq`.
+The guest ran Linux 6.12.94+ and rustc 1.97.1 (8bab26f4f 2026-07-14).
+Tmpfs runs used `/dev/shm`, mounted `rw,nosuid,nodev`. `findmnt` also prints a second tmpfs on the same target, `rw,nosuid,nodev,noexec,relatime`, so each log header has that second line under the filesystem line.
+
+The parent binary is `packsetd` 0.17.3 (e8e3513f), built from e8e3513fbd3a94faae2f39785dfba616bd1aec2d, the parent of c3f08fbcbb6097efa21f8536b8c1c56b203c0517.
+The develop binary is `packsetd` 0.17.3 (3f9ba044), built from 3f9ba044fc6d4fdd77a9109a80525aaf12878464.
+The lane binary is `packsetd` 0.17.3 (3f9ba044+), built from the sources in this commit while the tree was still dirty, which is why the version line carries the `+`.
+All three were release builds. The probe starts each with `--no-embed`.
+
+The raw logs are the `*.log` files under `walk/` and `cached/`. Each header names the draw, the start time, the binary, the seed, the kernel, the CPU and the filesystem.
+`measurements/jo0g/summary.py` reports pooled writes and per-draw medians, each with its interquartile range.
+Quartiles are `statistics.quantiles(n=4, method="inclusive")`. The median is the upper one, `xs[len//2]`.
+
+## How a draw was made
+
+One seed pack of 20,000 live lessons in the workspace `shared` was written by the parent binary.
+The seed command was `python3 measurements/jo0g/drive.py seed /tmp/ljos11jv-bins/parent/packsetd /dev/shm/ljos11jv-seed/20000 20000 8791`, from 2026-11-03T12:13:21Z to 2026-11-03T12:24:17Z.
+Every draw copied that pack and posted 48 new lessons into the copy, in a fresh `packsetd` process.
+`PACKSET_LIVE_CAP` was 20,048, the default cap of 20,000 plus those 48, as `measurements/jo0g/drive.py` sets it.
+Six draws of each condition, odd draws in the order of `conditions.txt` and even draws in reverse.
+The walk session ran `measurements/jo0g/run.sh measurements/ljos-11jv/walk/conditions.txt 6` from 2026-11-03T12:24:54Z to 2026-11-03T12:25:19Z.
+The cached session ran `measurements/jo0g/run.sh measurements/ljos-11jv/cached/conditions.txt 6` from 2026-11-03T12:30:15Z to 2026-11-03T12:30:53Z.
+Every probe exited 0.
+
+The first write of a process copies the live claims into the set index. That write is one of the 48. The median of those six first writes, snapshot then total, was 110.20 ms and 312.00 ms on the walk parent, 113.10 ms and 315.10 ms on the walk develop, 114.50 ms and 318.10 ms on the cached parent, 114.90 ms and 317.00 ms on the cached develop, and 111.60 ms and 325.90 ms on the lane writer. The medians below are of all 288 traced writes. That first write is the maximum, so it does not move the median.
+
+## Walk session
+
+Parent is the tree before the expiry walk. Develop walks every live claim on every write.
+
+| side | snapshot ms | total ms | writes/s |
+| --- | --- | --- | --- |
+| parent | 0.00 (0.00 to 0.00) | 35.00 (10.80 to 36.90) | 24.5 (24.2 to 24.7) |
+| develop | 2.60 (2.50 to 2.70) | 37.30 (13.38 to 39.12) | 23.1 (22.9 to 23.3) |
+
+Draw medians of the snapshot stage: parent 0.00 (0.00 to 0.00), develop 2.50 (2.50 to 2.65), six draws each.
+The later 282 writes, leaving out each draw's first, give the same snapshot medians: parent 0.00 (0.00 to 0.00), develop 2.60 (2.50 to 2.70).
+Dedup stayed with the pack, parent 10.60 (2.20 to 12.62) and develop 10.80 (2.20 to 12.70). The added time is the snapshot stage.
+
+## Cached session
+
+The same harness, with the lane binary added. Parent and develop are the binaries from the walk session. Lane keeps the soonest `valid_to` and skips the walk while that stamp is still open. The seed claims have no `valid_to`, so the lane writer does not walk.
+
+| side | snapshot ms | total ms | writes/s |
+| --- | --- | --- | --- |
+| parent | 0.00 (0.00 to 0.00) | 34.50 (10.80 to 35.90) | 24.7 (24.3 to 25.0) |
+| develop | 2.70 (2.50 to 2.80) | 37.10 (13.60 to 39.00) | 23.4 (22.8 to 23.6) |
+| lane | 0.00 (0.00 to 0.00) | 34.70 (11.10 to 36.20) | 24.6 (24.2 to 24.6) |
+
+Draw medians of the snapshot stage: parent 0.00 (0.00 to 0.00), develop 2.70 (2.52 to 2.70), lane 0.00 (0.00 to 0.00).
+The later 282 writes give the same snapshot medians: parent 0.00 (0.00 to 0.00), develop 2.70 (2.50 to 2.80), lane 0.00 (0.00 to 0.00).
+
+## summary.py
+
+```
+20k-develop-tmpfs  draws=6
+  write_req_s  median 23.1  IQR 22.9..23.3
+  writes 288
+  total      median   37.30  IQR 13.38..39.12  draw-median   37.80  IQR 36.92..38.25  n=6
+  prepare    median    0.10  IQR 0.00..0.10  draw-median    0.10  IQR 0.10..0.10  n=6
+  snapshot   median    2.60  IQR 2.50..2.70  draw-median    2.50  IQR 2.50..2.65  n=6
+  dedup      median   10.80  IQR 2.20..12.70  draw-median   10.80  IQR 10.80..11.02  n=6
+  replace    median   15.60  IQR 0.00..16.10  draw-median   15.70  IQR 15.55..16.00  n=6
+  links      median    0.20  IQR 0.00..0.30  draw-median    0.20  IQR 0.20..0.20  n=6
+  upsert     median    7.80  IQR 7.50..8.10  draw-median    7.80  IQR 7.62..7.88  n=6
+  project    median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  cap        median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+
+20k-parent-tmpfs  draws=6
+  write_req_s  median 24.5  IQR 24.2..24.7
+  writes 288
+  total      median   35.00  IQR 10.80..36.90  draw-median   35.00  IQR 34.78..35.15  n=6
+  prepare    median    0.00  IQR 0.00..0.10  draw-median    0.00  IQR 0.00..0.00  n=6
+  snapshot   median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  dedup      median   10.60  IQR 2.20..12.62  draw-median   10.70  IQR 10.60..10.78  n=6
+  replace    median   16.00  IQR 0.00..16.30  draw-median   16.10  IQR 15.95..16.10  n=6
+  links      median    0.20  IQR 0.00..0.20  draw-median    0.20  IQR 0.20..0.20  n=6
+  upsert     median    7.90  IQR 7.60..8.20  draw-median    7.90  IQR 7.73..7.97  n=6
+  project    median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  cap        median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+```
+
+`python3 measurements/jo0g/summary.py measurements/ljos-11jv/walk` printed that.
+
+```
+20k-develop-tmpfs  draws=6
+  write_req_s  median 23.4  IQR 22.8..23.6
+  writes 288
+  total      median   37.10  IQR 13.60..39.00  draw-median   37.80  IQR 36.52..38.17  n=6
+  prepare    median    0.10  IQR 0.00..0.10  draw-median    0.10  IQR 0.10..0.10  n=6
+  snapshot   median    2.70  IQR 2.50..2.80  draw-median    2.70  IQR 2.52..2.70  n=6
+  dedup      median   10.70  IQR 2.30..12.30  draw-median   10.80  IQR 10.40..10.95  n=6
+  replace    median   15.60  IQR 0.00..16.00  draw-median   15.90  IQR 15.50..15.90  n=6
+  links      median    0.20  IQR 0.00..0.23  draw-median    0.20  IQR 0.20..0.20  n=6
+  upsert     median    7.80  IQR 7.47..8.10  draw-median    7.90  IQR 7.55..7.97  n=6
+  project    median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  cap        median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+
+20k-lane-tmpfs  draws=6
+  write_req_s  median 24.6  IQR 24.2..24.6
+  writes 288
+  total      median   34.70  IQR 11.10..36.20  draw-median   35.00  IQR 34.12..35.30  n=6
+  prepare    median    0.10  IQR 0.10..0.10  draw-median    0.10  IQR 0.10..0.10  n=6
+  snapshot   median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  dedup      median   10.60  IQR 2.30..12.40  draw-median   10.50  IQR 10.35..10.65  n=6
+  replace    median   15.60  IQR 0.00..15.90  draw-median   15.70  IQR 15.60..15.78  n=6
+  links      median    0.20  IQR 0.00..0.20  draw-median    0.20  IQR 0.20..0.20  n=6
+  upsert     median    8.00  IQR 7.70..8.30  draw-median    8.00  IQR 7.93..8.07  n=6
+  project    median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  cap        median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+
+20k-parent-tmpfs  draws=6
+  write_req_s  median 24.7  IQR 24.3..25.0
+  writes 288
+  total      median   34.50  IQR 10.80..35.90  draw-median   34.10  IQR 33.75..34.77  n=6
+  prepare    median    0.00  IQR 0.00..0.10  draw-median    0.00  IQR 0.00..0.00  n=6
+  snapshot   median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  dedup      median   10.40  IQR 2.20..12.10  draw-median   10.20  IQR 10.10..10.50  n=6
+  replace    median   15.80  IQR 0.00..16.20  draw-median   15.80  IQR 15.72..16.03  n=6
+  links      median    0.20  IQR 0.00..0.23  draw-median    0.20  IQR 0.20..0.20  n=6
+  upsert     median    7.80  IQR 7.40..8.20  draw-median    7.70  IQR 7.55..8.00  n=6
+  project    median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+  cap        median    0.00  IQR 0.00..0.00  draw-median    0.00  IQR 0.00..0.00  n=6
+```
+
+`python3 measurements/jo0g/summary.py measurements/ljos-11jv/cached` printed that.
