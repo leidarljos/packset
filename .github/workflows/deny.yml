@@ -1,0 +1,51 @@
+name: deny
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # An advisory is published against a crate, not a commit, so a lock file
+  # that passed can fail a week later with nothing changed. Mondays 06:00 UTC.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    name: cargo deny check ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # A scheduled run starts on the default branch only, so it checks out
+      # both branches a release can come from. An empty ref is the event's.
+      matrix:
+        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "develop"]') || fromJSON('[""]') }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      # 0.20.2 is the cargo-deny the Docker action ran. Built from source
+      # here, so the job does not pull an image from Docker Hub.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: deny
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.20.2-${{ runner.os }}-${{ runner.arch }}
+      - name: Build cargo-deny 0.20.2 from source
+        if: steps.deny.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-deny --version 0.20.2
+      # Advisories, bans, licenses and sources. The advisory database is
+      # fetched fresh each run.
+      - name: cargo deny check
+        run: cargo deny check

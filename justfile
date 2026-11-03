@@ -4,6 +4,7 @@ root := justfile_directory()
 check:
     cargo fmt --all --check
     cargo clippy --locked --workspace --exclude packset-milli --exclude packset-embed --all-targets -- -D warnings
+    for crate in packset-core packset-client packset-daemon packset; do cargo clippy --locked -p "$crate" --all-targets -- -D warnings || exit 1; done
     cargo test --locked --workspace --exclude packset-milli --exclude packset-embed --no-fail-fast
 
 # What a pack costs as it grows, and the shape of the graph inside it.
