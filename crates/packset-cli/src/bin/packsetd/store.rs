@@ -3238,78 +3238,112 @@ mod tests {
     }
 
     /// How many times its bound the pack in
-    /// [`a_start_holds_one_step_not_the_pack`] is. A start that keeps what
-    /// it reads peaks at about the pack (799 MiB over 791 MiB in
-    /// `measurements/start.txt`), so it fails by three bounds, and a start
-    /// that kept a quarter of what it read would fail too.
+    /// [`a_start_holds_one_step_not_the_pack`] is written to.
+    /// The smallest retention the bound catches is its headroom: the bound less what a correct start peaks at.
+    /// Such a start peaks above its base, so the headroom is under one bound.
+    /// On twice the bound, a pass that keeps what it reads ends more than a headroom past the bound.
+    /// If a pass keeps one headroom more than it should, the pack still has that much left for it to keep, past the two steps that are live.
     #[cfg(target_os = "linux")]
-    const PACK_OVER_BOUND: usize = 4;
-
-    /// The kernel's `fault_around_bytes` when it cannot be read: the
-    /// default in mm/memory.c. It is in debugfs, which only root reads.
-    #[cfg(target_os = "linux")]
-    const FAULT_AROUND_DEFAULT: usize = 64 * 1024;
+    const PACK_OVER_BOUND: usize = 2;
 
     /// What glibc keeps of freed heap at the top before it gives it back:
-    /// the default `M_TRIM_THRESHOLD` in mallopt(3).
+    /// the default `M_TRIM_THRESHOLD` in mallopt(3). glibc has no call that reads the live value.
+    /// Freeing a mapped chunk raises it to twice that chunk (the dynamic mmap threshold in mallopt(3)).
+    /// That happened in `measurements/start.txt` when the Lightning Memory-Mapped Database (LMDB) freed its 2 MiB dirty list.
+    /// The start child sets it with `mallopt`, which turns that off, so it is this value through the pass.
     #[cfg(target_os = "linux")]
     const TRIM_THRESHOLD: usize = 128 * 1024;
 
     /// A start over a pack [`PACK_OVER_BOUND`] times [`start_bound`] peaks
     /// under that bound, whether its pass stamps every claim or none. The
-    /// bound is for the most the kernel maps on one fault on this host,
-    /// from [`fault_unit`], and the pack is written until it is that many
-    /// times its own bound. Its claims are in one workspace, written in key
-    /// order, so the records of a step lie in one run of the file.
-    #[cfg(target_os = "linux")]
+    /// bound is for the most one fault mapped of the pack on this host, from [`fault_unit`], measured again before each start, since the pass rewrites the pack.
+    /// Its claims are in one workspace, written in key order, so the records of a step lie in one run of the file.
+    ///
+    /// Linux only: it reads `/proc/self/status`, `/proc/self/smaps`, `/proc/self/mountinfo` and the `transparent_hugepage` files in sysfs, and resets the peak through `/proc/self/clear_refs`.
+    /// macOS has none of them, and its footprint leaves out clean file pages, which are what this test counts.
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "Linux only: reads /proc/self/status, /proc/self/smaps and sysfs, which macOS does not have"
+    )]
     fn a_start_holds_one_step_not_the_pack() {
+        #[cfg(target_os = "linux")]
+        start_holds_one_step();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_holds_one_step() {
         if let Some(home) = std::env::var_os("PACKSET_START_CHILD") {
             report_start(Path::new(&home));
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let (unit, why) = fault_unit(dir.path());
+        let data = dir.path().join("memory.lmdb").join("data.mdb");
         let (key, value) = unstamped(0, 1);
         let record = key.len() + value.len();
         let mut atoms = 0;
-        let (disk, stat, bound, places) = loop {
+        let (disk, stat, mut unit, mut bound, places) = loop {
             let (disk, stat) = write_unstamped_pack(dir.path(), atoms, 1);
-            let (bound, places) = start_bound(&stat, record, unit);
+            let unit = fault_unit(&data);
+            let (bound, places) = start_bound(&stat, record, unit.bytes);
             if disk as usize >= PACK_OVER_BOUND * bound {
-                break (disk, stat, bound, places);
+                break (disk, stat, unit, bound, places);
             }
             atoms = (PACK_OVER_BOUND * bound)
                 .div_ceil(value.len())
                 .max(atoms + 1);
         };
-        let (disk_kib, bound_kib) = (disk / 1024, (bound / 1024) as u64);
+        let step = step_bytes(&stat, record) / 1024;
+        let disk_kib = disk / 1024;
         log(&format!(
-            "start bound on {}: a fault maps {} KiB ({why}). A tree of depth {} with {} \
-             claims, {} leaves. {bound_kib} KiB for {places} places, over a {disk_kib} KiB pack.",
+            "start bound on {}, the pack on {}. A tree of depth {} with {} claims, {} leaves, \
+             a step of {step} KiB. {} KiB for {places} places, over a {disk_kib} KiB pack, {:.2} bounds.",
             host(),
-            unit / 1024,
+            mount_of(dir.path()).join(" "),
             stat.depth,
             stat.entries,
             stat.leaf_pages,
+            bound / 1024,
+            disk as f64 / bound as f64,
         ));
+        let mut failed = Vec::new();
         for start in ["stamping", "current"] {
+            if start != "stamping" {
+                unit = fault_unit(&data);
+                bound = start_bound(&stat, record, unit.bytes).0;
+            }
+            let bound_kib = (bound / 1024) as u64;
             let got = start_in_child(
                 dir.path(),
                 "store::tests::a_start_holds_one_step_not_the_pack",
             );
-            assert!(got.passed, "the {start} start failed: {}", got.line);
             let peak = got.hwm.saturating_sub(got.base);
+            let headroom = bound_kib.saturating_sub(peak);
             log(&format!(
-                "{start} start peaked {peak} KiB, bound {bound_kib} KiB: {}",
-                got.line
+                "{start} start: a fault mapped {} KiB, bound {bound_kib} KiB, peak {peak} KiB, \
+                 headroom {headroom} KiB ({:.1} steps): {}",
+                unit.bytes / 1024,
+                headroom as f64 / step as f64,
+                unit.line,
             ));
-            assert!(
-                peak < bound_kib,
-                "the {start} start peaked {peak} KiB over a {disk_kib} KiB pack, past {bound_kib} KiB: {}",
-                got.line
-            );
+            log(&format!("{start} start: {}", got.residual()));
+            log(&format!("{start} start: {}", got.line));
+            if !got.passed {
+                failed.push(format!("the {start} start failed: {}", got.line));
+            }
+            if peak >= bound_kib {
+                failed.push(format!(
+                    "the {start} start peaked {peak} KiB over a {disk_kib} KiB pack, past {bound_kib} KiB"
+                ));
+            }
+            if got.exe != got.exe_base {
+                failed.push(format!(
+                    "the test binary's resident pages went from {} to {} KiB during the {start} start",
+                    got.exe_base, got.exe
+                ));
+            }
         }
+        assert!(failed.is_empty(), "{}", failed.join("; "));
         let store = Store::open(dir.path()).unwrap();
         let all = store.scan(None).unwrap();
         assert_eq!(all.len(), stat.entries);
@@ -3319,6 +3353,14 @@ mod tests {
                     && atom["ts"] == json!("2026-10-16T10:07:21.644Z")),
             "a claim past the first step was not stamped"
         );
+    }
+
+    /// The pages one step of a pack whose tree is `stat` fills, where its claims take `record` bytes as a step counts them.
+    #[cfg(target_os = "linux")]
+    fn step_bytes(stat: &heed::DatabaseStat, record: usize) -> usize {
+        STAMP_STEP_BYTES.div_ceil(record)
+            * stat.overflow_pages.div_ceil(stat.entries.max(1))
+            * stat.page_size as usize
     }
 
     /// What a start can hold over its base, of a pack of one workspace
@@ -3351,7 +3393,6 @@ mod tests {
         const FREE_LIST: usize = 2;
         let page = stat.page_size as usize;
         let per_step = STAMP_STEP_BYTES.div_ceil(record);
-        let step = per_step * stat.overflow_pages.div_ceil(stat.entries.max(1)) * page;
         let per_leaf = (stat.entries / stat.leaf_pages.max(1)).max(1);
         let depth = stat.depth as usize;
         let places = META
@@ -3360,56 +3401,79 @@ mod tests {
             + RUN_ENDS
             + FREE_LIST;
         (
-            STEPS_LIVE * step + places * (unit + page) + TRIM_THRESHOLD,
+            STEPS_LIVE * step_bytes(stat, record) + places * (unit + page) + TRIM_THRESHOLD,
             places,
         )
     }
 
-    /// The most the kernel maps of a file in `dir` on one fault, and why.
-    ///
-    /// A fault maps up to a whole folio of the page cache, and a folio is
-    /// up to `hpage_pmd_size` where transparent huge pages can apply to the
-    /// file. On tmpfs that is the mount's `huge=` option, or
-    /// `shmem_enabled` forcing it. Other filesystems hold large folios as
-    /// they choose, unswitched by the THP settings, and the kernel does not
-    /// say which do, so it applies wherever THP is built. Otherwise a fault
-    /// maps `fault_around_bytes`, and never less than a page.
+    /// The most one fault mapped of a file, and what `smaps` said of it.
     #[cfg(target_os = "linux")]
-    fn fault_unit(dir: &Path) -> (usize, String) {
-        let read = |path: &str| fs::read_to_string(path).ok();
-        let pmd = read("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size")
-            .and_then(|text| text.trim().parse::<usize>().ok());
-        let shmem = read("/sys/kernel/mm/transparent_hugepage/shmem_enabled")
-            .map(|text| chosen(&text))
-            .unwrap_or_default();
-        let (fstype, options) = mount_of(dir);
-        let thp = if fstype == "tmpfs" {
-            shmem == "force"
-                || (shmem != "deny"
-                    && options
-                        .split(',')
-                        .any(|option| matches!(option, "huge=always" | "huge=within_size")))
-        } else {
-            true
-        };
-        if let (true, Some(pmd)) = (thp, pmd) {
-            return (
-                pmd,
-                format!("hpage_pmd_size; THP can apply on {fstype} {options}"),
-            );
-        }
+    struct FaultUnit {
+        bytes: usize,
+        line: String,
+    }
+
+    /// Measure what one fault maps of the file at `path`, as it is in the page cache now.
+    /// Each probe maps the whole file afresh, reads one byte and takes that mapping's `Rss` from `/proc/self/smaps`, with `FilePmdMapped`, `AnonHugePages`, `KernelPageSize` and `MMUPageSize`.
+    /// The next probe reads the byte that far on, so the probes step through the file a fault at a time.
+    /// The unit is the most a probe left resident, and never below a page.
+    #[cfg(target_os = "linux")]
+    fn fault_unit(path: &Path) -> FaultUnit {
+        use std::os::fd::AsRawFd;
         // SAFETY: sysconf reads a constant and touches no memory of ours.
         let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
-        match read("/sys/kernel/debug/fault_around_bytes")
-            .and_then(|text| text.trim().parse::<usize>().ok())
-        {
-            Some(bytes) => (
-                bytes.max(page),
-                format!("fault_around_bytes on {fstype} {options}"),
-            ),
-            None => (
-                FAULT_AROUND_DEFAULT.max(page),
-                format!("fault_around_bytes unread, its default, on {fstype} {options}"),
+        let file = File::open(path).unwrap();
+        let len = file.metadata().unwrap().len() as usize;
+        let mut most = [0u64; 5];
+        let mut probes = 0;
+        let mut offset = 0;
+        while offset < len {
+            // SAFETY: a read-only shared map of a file nothing truncates while the parent runs, unmapped before the next probe.
+            let addr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            assert_ne!(addr, libc::MAP_FAILED, "map {}", path.display());
+            // SAFETY: `offset` is inside the map.
+            unsafe { std::ptr::read_volatile(addr.cast::<u8>().add(offset)) };
+            let at = format!("{:x}-", addr as usize);
+            let mut fields = [0u64; 5];
+            smaps(|header, field, kib| {
+                if header.starts_with(&at) {
+                    if let Some(slot) = [
+                        "Rss",
+                        "FilePmdMapped",
+                        "AnonHugePages",
+                        "KernelPageSize",
+                        "MMUPageSize",
+                    ]
+                    .iter()
+                    .position(|name| *name == field)
+                    {
+                        fields[slot] = kib;
+                    }
+                }
+            });
+            // SAFETY: the map made above, which nothing else references.
+            unsafe { libc::munmap(addr, len) };
+            for (most, field) in most.iter_mut().zip(fields) {
+                *most = (*most).max(field);
+            }
+            probes += 1;
+            offset += (fields[0] as usize * 1024).max(page);
+        }
+        let [rss, pmd, anon_huge, kernel_page, mmu_page] = most;
+        FaultUnit {
+            bytes: (rss as usize * 1024).max(page),
+            line: format!(
+                "the most of {probes} probes: Rss {rss} FilePmdMapped {pmd} \
+                 AnonHugePages {anon_huge} KernelPageSize {kernel_page} MMUPageSize {mmu_page} KiB"
             ),
         }
     }
@@ -3426,7 +3490,7 @@ mod tests {
     /// The type and the options of the filesystem `dir` is on: the
     /// innermost mount above it in `/proc/self/mountinfo`.
     #[cfg(target_os = "linux")]
-    fn mount_of(dir: &Path) -> (String, String) {
+    fn mount_of(dir: &Path) -> [String; 2] {
         let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let info = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
         info.lines()
@@ -3437,22 +3501,37 @@ mod tests {
                 let fstype = filesystem.next()?.to_string();
                 let options = filesystem.nth(1).unwrap_or_default().to_string();
                 dir.starts_with(&point)
-                    .then_some((point.len(), fstype, options))
+                    .then_some((point.len(), [fstype, options]))
             })
-            .max_by_key(|(len, ..)| *len)
-            .map(|(_, fstype, options)| (fstype, options))
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, mount)| mount)
             .unwrap_or_default()
     }
 
-    /// The kernel (`uname -r`) and its transparent huge page settings.
+    /// The kernel (`uname -r`), the CPU and its `transparent_hugepage` settings.
     #[cfg(target_os = "linux")]
     fn host() -> String {
         let read = |path: &str| {
             fs::read_to_string(path).map_or_else(|_| "unread".into(), |text| chosen(&text))
         };
+        let cpu = fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    Some(
+                        line.strip_prefix("model name")?
+                            .split_once(':')?
+                            .1
+                            .trim()
+                            .to_string(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| "unread".into());
         format!(
-            "Linux {}, THP enabled {} shmem_enabled {} hpage_pmd_size {}",
+            "Linux {}, {cpu}, {} CPUs, THP enabled {} shmem_enabled {} hpage_pmd_size {}",
             read("/proc/sys/kernel/osrelease"),
+            std::thread::available_parallelism().map_or(0, usize::from),
             read("/sys/kernel/mm/transparent_hugepage/enabled"),
             read("/sys/kernel/mm/transparent_hugepage/shmem_enabled"),
             read("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size"),
@@ -3548,35 +3627,60 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// What this process has resident of its maps of `path`, in KiB: the
-    /// `Rss` of each mapping in `/proc/self/smaps` that names it. The file
-    /// is read a line at a time, so the read leaves no heap of its size
-    /// behind to count in the next reading.
+    /// Visit each field of `/proc/self/smaps` that is in KiB, with the header line of its mapping.
+    /// The file is read a line at a time, so the read leaves no heap of its size behind to count in the next reading.
     #[cfg(target_os = "linux")]
-    fn mapped_kib(path: &Path) -> u64 {
+    fn smaps(mut visit: impl FnMut(&str, &str, u64)) {
         use std::io::BufRead;
-        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let path = path.to_string_lossy();
-        let Ok(smaps) = fs::File::open("/proc/self/smaps") else {
-            return 0;
+        let Ok(smaps) = File::open("/proc/self/smaps") else {
+            return;
         };
-        let mut named = false;
-        let mut kib = 0;
+        let mut header = String::new();
         for line in std::io::BufReader::new(smaps).lines().map_while(Result::ok) {
-            let Some(first) = line.split_whitespace().next() else {
+            let mut words = line.split_whitespace();
+            let Some(first) = words.next() else {
                 continue;
             };
-            if !first.ends_with(':') {
-                named = line.trim_end().ends_with(path.as_ref());
-            } else if named && first == "Rss:" {
-                kib += line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(0);
+            match first.strip_suffix(':') {
+                None => header = line,
+                Some(field) => {
+                    if let (Some(kib), Some("kB")) = (words.next(), words.next()) {
+                        visit(&header, field, kib.parse().unwrap_or(0));
+                    }
+                }
             }
         }
+    }
+
+    /// What this process has resident of its maps of `path`, in KiB: the `Rss` of each mapping in `/proc/self/smaps` that names it.
+    #[cfg(target_os = "linux")]
+    fn mapped_kib(path: &Path) -> u64 {
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = path.to_string_lossy();
+        let mut kib = 0;
+        smaps(|header, field, value| {
+            if field == "Rss" && header.trim_end().ends_with(path.as_ref()) {
+                kib += value;
+            }
+        });
         kib
+    }
+
+    /// `Rss` by mapping, in KiB: the file name a mapping names, its bracketed name such as `[heap]`, or `anon`.
+    #[cfg(target_os = "linux")]
+    fn resident_by_mapping() -> BTreeMap<String, u64> {
+        let mut by = BTreeMap::new();
+        smaps(|header, field, kib| {
+            if field != "Rss" {
+                return;
+            }
+            let name = header
+                .split_whitespace()
+                .nth(5)
+                .map_or("anon", |name| name.rsplit('/').next().unwrap_or(name));
+            *by.entry(name.to_string()).or_insert(0) += kib;
+        });
+        by
     }
 
     /// Start the writer over `home` in a child of this test binary and
@@ -3620,14 +3724,23 @@ mod tests {
             pass_ms: field("pass_ms"),
             base: field("base"),
             rss: field("rss"),
+            anon_base: field("anon_base"),
             anon: field("anon"),
+            file_base: field("file_base"),
             file: field("file"),
+            shmem_base: field("shmem_base"),
+            shmem: field("shmem"),
             hwm: field("hwm"),
+            exe_base: field("exe_base"),
+            exe: field("exe"),
+            mdb: field("mdb"),
+            smaps_base: field("smaps_base"),
+            smaps: field("smaps"),
         }
     }
 
     /// What one start cost, in KiB and milliseconds. `base` is the child's
-    /// resident size before the open.
+    /// resident size before the open, and the `_base` fields are its parts then.
     #[cfg(target_os = "linux")]
     #[derive(Debug)]
     struct StartReport {
@@ -3638,36 +3751,96 @@ mod tests {
         pass_ms: u64,
         base: u64,
         rss: u64,
+        anon_base: u64,
         anon: u64,
+        file_base: u64,
         file: u64,
+        shmem_base: u64,
+        shmem: u64,
         hwm: u64,
+        exe_base: u64,
+        exe: u64,
+        mdb: u64,
+        smaps_base: u64,
+        smaps: u64,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl StartReport {
+        /// By kind and by file, what the start left resident over its base after the pass.
+        fn residual(&self) -> String {
+            let grew = |after: u64, before: u64| after as i64 - before as i64;
+            let file = grew(self.file, self.file_base);
+            let shmem = grew(self.shmem, self.shmem_base);
+            let exe = grew(self.exe, self.exe_base);
+            format!(
+                "{} KiB over base after the pass by VmRSS, {} by smaps: RssAnon {:+}, \
+                 RssFile {file:+} and RssShmem {shmem:+} (test binary {exe:+}, data file {:+}, \
+                 the rest {:+}) KiB",
+                grew(self.rss, self.base),
+                grew(self.smaps, self.smaps_base),
+                grew(self.anon, self.anon_base),
+                self.mdb,
+                file + shmem - exe - self.mdb as i64,
+            )
+        }
     }
 
     /// The child's half of [`start_in_child`]: what packsetd runs at start,
     /// `Service::open` before it binds and the stamp pass behind the
-    /// listener, one after the other, then what it cost. A start over a
-    /// one-claim pack runs first, so the code a start runs is resident
-    /// before `base` is read, and the rest is the pack's.
+    /// listener, one after the other, then what it cost.
     ///
-    /// The first start stays open. Closing it frees LMDB's 2 MiB list of
-    /// dirty pages, and glibc then moves its mmap threshold up to that size
-    /// (`M_MMAP_THRESHOLD` in mallopt(3)). The next open's list came from
-    /// the heap, cleared, and charged 2048 KiB to the start. packsetd opens
-    /// one environment, whose list is mapped and touched a page at a time.
+    /// Warm starts come first.
+    /// Each one goes through [`measure_start`] over a copy of the pack beside it, on its filesystem.
+    /// So the warm starts run the code the measured start runs, readings and all.
+    /// They stop once a warm start finds this test binary's resident pages unchanged.
+    /// So that code is resident by the time the test reads `base`.
+    /// The binary is finite, so they end.
+    /// The parent fails the test if the measured start then grows them.
+    /// The peak is reset through `clear_refs` at the base, so `hwm` is the measured start's alone.
     ///
-    /// `exe_base` and `exe` are what this test binary has resident before
-    /// the open and after the pass, and `mdb` what the pack's data file
-    /// has after the pass, so the file pages a start leaves can be told
-    /// apart from the pack's.
+    /// `exe` is what this test binary has resident, `mdb` what the pack's data file has after the pass, and `resident` the change in `Rss` of each mapping that changed from the base, so the pages a start leaves can be told apart from the pack's.
+    /// `smaps_base` and `smaps` are the sum of `Rss` over every mapping.
+    /// The kernel counts that exactly, where `VmRSS` and `VmHWM` are per-CPU counters read without their CPUs' pending counts (`get_mm_counter` in include/linux/mm.h), so the two can differ.
     #[cfg(target_os = "linux")]
     fn report_start(home: &Path) {
-        let warm = tempfile::tempdir().unwrap();
-        write_unstamped_pack(warm.path(), 1, 1);
-        let warm_start =
-            crate::service::Service::open(crate::home::Home::new(warm.path())).unwrap();
-        warm_start.store().restore_created().unwrap();
+        #[cfg(target_env = "gnu")]
+        {
+            let threshold = libc::c_int::try_from(TRIM_THRESHOLD).unwrap();
+            // SAFETY: sets one allocator parameter; nothing is allocated across the call.
+            let set = unsafe { libc::mallopt(libc::M_TRIM_THRESHOLD, threshold) };
+            assert_eq!(set, 1, "mallopt(M_TRIM_THRESHOLD) refused");
+        }
         let exe = std::env::current_exe().unwrap();
-        let exe_base = mapped_kib(&exe);
+        let data = home.join("memory.lmdb").join("data.mdb");
+        let mut rounds = 0;
+        loop {
+            let before = mapped_kib(&exe);
+            let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
+            fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
+            fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
+            let _ = measure_start(dir.path(), &exe, rounds);
+            rounds += 1;
+            if mapped_kib(&exe) == before {
+                break;
+            }
+        }
+        println!("start {}", measure_start(home, &exe, rounds));
+    }
+
+    /// One start over `home`, as [`report_start`] reports it, after `warm` warm starts.
+    #[cfg(target_os = "linux")]
+    fn measure_start(home: &Path, exe: &Path, warm: usize) -> String {
+        let resident_base = resident_by_mapping();
+        let smaps_base: u64 = resident_base.values().sum();
+        let exe_base = mapped_kib(exe);
+        // proc(5): 5 resets the peak resident size to the current one.
+        fs::write("/proc/self/clear_refs", "5").unwrap();
+        let (anon_base, file_base, shmem_base) = (
+            status_kib("RssAnon"),
+            status_kib("RssFile"),
+            status_kib("RssShmem"),
+        );
         let base = status_kib("VmRSS");
         let started = std::time::Instant::now();
         let opened = crate::service::Service::open(crate::home::Home::new(home));
@@ -3675,28 +3848,44 @@ mod tests {
         let service = match opened {
             Ok(service) => service,
             Err(err) => {
-                println!(
-                    "start failed open_us={open_us} base={base} hwm={} err={err:#}",
+                return format!(
+                    "failed open_us={open_us} base={base} hwm={} err={err:#}",
                     status_kib("VmHWM")
                 );
-                return;
             }
         };
         let started = std::time::Instant::now();
         let passed = service.store().restore_created();
         let pass_ms = started.elapsed().as_millis();
-        println!(
-            "start {} open_us={open_us} pass_ms={pass_ms} base={base} rss={} anon={} file={} hwm={} \
-             exe_base={exe_base} exe={} mdb={}{}",
-            if passed.is_ok() { "ok" } else { "stopped" },
+        let (rss, hwm, anon, file, shmem) = (
             status_kib("VmRSS"),
-            status_kib("RssAnon"),
-            status_kib("RssFile") + status_kib("RssShmem"),
             status_kib("VmHWM"),
-            mapped_kib(&exe),
-            mapped_kib(&service.store().db_dir.join("data.mdb")),
-            passed.err().map_or_else(String::new, |err| format!(" err={err:#}")),
+            status_kib("RssAnon"),
+            status_kib("RssFile"),
+            status_kib("RssShmem"),
         );
+        let exe_after = mapped_kib(exe);
+        let mdb = mapped_kib(&service.store().db_dir.join("data.mdb"));
+        let resident = resident_by_mapping();
+        let smaps_after: u64 = resident.values().sum();
+        let grew: Vec<String> = resident
+            .into_iter()
+            .filter_map(|(name, kib)| {
+                let was = resident_base.get(&name).copied().unwrap_or(0);
+                (kib != was).then(|| format!("{name}:{:+}", kib as i64 - was as i64))
+            })
+            .collect();
+        format!(
+            "{} open_us={open_us} pass_ms={pass_ms} base={base} rss={rss} hwm={hwm} \
+             anon_base={anon_base} anon={anon} file_base={file_base} file={file} \
+             shmem_base={shmem_base} shmem={shmem} exe_base={exe_base} exe={exe_after} mdb={mdb} \
+             smaps_base={smaps_base} smaps={smaps_after} warm={warm} resident={}{}",
+            if passed.is_ok() { "ok" } else { "stopped" },
+            grew.join(","),
+            passed
+                .err()
+                .map_or_else(String::new, |err| format!(" err={err:#}")),
+        )
     }
 
     /// What start costs as the pack grows, for `measurements/start.txt`.
@@ -3754,7 +3943,7 @@ mod tests {
                     mib(got.base),
                     mib(got.rss),
                     mib(got.anon),
-                    mib(got.file),
+                    mib(got.file + got.shmem),
                     mib(got.hwm),
                 );
             }
