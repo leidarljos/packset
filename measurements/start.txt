@@ -4,20 +4,21 @@ What a start costs as the pack grows, and what the start test checks.
 ## Where these runs happened
 
 Every run in this file ran on one Kernel-based Virtual Machine (KVM) guest: `Intel(R) Xeon(R) Processor`, 8 cores, one thread a core, 4 KiB pages, CPU only.
-Its kernel was Linux 6.12.94+, with glibc 2.39 and rustc 1.97.1.
-Its `transparent_hugepage` settings were `enabled [madvise]`, `shmem_enabled [never]` and `hpage_pmd_size 2097152`.
-It had root through sudo, and root mounted the two tmpfs filesystems: `mount -t tmpfs -o huge=always,size=4G tmpfs /mnt/hugefs` and `mount -t tmpfs -o size=4G tmpfs /mnt/plainfs`.
-The ext4 runs used `/tmp` on the root filesystem, mounted `rw,relatime`.
-The raw output of each run is in `measurements/start-moqq/`, under a header that names the store code, the kernel, the CPU, root and the filesystem.
-The store code is at a commit on the remote: 177c9f5333e2613b17f6481a95c7c5c5ac321600 before the fix, and 6dcab278b0bd1b1356a057d661f37adc8ed8cced after it.
-Each run carries the start test of da0de82c9a22ddbe0f05045a08da956332781d14, which adds `measurements/start-moqq/conditions.txt`.
-For the runs before the fix, `measurements/start-moqq/before.sh` puts that test into the store at 177c9f5.
-All 90 runs were one session on 2026-11-03, from 07:52 to 08:18 UTC, in six draws of the 15 conditions in `conditions.txt`.
-Odd draws ran the conditions in the order of that file and even draws in reverse, and each log's header gives its draw and the time it started.
+The guest ran Linux 6.12.94+, glibc 2.39 and rustc 1.97.1, with `transparent_hugepage` set to `enabled [madvise]`, `shmem_enabled [never]` and `hpage_pmd_size 2097152`.
+Root, through sudo, mounted the two tmpfs filesystems: `mount -t tmpfs -o huge=always,size=4G tmpfs /mnt/hugefs` and `mount -t tmpfs -o size=4G tmpfs /mnt/plainfs`.
+For ext4, runs used `/tmp` on the root filesystem, mounted `rw,relatime`.
+
+Each run's raw output is in `measurements/start-moqq/`, under a header that names the store code, the kernel, the CPU, root and the filesystem.
+Before the fix the store code is at 177c9f5333e2613b17f6481a95c7c5c5ac321600, and after it at 6dcab278b0bd1b1356a057d661f37adc8ed8cced, both on the remote.
+Every run carries the start test of da0de82c9a22ddbe0f05045a08da956332781d14, which adds `measurements/start-moqq/conditions.txt`, and `measurements/start-moqq/before.sh` puts that test into the store at 177c9f5.
+
+All 90 runs were one session on 2026-11-03, from 07:52 to 08:18 Coordinated Universal Time (UTC): six draws of the 15 conditions in `conditions.txt`.
+Odd draws took the conditions in file order and even draws in reverse.
+Each log header gives its draw and its start time.
+
 Earlier versions of this file cited runs at ac5380ab3f61f147b1204d1ed676c8784dc89e81, a commit that is not on the remote, and did not say where any run happened.
 The version at fab4a53e3015710e1f59c5a0731603c6f81c7028 ran the six draws of each condition back to back, with no time on any.
-The runs below replace all of them.
-No run in this file is from CI.
+These runs replace all of them, and none is from CI.
 
 ## The start test
 
@@ -29,9 +30,8 @@ The test runs as `cargo test` builds it, unoptimised:
 $ TMPDIR=<dir on the filesystem> cargo test -p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
 ```
 
-Each filesystem ran it six times with the store before the fix, six times after it, and six times after it with `measurements/start-moqq/hold-21-mib.patch` applied.
-With that patch the pass keeps 21 MiB of heap.
-A pass that kept 20 steps of 1048 KiB would keep as much.
+Each filesystem ran it in three conditions, six times each: the store before the fix, the store after it, and the store after it with `measurements/start-moqq/hold-21-mib.patch` applied.
+That patch keeps 21 MiB of heap through the pass, as much as 20 steps of 1048 KiB.
 `measurements/start-moqq/run.sh` ran every condition, each in a worktree of its own, and `measurements/start-moqq/summary.py` gives the medians and interquartile ranges below:
 
 ```console
@@ -47,10 +47,10 @@ The quartiles are `statistics.quantiles(n=4, method="inclusive")`.
 
 ### The fault unit
 
-The test measures what one fault maps of the pack, on the filesystem the pack is on, before each start.
+Before each start, the test measures what one fault maps of the pack, on the filesystem the pack is on.
 Each probe maps the data file afresh, reads one byte, and takes that mapping's fields from `/proc/self/smaps`.
 The next probe reads the byte past what the last one mapped, so the probes step through the whole file.
-The unit is the most that any probe mapped.
+Whichever probe mapped the most gives the unit.
 
 | pack on | probes | Rss KiB | FilePmdMapped KiB | AnonHugePages KiB | KernelPageSize KiB | MMUPageSize KiB |
 |---|---|---|---|---|---|---|
@@ -58,10 +58,9 @@ The unit is the most that any probe mapped.
 | tmpfs | 92 and 126 | 64 | 0 | 0 | 4 | 4 |
 | tmpfs, `huge=always` | 48 and 50 | 2048 | 0 | 0 | 4 | 4 |
 
-On ext4 a fault maps the 64 KiB of `fault_around_bytes`, as it does on a plain tmpfs.
-On a tmpfs mounted `huge=always` one fault brings in the whole 2 MiB folio, with 4 KiB page table entries rather than one page middle directory (PMD) entry.
-Before this change the bound also took 2 MiB on ext4.
-The reason is that the kernel does not say which filesystems use large folios.
+A fault maps the 64 KiB of `fault_around_bytes` on ext4, as it does on a plain tmpfs.
+Mounted `huge=always`, a tmpfs brings in the whole 2 MiB folio on one fault, with 4 KiB page table entries rather than one page middle directory (PMD) entry.
+The bound used to take 2 MiB on ext4 too, since the kernel does not say which filesystems use large folios.
 That gave 12 places of 2052 KiB each, 24624 KiB of a 26848 KiB bound, where this kernel maps 68 KiB a place.
 
 ### The bound
@@ -69,12 +68,11 @@ That gave 12 places of 2052 KiB each, 24624 KiB of a 26848 KiB bound, where this
 The bound is 2 steps, plus one fault unit and one page for each place a step reads, plus glibc's 128 KiB trim threshold.
 A step is 131 claims of 2 overflow pages each, which is 1048 KiB.
 On a tree of depth 2 with 66 or 70 claims a leaf, a step reads 9 places: the meta page, 2 levels, 2 more leaves with the level above them, 2 run ends and 2 free-list pages.
-So the bound is 2096 + 9 * (64 + 4) + 128 = 2836 KiB with a 64 KiB unit, and 2096 + 9 * (2048 + 4) + 128 = 20692 KiB with a 2048 KiB unit.
+That makes the bound 2096 + 9 * (64 + 4) + 128 = 2836 KiB with a 64 KiB unit, and 2096 + 9 * (2048 + 4) + 128 = 20692 KiB with a 2048 KiB unit.
 
 ### Peak over base, before and after
 
-The store code is at 177c9f5333e2613b17f6481a95c7c5c5ac321600 before and 6dcab278b0bd1b1356a057d661f37adc8ed8cced after; `Intel(R) Xeon(R) Processor`, 8 cores.
-Each row is six runs.
+Rows are six runs each, of the store at 177c9f5333e2613b17f6481a95c7c5c5ac321600 before and 6dcab278b0bd1b1356a057d661f37adc8ed8cced after, on the `Intel(R) Xeon(R) Processor` with 8 cores.
 
 | pack on | store | start | fault unit KiB | bound KiB | pack KiB | peak over base KiB, median (IQR) | test |
 |---|---|---|---|---|---|---|---|
@@ -97,14 +95,13 @@ Each row is six runs.
 | tmpfs, `huge=always` | after, holding 21 MiB | stamping | 2048 | 20692 | 42700 | 36704 (36656 to 36752) | failed 6 of 6 |
 | tmpfs, `huge=always` | after, holding 21 MiB | current | 2048 | 20692 | 42700 | 35772 (35772 to 35820) | failed 6 of 6 |
 
-Before the fix a start kept the pages it read, so it peaked at about the pack.
-On ext4, 6056 KiB of the data file was still resident after the pass.
-After it, no data-file page stayed resident after a pass.
+Before the fix a start kept the pages it read, so it peaked at about the pack, and on ext4 6056 KiB of the data file was still resident after the pass.
+With the fix, no page of the data file stayed resident once a pass ended.
 
 ### The smallest regression the bound catches
 
-A start fails when what it keeps beyond a correct start is more than the headroom.
-The headroom is the bound less the correct start's peak.
+The headroom is the bound less a correct start's peak.
+A start fails once it keeps more than that beyond what a correct start keeps.
 
 | pack on | start | headroom KiB, median (IQR) | largest headroom KiB | in steps of 1048 KiB |
 |---|---|---|---|---|
@@ -115,24 +112,23 @@ The headroom is the bound less the correct start's peak.
 | tmpfs, `huge=always` | stamping | 5496 (5496 to 5544) | 5560 | 5.3 |
 | tmpfs, `huge=always` | current | 6416 (6384 to 6448) | 6512 | 6.2 |
 
-On ext4, a start that keeps 1624 KiB more than a correct one fails in every run, and on plain tmpfs one that keeps 1688 KiB more.
-Two steps more is past both.
-On a tmpfs mounted `huge=always` the same goes for 6512 KiB or seven steps more.
+Every run fails on ext4 once a start keeps 1624 KiB more than a correct one, and on plain tmpfs once it keeps 1688 KiB more.
+Two more steps, 2096 KiB, are past both.
+Mounted `huge=always`, a tmpfs takes 6512 KiB more, or seven steps.
 The 21 MiB mutation fails on all three filesystems: 19.4 to 20.6 MiB past the bound on ext4 and plain tmpfs, and 14.7 to 15.7 MiB past it on `huge=always`.
 
 ### Why the pack is twice its bound
 
-The pack has to be as large as what a correct start keeps plus the smallest regression past it, so that a pass has that much to keep.
-A correct start peaks above its base and under its bound.
-So its headroom is less than one bound.
-A pack of twice the bound is therefore large enough on any host, and a pass that keeps what it reads then ends more than a headroom past the bound.
-Here the largest headroom for its bound was 1688 of 2836 KiB, on plain tmpfs, 0.60 of it, so 1.60 bounds would have done on this host.
+The pack has to hold what a correct start keeps plus the smallest regression, so that a pass has that regression to keep.
+A correct start's headroom is less than one bound, since it peaks above its base and under its bound.
+Twice the bound is therefore enough on any host: a pass that keeps what it reads then ends more than a headroom past the bound.
+On this host the largest headroom was 1688 of 2836 KiB, on plain tmpfs, which is 0.60 of the bound, so 1.60 bounds would have done.
 
 ### What a start leaves after the pass
 
 The start child reads `RssAnon`, `RssFile` and `RssShmem` from `/proc/self/status` at the base and after the pass, and the `Rss` of every mapping from `/proc/self/smaps`.
 `VmRSS` and `VmHWM` are per-CPU counters that the kernel reads without each CPU's pending counts (`get_mm_counter` in include/linux/mm.h), while the `smaps` total counts each mapped page.
-On ext4, with the store after the fix, six runs of each variant left this much over the base:
+Here is what six runs of each variant left over the base, on ext4 with the store after the fix:
 
 | start child | start | VmRSS KiB | smaps total KiB | RssAnon KiB | test binary KiB | peak over base KiB | test |
 |---|---|---|---|---|---|---|---|
@@ -147,27 +143,28 @@ On ext4, with the store after the fix, six runs of each variant left this much o
 
 A cell without a range had an interquartile range of zero.
 With the start child as it was at 6dcab27, a `stamping` start left 1176 KiB over its base, and 1172 KiB of it was `RssAnon`.
-Less the 128 KiB the test binary grew by, that is 1048 KiB, inside the 1016 to 1612 KiB that the CI logs for 6dcab27 show; CI was not rerun for this file.
+Less the 128 KiB that the test binary grew by, that is 1048 KiB, inside the 1016 to 1612 KiB that the CI logs for 6dcab27 show.
+CI was not rerun for this file.
 Pinning glibc's trim threshold with `mallopt` takes the `RssAnon` to 176 KiB, so about 1 MiB of it came with glibc's dynamic thresholds.
 Setting `M_TRIM_THRESHOLD` turns off the dynamic mmap threshold too (mallopt(3)), so the start child now sets it to the 128 KiB that the bound counts.
 This file does not identify which freed chunk moved the threshold, or which allocation then took that 1 MiB from the arena.
-Warming up over a copy of the pack takes the remaining `RssAnon` from 176 KiB to 48 KiB.
+The remaining 176 KiB fell to 48 KiB once the warm-up ran over a copy of the pack.
 So 128 KiB was allocated the first time a start ran over a pack this size, which a one-claim warm start did not do.
-Without the `mallopt` call, the warm starts close their environments, and the 2 MiB list of dirty pages that Lightning Memory-Mapped Database (LMDB) frees then moves glibc's mmap threshold to that size.
-The next open takes its list from the heap and clears it.
-That is the 2040 KiB in that row, and the test fails.
+Without the `mallopt` call, the warm starts close their environments, and Lightning Memory-Mapped Database (LMDB) frees its 2 MiB list of dirty pages.
+Freeing it moves glibc's mmap threshold to 2 MiB, so the next open takes its list from the heap and clears it.
+That list is the 2040 KiB in that row, and it fails the test.
 With this test, nothing yet accounts for 16 to 148 KiB of `RssAnon` after a `stamping` start on the three filesystems, or for 8 to 12 KiB after a current one.
 
 ### Warm-up
 
 The old warm-up was one start over a one-claim pack, kept open.
 In the two variants that use it, the test binary grew inside every measured start, by 64 to 128 KiB, and by 128 KiB in 19 of the 24.
-In CI at 6dcab27, one `stamping` start grew it by 2868 KiB.
+CI at 6dcab27 saw one `stamping` start grow it by 2868 KiB.
 The start child now runs warm starts through the same function that measures the start, each over a copy of the pack beside it on the same filesystem.
 Those warm starts end when the binary's resident pages stop growing, or one start past the binary's page count.
 That took 2 warm starts before each of the 120 measured starts here that warm up this way.
 The test fails if the measured start then grows the binary, and in those 120 starts it grew by 0 KiB.
-The peak is reset through `/proc/self/clear_refs` at the base, so the warm starts do not count in `VmHWM`.
+Resetting the peak through `/proc/self/clear_refs` at the base keeps the warm starts out of `VmHWM`.
 
 ### macOS
 
@@ -227,9 +224,9 @@ The pages a step drops are faulted in again when a later step reads them.
 By the medians, the pass took 4 to 6% longer on a first start, and 25 to 45% longer on a current pack: 81 and 101.5 ms at 79 MiB, 835 and 1210.5 ms at 791 MiB.
 It runs behind the listener, and the open is 0.1 ms at every size, before and after.
 At 140k claims the 1108 MiB in use is past the 1 GiB map that 177c9f5 opened, and Lightning Memory-Mapped Database (LMDB) then opens the map at the pages in use (`mdb_env_open2` in `mdb.c`), which leaves no room to write.
-Before the fix, every start's pass stopped with MDB_MAP_FULL and left claims unstamped.
-Its time includes the count of what was left.
-After the fix, the map opened at twice the data file, and the pass left no claim unstamped.
+Before the fix, MDB_MAP_FULL stopped the pass of every start and left claims unstamped.
+The time of each such pass includes the count of what was left.
+The fix opened the map at twice the data file, and left no claim unstamped.
 
 ## Start cost where a fault maps a whole folio
 
@@ -252,7 +249,7 @@ After: 6dcab278b0bd1b1356a057d661f37adc8ed8cced, tmpfs `rw,size=4194304k,huge=al
 | 12000 | 95 | second | 0.05 | 92.5 (92 to 93) | 6 | 6 | 0 | 5 | 36 (36 to 36) | 30616 (30616 to 30664) |
 
 The peak grows slowly with the pack: 15200, 25564 and 29548 KiB over the base on a first start at 11, 47 and 95 MiB.
-On 4 KiB pages it was 9892 to 10086 KiB from 79 MiB to 1108 MiB.
+With 4 KiB pages, first starts from 79 MiB to 1108 MiB peaked 9892 to 10086 KiB above the base.
 The message of 80e0c4e gave the absolute peaks of that sweep, 20, 31 and 35 MiB, as over a 6 MiB base.
 Its base and peaks were truncated to whole MiB, so their differences can be up to 1 MiB off, and they give no figure in KiB.
 The 11 MiB pack is six folios, and a step maps nearly all of it; from 47 MiB the peak is well below the pack.
