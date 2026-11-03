@@ -1,0 +1,15 @@
+before-ext4|/tmp/wt-before|/tmp|177c9f5333e2613b17f6481a95c7c5c5ac321600|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+after-ext4|/tmp/wt-after|/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+hold-21-mib-ext4|/tmp/wt-hold-21-mib|/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced with hold-21-mib.patch|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+before-tmpfs|/tmp/wt-before|/mnt/plainfs/tmp|177c9f5333e2613b17f6481a95c7c5c5ac321600|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+after-tmpfs|/tmp/wt-after|/mnt/plainfs/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+hold-21-mib-tmpfs|/tmp/wt-hold-21-mib|/mnt/plainfs/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced with hold-21-mib.patch|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+before-tmpfs-huge|/tmp/wt-before|/mnt/hugefs/tmp|177c9f5333e2613b17f6481a95c7c5c5ac321600|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+after-tmpfs-huge|/tmp/wt-after|/mnt/hugefs/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+hold-21-mib-tmpfs-huge|/tmp/wt-hold-21-mib|/mnt/hugefs/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced with hold-21-mib.patch|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+old-harness-ext4|/tmp/wt-old-harness|/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced with old-harness.patch|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+old-warm-up-ext4|/tmp/wt-old-warm-up|/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced with old-warm-up.patch|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+no-mallopt-ext4|/tmp/wt-no-mallopt|/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced with no-mallopt.patch|-|-p packset-daemon --lib store::tests::a_start_holds_one_step_not_the_pack -- --exact --nocapture
+sweep-before-ext4|/tmp/wt-before|/tmp|177c9f5333e2613b17f6481a95c7c5c5ac321600|10000,50000,100000,140000|--release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+sweep-after-ext4|/tmp/wt-after|/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced|10000,50000,100000,140000|--release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture
+sweep-after-tmpfs-huge|/tmp/wt-after|/mnt/hugefs/tmp|6dcab278b0bd1b1356a057d661f37adc8ed8cced|1500,6000,12000|--release -p packset-daemon --lib store::tests::start_cost_by_pack_size -- --exact --ignored --nocapture

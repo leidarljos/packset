@@ -2,7 +2,7 @@ Leave glibc's trim and mmap thresholds dynamic in the start child.
 
 --- a/crates/packset-cli/src/bin/packsetd/store.rs
 +++ b/crates/packset-cli/src/bin/packsetd/store.rs
-@@ -3804,13 +3804,6 @@
+@@ -3802,13 +3802,6 @@ mod tests {
      /// The kernel counts that exactly, where `VmRSS` and `VmHWM` are per-CPU counters read without their CPUs' pending counts (`get_mm_counter` in include/linux/mm.h), so the two can differ.
      #[cfg(target_os = "linux")]
      fn report_start(home: &Path) {
@@ -15,4 +15,4 @@ Leave glibc's trim and mmap thresholds dynamic in the start child.
 -        }
          let exe = std::env::current_exe().unwrap();
          let data = home.join("memory.lmdb").join("data.mdb");
-         let mut rounds = 0;
+         let pages = fs::metadata(&exe)

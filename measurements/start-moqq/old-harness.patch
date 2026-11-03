@@ -2,7 +2,7 @@ The start child as the start test had it before: glibc's thresholds dynamic, and
 
 --- a/crates/packset-cli/src/bin/packsetd/store.rs
 +++ b/crates/packset-cli/src/bin/packsetd/store.rs
-@@ -3804,27 +3804,17 @@
+@@ -3802,29 +3802,17 @@ mod tests {
      /// The kernel counts that exactly, where `VmRSS` and `VmHWM` are per-CPU counters read without their CPUs' pending counts (`get_mm_counter` in include/linux/mm.h), so the two can differ.
      #[cfg(target_os = "linux")]
      fn report_start(home: &Path) {
@@ -15,18 +15,20 @@ The start child as the start test had it before: glibc's thresholds dynamic, and
 -        }
          let exe = std::env::current_exe().unwrap();
          let data = home.join("memory.lmdb").join("data.mdb");
--        let mut rounds = 0;
--        loop {
--            let before = mapped_kib(&exe);
--            let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
--            fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
--            fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
--            let _ = measure_start(dir.path(), &exe, rounds);
--            rounds += 1;
--            if mapped_kib(&exe) == before {
--                break;
--            }
--        }
+-        let pages = fs::metadata(&exe)
+-            .unwrap()
+-            .len()
+-            .div_ceil(page_size() as u64) as usize;
+-        let rounds = warm_up(
+-            pages,
+-            || mapped_kib(&exe),
+-            |round| {
+-                let dir = tempfile::tempdir_in(home.parent().unwrap_or(home)).unwrap();
+-                fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
+-                fs::copy(&data, dir.path().join("memory.lmdb").join("data.mdb")).unwrap();
+-                let _ = measure_start(dir.path(), &exe, round);
+-            },
+-        );
 +        let rounds = 0;
 +        let _ = &data;
 +        let warm = tempfile::tempdir().unwrap();
