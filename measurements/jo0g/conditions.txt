@@ -1,0 +1,12 @@
+1k-develop-ext4|/tmp/jo0g-bins/develop/packsetd|/tmp/jo0g-seeds/1000|/tmp/jo0g-ext4|8770
+1k-branch-ext4|/tmp/jo0g-bins/branch/packsetd|/tmp/jo0g-seeds/1000|/tmp/jo0g-ext4|8770
+1k-develop-tmpfs|/tmp/jo0g-bins/develop/packsetd|/tmp/jo0g-seeds/1000|/dev/shm/jo0g|8770
+1k-branch-tmpfs|/tmp/jo0g-bins/branch/packsetd|/tmp/jo0g-seeds/1000|/dev/shm/jo0g|8770
+5k-develop-ext4|/tmp/jo0g-bins/develop/packsetd|/tmp/jo0g-seeds/5000|/tmp/jo0g-ext4|8770
+5k-branch-ext4|/tmp/jo0g-bins/branch/packsetd|/tmp/jo0g-seeds/5000|/tmp/jo0g-ext4|8770
+5k-develop-tmpfs|/tmp/jo0g-bins/develop/packsetd|/tmp/jo0g-seeds/5000|/dev/shm/jo0g|8770
+5k-branch-tmpfs|/tmp/jo0g-bins/branch/packsetd|/tmp/jo0g-seeds/5000|/dev/shm/jo0g|8770
+20k-develop-ext4|/tmp/jo0g-bins/develop/packsetd|/tmp/jo0g-seeds/20000|/tmp/jo0g-ext4|8770
+20k-branch-ext4|/tmp/jo0g-bins/branch/packsetd|/tmp/jo0g-seeds/20000|/tmp/jo0g-ext4|8770
+20k-develop-tmpfs|/tmp/jo0g-bins/develop/packsetd|/tmp/jo0g-seeds/20000|/dev/shm/jo0g|8770
+20k-branch-tmpfs|/tmp/jo0g-bins/branch/packsetd|/tmp/jo0g-seeds/20000|/dev/shm/jo0g|8770

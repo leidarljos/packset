@@ -163,6 +163,11 @@ pub struct Service {
     /// without a pass over the pack. Cleared when that workspace is dropped
     /// to make room, not when it alone is over the cap.
     shaped: Mutex<BTreeSet<String>>,
+    /// Live claims by workspace and set. A write used to walk the whole
+    /// workspace under the lock to find the set it belongs to; the dedup
+    /// stage of that walk grew with the workspace. This map is patched as
+    /// claims are added, updated and deleted, and a write reads its own set.
+    live_sets: Mutex<HashMap<String, WorkspaceLive>>,
     /// When each set of claims last fired together, by workspace and the
     /// sorted ids: a second fire within [`FIRE_WINDOW`] is held, so several
     /// seats or personas closing sittings on one issue tighten its links
@@ -405,6 +410,156 @@ struct Shaped {
     used: AtomicU64,
 }
 
+/// Which set a live claim is compared in. A missing `set` is its own group.
+/// A value that is not a string is neither: the snapshot filter skipped it
+/// for both a named set and the unset group.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SetGroup {
+    Unset,
+    Named(String),
+    Other,
+}
+
+/// Live claims of one set, in the order a snapshot lists them. Dedupe of a
+/// claim with no tokens walks this order and keeps the first match.
+#[derive(Default)]
+struct SetLive {
+    order: Vec<Arc<Record>>,
+    at: HashMap<String, usize>,
+}
+
+impl SetLive {
+    fn remove_at(&mut self, id: &str) {
+        let Some(i) = self.at.remove(id) else {
+            return;
+        };
+        self.order.remove(i);
+        for idx in self.at.values_mut() {
+            if *idx > i {
+                *idx -= 1;
+            }
+        }
+    }
+}
+
+/// One workspace's live claims, split by set.
+#[derive(Default)]
+struct WorkspaceLive {
+    sets: HashMap<SetGroup, SetLive>,
+    /// The set each live id sits in.
+    place: HashMap<String, SetGroup>,
+}
+
+impl WorkspaceLive {
+    /// A claim the snapshot would show: not a tombstone, and either live or
+    /// still on the review clock.
+    fn shown(atom: &Record, now: &str) -> bool {
+        !record::is_tombstone(atom) && (record::is_live(atom, now) || record::is_due(atom, now))
+    }
+
+    fn group_of(atom: &Record) -> SetGroup {
+        match atom.get("set") {
+            None => SetGroup::Unset,
+            Some(Value::String(name)) => SetGroup::Named(name.clone()),
+            Some(_) => SetGroup::Other,
+        }
+    }
+
+    /// The group a new claim is compared against. A set that is not a string
+    /// yields no name, and the snapshot's unset arm keeps claims that omit
+    /// the key.
+    fn query_group(atom: &Record) -> SetGroup {
+        match atom.get("set") {
+            Some(Value::String(name)) => SetGroup::Named(name.clone()),
+            _ => SetGroup::Unset,
+        }
+    }
+
+    fn insert_shown(&mut self, atom: &Record) {
+        let Some(id) = atom.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let group = Self::group_of(atom);
+        let members = self.sets.entry(group.clone()).or_default();
+        let shared = Arc::new(atom.clone());
+        if let Some(&i) = members.at.get(id) {
+            members.order[i] = shared;
+            return;
+        }
+        members.at.insert(id.to_string(), members.order.len());
+        members.order.push(shared);
+        self.place.insert(id.to_string(), group);
+    }
+
+    fn upsert_written(&mut self, mut record: Record, now: &str) {
+        let Some(id) = record.get("id").and_then(Value::as_str).map(str::to_string) else {
+            return;
+        };
+        if !Self::shown(&record, now) {
+            self.remove_id(&id);
+            return;
+        }
+        // The snapshot parks the vector. Dedupe reads the text, and a second
+        // copy of the floats would sit beside the store's.
+        record.remove("embedding");
+        let group = Self::group_of(&record);
+        if self.place.get(&id).is_some_and(|old| old != &group) {
+            self.remove_id(&id);
+        }
+        let members = self.sets.entry(group.clone()).or_default();
+        let shared = Arc::new(record);
+        if let Some(&i) = members.at.get(&id) {
+            members.order[i] = shared;
+            return;
+        }
+        members.at.insert(id.clone(), members.order.len());
+        members.order.push(shared);
+        self.place.insert(id, group);
+    }
+
+    fn remove_id(&mut self, id: &str) {
+        let Some(group) = self.place.remove(id) else {
+            return;
+        };
+        if let Some(members) = self.sets.get_mut(&group) {
+            members.remove_at(id);
+            if members.order.is_empty() {
+                self.sets.remove(&group);
+            }
+        }
+    }
+
+    /// Drop links that name an id the live set no longer has. The snapshot
+    /// shows a claim with those links already cut.
+    fn cut_links_in(record: &mut Record, live: impl Fn(&str) -> bool) {
+        let Some(Value::Array(items)) = record.get("links") else {
+            return;
+        };
+        let kept: Vec<Value> = items
+            .iter()
+            .filter(|item| live(record::value_text(item).as_str()))
+            .cloned()
+            .collect();
+        if kept.len() != items.len() {
+            record.insert("links".into(), Value::Array(kept));
+        }
+    }
+
+    fn cut_every_link(&mut self) {
+        let live: HashSet<String> = self.place.keys().cloned().collect();
+        for members in self.sets.values_mut() {
+            for record in &mut members.order {
+                let mut copy = Record::clone(record);
+                let before = copy.get("links").cloned();
+                Self::cut_links_in(&mut copy, |id| live.contains(id));
+                if copy.get("links") != before.as_ref() {
+                    *record = Arc::new(copy);
+                }
+            }
+        }
+    }
+}
+
 /// Shapes kept when `PACKSET_SHAPE_CAP` is unset. The smallest power of
 /// two that holds two workspaces at [`DEFAULT_LIVE_CAP`], so one checkout
 /// stays shaped and a second still fits.
@@ -478,6 +633,7 @@ impl Service {
             shape_cap: AtomicUsize::new(shape_cap_from_env()),
             shape_clock: AtomicU64::new(1),
             shaped: Mutex::new(BTreeSet::new()),
+            live_sets: Mutex::new(HashMap::new()),
             swept: Mutex::new(HashMap::new()),
             fired_recently: Mutex::new(HashMap::new()),
             cued_recently: Mutex::new(HashMap::new()),
@@ -596,6 +752,7 @@ impl Service {
         if !all.is_empty() {
             let stored = self.store.upsert_many(&all)?;
             self.project_atoms(&stored);
+            self.patch_live_sets(workspace, &stored);
         }
         let forgotten_ids: Vec<String> = forgotten
             .iter()
@@ -676,9 +833,16 @@ impl Service {
 
     /// Drop shapes whose claims have left this workspace's live set, and the
     /// postings that named them. A tombstone, a closed window and a forget
-    /// all end here. Only this workspace's map is walked.
-    fn reconcile_shapes(&self, workspace: &str, live: &HashSet<&str>) {
+    /// all end here. Only this workspace's map is walked. The ids are the
+    /// index's, so the check does not scan the records.
+    fn reconcile_shapes(&self, workspace: &str) {
         let stale: Vec<String> = {
+            let Ok(live) = self.live_sets.lock() else {
+                return;
+            };
+            let Some(ids) = live.get(workspace).map(|kept| &kept.place) else {
+                return;
+            };
             let Ok(index) = self.shapes.read() else {
                 return;
             };
@@ -687,7 +851,7 @@ impl Service {
             };
             kept.by_id
                 .keys()
-                .filter(|id| !live.contains(id.as_str()))
+                .filter(|id| !ids.contains_key(id.as_str()))
                 .cloned()
                 .collect()
         };
@@ -827,33 +991,48 @@ impl Service {
 
     /// Shape every live claim of a workspace the first time this process
     /// writes to it, so the postings cover the pack; afterwards each write
-    /// shapes what it wrote. `live` is the workspace, not one set of it.
-    fn shape_workspace_once(&self, workspace: &str, live: &[&Record]) {
+    /// shapes what it wrote. The claims come from the set index, which is
+    /// the workspace, not one set of it.
+    fn shape_workspace_once(&self, workspace: &str) {
         let first = self
             .shaped
             .lock()
             .map(|mut set| set.insert(workspace.to_string()))
             .unwrap_or(false);
-        if first {
-            for existing in live {
-                self.shape_of(existing);
-            }
+        if !first {
+            return;
+        }
+        let records: Vec<Arc<Record>> = {
+            let Ok(live) = self.live_sets.lock() else {
+                return;
+            };
+            let Some(kept) = live.get(workspace) else {
+                return;
+            };
+            kept.sets
+                .values()
+                .flat_map(|members| members.order.iter().cloned())
+                .collect()
+        };
+        for existing in &records {
+            self.shape_of(existing);
         }
     }
 
-    /// The live claims a new claim could replace or duplicate. The overlap
-    /// rule needs a token jaccard of 0.6, so a candidate carries at least
-    /// six tenths of the new claim's tokens, counted over the postings; the
-    /// head rule's candidates share its first head word, the correction
-    /// rule's an entity, and `supersedes` names the rest.
-    fn replace_candidates<'a>(
+    /// The live claims a new claim could replace or duplicate, in id order.
+    /// The overlap rule needs a token jaccard of 0.6, so a candidate carries
+    /// at least six tenths of the new claim's tokens, counted over the
+    /// postings; the head rule's candidates share its first head word, the
+    /// correction rule's an entity, and `supersedes` names the rest. Only
+    /// this set's claims are returned.
+    fn replace_candidates(
         &self,
         workspace: &str,
+        group: &SetGroup,
         atom: &Record,
         shape: &record::Shape,
-        by_id: &HashMap<&str, &'a Record>,
-    ) -> Vec<&'a Record> {
-        let mut wanted: BTreeSet<&str> = BTreeSet::new();
+    ) -> Vec<Arc<Record>> {
+        let mut wanted: BTreeSet<String> = BTreeSet::new();
         if let Ok(index) = self.shapes.read() {
             if let Some(kept) = index.get(workspace) {
                 let postings = &kept.postings;
@@ -872,9 +1051,7 @@ impl Service {
                 let take = shape.tokens.len().saturating_sub(need) + 1;
                 for ids in lists.iter().take(take) {
                     for id in ids.iter() {
-                        if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
-                            wanted.insert(key);
-                        }
+                        wanted.insert(id.clone());
                     }
                 }
                 let mut exact: Vec<String> =
@@ -885,9 +1062,7 @@ impl Service {
                 for term in exact {
                     if let Some(ids) = postings.get(&term) {
                         for id in ids {
-                            if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
-                                wanted.insert(key);
-                            }
+                            wanted.insert(id.clone());
                         }
                     }
                 }
@@ -896,22 +1071,159 @@ impl Service {
         match atom.get("supersedes") {
             Some(Value::Array(ids)) => {
                 for id in ids {
-                    if let Some((key, _)) = by_id.get_key_value(record::value_text(id).as_str()) {
-                        wanted.insert(key);
-                    }
+                    wanted.insert(record::value_text(id));
                 }
             }
             Some(Value::String(id)) => {
-                if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
-                    wanted.insert(key);
-                }
+                wanted.insert(id.clone());
             }
             _ => {}
         }
-        wanted
-            .into_iter()
-            .filter_map(|id| by_id.get(id).copied())
+        self.records_in(workspace, group, &wanted)
+    }
+
+    /// Build the set index from the snapshot the first time this process
+    /// writes the workspace. Later writes patch it.
+    fn ensure_live_sets(&self, workspace: &str) -> anyhow::Result<()> {
+        if self
+            .live_sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(workspace)
+        {
+            return Ok(());
+        }
+        let snapshot = self.store.live(workspace)?;
+        let mut built = WorkspaceLive::default();
+        for atom in snapshot.iter() {
+            built.insert_shown(atom.as_ref());
+        }
+        self.live_sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(workspace.to_string(), built);
+        Ok(())
+    }
+
+    /// Fold committed records into the set index. A workspace that has not
+    /// been indexed yet is left alone: the next write reads the store.
+    fn patch_live_sets(&self, workspace: &str, written: &[Record]) {
+        let Ok(mut index) = self.live_sets.lock() else {
+            return;
+        };
+        let Some(kept) = index.get_mut(workspace) else {
+            return;
+        };
+        let now = clock::utcnow();
+        let mut removed = false;
+        let mut touched: Vec<String> = Vec::new();
+        for record in written {
+            let id = record.get("id").and_then(Value::as_str).unwrap_or("");
+            let was = kept.place.contains_key(id);
+            kept.upsert_written(record.clone(), &now);
+            if kept.place.contains_key(id) {
+                touched.push(id.to_string());
+            } else if was {
+                removed = true;
+            }
+        }
+        // Links are cut after the whole batch is in the set, so a claim
+        // written beside the one that names it is still live when the cut runs.
+        if removed {
+            kept.cut_every_link();
+        } else {
+            let mut edits: Vec<(SetGroup, usize, Record)> = Vec::new();
+            for id in &touched {
+                let Some(group) = kept.place.get(id).cloned() else {
+                    continue;
+                };
+                let Some(&i) = kept.sets.get(&group).and_then(|members| members.at.get(id)) else {
+                    continue;
+                };
+                let Some(record) = kept
+                    .sets
+                    .get(&group)
+                    .and_then(|members| members.order.get(i))
+                else {
+                    continue;
+                };
+                let mut copy = Record::clone(record);
+                let before = copy.get("links").cloned();
+                let place = &kept.place;
+                WorkspaceLive::cut_links_in(&mut copy, |link| place.contains_key(link));
+                if copy.get("links") != before.as_ref() {
+                    edits.push((group, i, copy));
+                }
+            }
+            for (group, i, copy) in edits {
+                if let Some(members) = kept.sets.get_mut(&group) {
+                    members.order[i] = Arc::new(copy);
+                }
+            }
+        }
+    }
+
+    /// Drop the set index for a workspace that was forgotten.
+    fn drop_live_sets(&self, workspace: &str) {
+        if let Ok(mut index) = self.live_sets.lock() {
+            index.remove(workspace);
+        }
+    }
+
+    /// How many live claims the index holds, or the snapshot's length when
+    /// this workspace has not been indexed.
+    fn indexed_len(&self, workspace: &str) -> anyhow::Result<usize> {
+        if let Ok(index) = self.live_sets.lock() {
+            if let Some(kept) = index.get(workspace) {
+                return Ok(kept.place.len());
+            }
+        }
+        Ok(self.store.live(workspace)?.len())
+    }
+
+    /// The live claims, from the index when this workspace has one.
+    fn indexed_records(&self, workspace: &str) -> anyhow::Result<Vec<Arc<Record>>> {
+        if let Ok(index) = self.live_sets.lock() {
+            if let Some(kept) = index.get(workspace) {
+                return Ok(kept
+                    .sets
+                    .values()
+                    .flat_map(|members| members.order.iter().cloned())
+                    .collect());
+            }
+        }
+        let live = self.store.live(workspace)?;
+        Ok(live.iter().cloned().collect())
+    }
+
+    /// `ids` that are live in `group`, in id order.
+    fn records_in(
+        &self,
+        workspace: &str,
+        group: &SetGroup,
+        ids: &BTreeSet<String>,
+    ) -> Vec<Arc<Record>> {
+        let Ok(index) = self.live_sets.lock() else {
+            return Vec::new();
+        };
+        let Some(members) = index.get(workspace).and_then(|kept| kept.sets.get(group)) else {
+            return Vec::new();
+        };
+        ids.iter()
+            .filter_map(|id| members.at.get(id).map(|&i| Arc::clone(&members.order[i])))
             .collect()
+    }
+
+    /// The first claim in the set that says what `atom` says. The order is
+    /// the snapshot's, so a claim with no tokens still meets the same one.
+    fn first_same(&self, workspace: &str, group: &SetGroup, atom: &Record) -> Option<Arc<Record>> {
+        let index = self.live_sets.lock().unwrap_or_else(|e| e.into_inner());
+        let members = index.get(workspace)?.sets.get(group)?;
+        members
+            .order
+            .iter()
+            .find(|existing| same_claim(existing, atom))
+            .cloned()
     }
 
     /// The same service, holding agent and hook writes as proposals or not.
@@ -944,11 +1256,12 @@ impl Service {
         if self.live_cap == 0 {
             return Ok(0);
         }
-        let live = self.store.live(workspace)?;
-        let over = live.len().saturating_sub(self.live_cap);
+        let len = self.indexed_len(workspace)?;
+        let over = len.saturating_sub(self.live_cap);
         if over == 0 {
             return Ok(0);
         }
+        let live = self.indexed_records(workspace)?;
         let mut ranked: Vec<(f64, String, Record)> = live
             .iter()
             .filter(|a| {
@@ -989,6 +1302,7 @@ impl Service {
         }
         let tombs = self.store.upsert_many(&tombs)?;
         self.project_atoms(&tombs);
+        self.patch_live_sets(workspace, &tombs);
         let forgotten: Vec<String> = tombs
             .iter()
             .filter_map(|atom| atom.get("id").and_then(Value::as_str).map(str::to_string))
@@ -1151,56 +1465,32 @@ impl Service {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let named = atom.get("set").and_then(Value::as_str).map(str::to_string);
-
-        // Compared within its own scope, by reference: a copy of the snapshot
-        // would cost the whole pack on every write.
-        let snapshot = self.store.live(&workspace)?;
-        let snapshot_len = snapshot.len();
+        // The set index is filled from the snapshot once. After that a write
+        // reads its own set, not every live claim in the workspace.
+        self.ensure_live_sets(&workspace)?;
+        let snapshot_len = self.indexed_len(&workspace)?;
         trace.mark("snapshot");
         // Dedupe and replacement stay inside the set the new claim names.
         // Shape maintenance does not: a write in one set used to hand
         // reconcile only that set's ids, and every other set's tokens were
         // dropped and never rebuilt.
-        let live: Vec<&Record> = match named.as_deref() {
-            Some(name) => snapshot
-                .iter()
-                .map(AsRef::as_ref)
-                .filter(|peer: &&Record| peer.get("set").and_then(Value::as_str) == Some(name))
-                .collect(),
-            None => snapshot
-                .iter()
-                .map(AsRef::as_ref)
-                .filter(|peer: &&Record| !peer.contains_key("set"))
-                .collect(),
-        };
+        let group = WorkspaceLive::query_group(&atom);
         let shape = record::Shape::of(&atom);
-        let workspace_live: Vec<&Record> = snapshot.iter().map(AsRef::as_ref).collect();
-        let workspace_ids: HashSet<&str> = workspace_live
-            .iter()
-            .filter_map(|peer| peer.get("id").and_then(Value::as_str))
-            .collect();
-        self.reconcile_shapes(&workspace, &workspace_ids);
-        self.shape_workspace_once(&workspace, &workspace_live);
-        let by_id: HashMap<&str, &Record> = live
-            .iter()
-            .filter_map(|p| p.get("id").and_then(Value::as_str).map(|id| (id, *p)))
-            .collect();
-        let candidates = self.replace_candidates(&workspace, &atom, &shape, &by_id);
+        self.reconcile_shapes(&workspace);
+        self.shape_workspace_once(&workspace);
+        let candidates = self.replace_candidates(&workspace, &group, &atom, &shape);
         // A duplicate shares every token, so it is among the candidates; a
         // claim with no tokens is compared against the whole set.
-        let same_text: Option<&Record> = if shape.tokens.is_empty() {
-            live.iter()
-                .copied()
-                .find(|existing| same_claim(existing, &atom))
+        let same_text = if shape.tokens.is_empty() {
+            self.first_same(&workspace, &group, &atom)
         } else {
             candidates
                 .iter()
-                .copied()
                 .find(|existing| same_claim(existing, &atom))
+                .cloned()
         };
         if let Some(existing) = same_text {
-            return Ok(existing.clone());
+            return Ok(Record::clone(&existing));
         }
         if let Some(stored) = over.as_ref().filter(|_| !accepted) {
             record::hold_provenance(stored, &mut atom, "a post over an existing id")
@@ -1212,10 +1502,10 @@ impl Service {
         let mut closed: Vec<String> = Vec::new();
         let mut batch = Vec::new();
         if record::is_live(&atom, &now) {
-            for existing in candidates {
+            for existing in &candidates {
                 let theirs = self.shape_of(existing);
                 if record::replaces_shaped(&atom, &shape, existing, &theirs) {
-                    let mut peer = existing.clone();
+                    let mut peer = Record::clone(existing);
                     record::close_valid_to(&mut peer, &now);
                     if let Some(id) = peer.get("id").and_then(Value::as_str) {
                         closed.push(id.to_string());
@@ -1246,9 +1536,10 @@ impl Service {
             // otherwise write them back without valid_to. Only a peer that
             // shares a name can be linked, and only its links can be
             // re-selected when it fills; the rest of the pack is not read.
-            let narrowed = self.link_peers(&workspace, &shape, &by_id, &closed);
+            let narrowed = self.link_peers(&workspace, &group, &shape, &closed);
+            let narrowed_refs: Vec<&Record> = narrowed.iter().map(AsRef::as_ref).collect();
             let rewritten =
-                record::apply_links_among(&mut atom, &narrowed, record::LINK_THRESHOLD, &now);
+                record::apply_links_among(&mut atom, &narrowed_refs, record::LINK_THRESHOLD, &now);
             batch.extend(rewritten);
         } else if !atom.contains_key("links") {
             atom.insert("links".into(), Value::Array(Vec::new()));
@@ -1269,10 +1560,8 @@ impl Service {
         trace.mark("links");
         let mut all = vec![atom.clone()];
         all.append(&mut batch);
-        // The snapshot is released first: a write patches the cached live
-        // set in place only while nobody else holds it.
-        drop(snapshot);
         let all = self.store.upsert_many(&all)?;
+        self.patch_live_sets(&workspace, &all);
         if let Some(stored) = all.first() {
             atom = stored.clone();
         }
@@ -1301,19 +1590,19 @@ impl Service {
     /// already link to: the claims sharing an entity with it, closed under
     /// their links, so re-selection sees every candidate it would have seen
     /// over the whole pack.
-    fn link_peers<'p>(
+    fn link_peers(
         &self,
         workspace: &str,
+        group: &SetGroup,
         shape: &record::Shape,
-        by_id: &HashMap<&str, &'p Record>,
         closed: &[String],
-    ) -> Vec<&'p Record> {
-        if shape.entities.is_empty() || by_id.is_empty() {
+    ) -> Vec<Arc<Record>> {
+        if shape.entities.is_empty() {
             return Vec::new();
         }
         // The peers sharing an entity come from the postings; a closed peer
-        // is passed over.
-        let mut wanted: BTreeSet<&str> = BTreeSet::new();
+        // is passed over. Ids outside this set are not candidates.
+        let mut seeds: BTreeSet<String> = BTreeSet::new();
         if let Ok(index) = self.shapes.read() {
             let Some(kept) = index.get(workspace) else {
                 return Vec::new();
@@ -1325,30 +1614,39 @@ impl Service {
                         if closed.iter().any(|c| c == id) {
                             continue;
                         }
-                        if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
-                            wanted.insert(key);
-                        }
+                        seeds.insert(id.clone());
                     }
                 }
             }
         }
+        let Ok(index) = self.live_sets.lock() else {
+            return Vec::new();
+        };
+        let Some(members) = index.get(workspace).and_then(|kept| kept.sets.get(group)) else {
+            return Vec::new();
+        };
+        if members.order.is_empty() {
+            return Vec::new();
+        }
+        let mut wanted: BTreeSet<String> = BTreeSet::new();
         let mut linked: Vec<String> = Vec::new();
-        for id in &wanted {
-            if let Some(peer) = by_id.get(id) {
-                linked.extend(record::links_of(peer));
+        for id in &seeds {
+            if let Some(&i) = members.at.get(id) {
+                wanted.insert(id.clone());
+                linked.extend(record::links_of(&members.order[i]));
             }
         }
         for id in &linked {
             if closed.iter().any(|c| c == id) {
                 continue;
             }
-            if let Some((key, _)) = by_id.get_key_value(id.as_str()) {
-                wanted.insert(key);
+            if members.at.contains_key(id) {
+                wanted.insert(id.clone());
             }
         }
         wanted
             .into_iter()
-            .filter_map(|id| by_id.get(id).copied())
+            .filter_map(|id| members.at.get(&id).map(|&i| Arc::clone(&members.order[i])))
             .collect()
     }
 
@@ -1453,6 +1751,7 @@ impl Service {
         all.append(&mut batch);
         let all = self.store.upsert_many(&all)?;
         self.project_atoms(&all);
+        self.patch_live_sets(workspace, &all);
         Ok(all.into_iter().next().unwrap_or(updated))
     }
 
@@ -1514,6 +1813,7 @@ impl Service {
         };
         let tomb = self.store.delete(workspace, id, why)?;
         self.queue_projection(vec![ProjectionOp::Delete(id.to_string())]);
+        self.patch_live_sets(workspace, std::slice::from_ref(&tomb));
         self.unshape(workspace, &[id.to_string()]);
         Ok(tomb)
     }
@@ -1542,6 +1842,7 @@ impl Service {
         let forgotten = self.store.forget_workspace(workspace)?;
         self.queue_projection(ids.iter().cloned().map(ProjectionOp::Delete).collect());
         self.drop_workspace_shapes(workspace);
+        self.drop_live_sets(workspace);
         if let Ok(mut swept) = self.swept.lock() {
             swept.remove(workspace);
         }
@@ -2337,6 +2638,7 @@ impl Service {
             let batch: Vec<Record> = changed.iter().map(|&i| atoms[i].clone()).collect();
             let batch = self.store.upsert_many(&batch)?;
             self.project_atoms(&batch);
+            self.patch_live_sets(workspace, &batch);
         }
         Ok(json!({"fired": fired.len(), "changed": changed.len(), "held": false}))
     }
@@ -2452,6 +2754,7 @@ impl Service {
             let batch: Vec<Record> = touched.into_iter().map(|k| atoms[k].clone()).collect();
             let batch = self.store.upsert_many(&batch)?;
             self.project_atoms(&batch);
+            self.patch_live_sets(workspace, &batch);
         }
         Ok(json!({
             "live": live.len(),
@@ -2883,6 +3186,112 @@ mod tests {
             })
             .count();
         assert_eq!(copies, 1, "the second write stored another copy of T");
+    }
+
+    /// A thousand claims, split across two sets and none, dedupe and replace
+    /// inside their own set. A retry is the same id, a rewrite closes only
+    /// the claim it rewrites, and the other set is unchanged.
+    #[test]
+    fn a_thousand_claims_keep_one_copy_and_close_only_their_own_rewrites() {
+        let (_dir, svc) = service();
+        let mut ids = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            let mut row = atom(&format!(
+                "Claim {i:04} keeps its own sentence in the fixture."
+            ));
+            row.insert("entities".into(), json!([format!("item-{i:04}")]));
+            match i % 3 {
+                0 => {
+                    row.insert("set".into(), json!("alpha"));
+                }
+                1 => {
+                    row.insert("set".into(), json!("beta"));
+                }
+                _ => {}
+            }
+            let stored = svc.add(row).unwrap();
+            ids.push(stored["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(svc.store().live("w").unwrap().len(), 1000);
+
+        for i in [0usize, 1, 2, 500, 999] {
+            let mut row = atom(&format!(
+                "Claim {i:04} keeps its own sentence in the fixture."
+            ));
+            row.insert("entities".into(), json!([format!("item-{i:04}")]));
+            match i % 3 {
+                0 => {
+                    row.insert("set".into(), json!("alpha"));
+                }
+                1 => {
+                    row.insert("set".into(), json!("beta"));
+                }
+                _ => {}
+            }
+            let again = svc.add(row).unwrap();
+            assert_eq!(
+                again["id"].as_str().unwrap(),
+                ids[i],
+                "retry of {i} stored a second copy"
+            );
+        }
+        assert_eq!(
+            svc.store().live("w").unwrap().len(),
+            1000,
+            "a retry grew the pack"
+        );
+
+        let mut moved = atom("Claim 0000 keeps its own sentence in the fixture.");
+        moved.insert("entities".into(), json!(["item-0000"]));
+        moved.insert("set".into(), json!("beta"));
+        let other = svc.add(moved).unwrap();
+        assert_ne!(
+            other["id"].as_str().unwrap(),
+            ids[0],
+            "the same words in another set replaced the first"
+        );
+
+        let mut closed = Vec::new();
+        for n in 0..10 {
+            let i = n * 3;
+            let mut row = atom(&format!(
+                "Claim {i:04} keeps its own sentence in the fixture now."
+            ));
+            row.insert("entities".into(), json!([format!("item-{i:04}")]));
+            row.insert("set".into(), json!("alpha"));
+            let stored = svc.add(row).unwrap();
+            let supersedes = stored["supersedes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                supersedes
+                    .iter()
+                    .any(|v| v.as_str() == Some(ids[i].as_str())),
+                "rewrite of {i} did not close it: {stored:?}"
+            );
+            assert_ne!(stored["id"].as_str().unwrap(), ids[i].as_str());
+            closed.push(ids[i].clone());
+        }
+
+        let live = svc.store().live("w").unwrap();
+        assert_eq!(live.len(), 1001, "the live set is not the scan's");
+        for id in &closed {
+            assert!(
+                live.iter()
+                    .all(|peer| peer.get("id").and_then(Value::as_str) != Some(id.as_str())),
+                "{id} stayed live after its rewrite"
+            );
+        }
+        let beta = live
+            .iter()
+            .filter(|peer| peer.get("set").and_then(Value::as_str) == Some("beta"))
+            .count();
+        let alpha = live
+            .iter()
+            .filter(|peer| peer.get("set").and_then(Value::as_str) == Some("alpha"))
+            .count();
+        // 334 alpha and 333 beta in the thousand, plus the copy that moved
+        // into beta, and ten alpha rewrites that replace rather than add.
+        assert_eq!(beta, 334, "beta changed under an alpha rewrite");
+        assert_eq!(alpha, 334, "alpha did not keep one live claim per item");
     }
 
     /// Firing rewrites the claims from the cache, which does not carry the

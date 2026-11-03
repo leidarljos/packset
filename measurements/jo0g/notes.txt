@@ -1,0 +1,58 @@
+What one write costs once a shared workspace already holds its claims.
+The writer keeps each set's live claims and reads that set. Before this, every write walked the whole workspace under the lock. The snapshot cache itself was already cheap. The walk was the dedup stage.
+
+## Where these runs happened
+
+Every run was one Kernel-based Virtual Machine guest: Intel(R) Xeon(R) Processor, family 6 model 207, 8 cores, one thread a core, CPU only.
+The guest ran Linux 6.12.94+ and rustc 1.97.1.
+Ext4 runs used `/tmp` on the root filesystem, mounted `rw,relatime`.
+Tmpfs runs used `/dev/shm`, mounted `rw,nosuid,nodev`.
+
+The develop binary is `packsetd` built from f1c992b8a211027a39d00b7b44f3c17bcd35b67c.
+The branch binary is `packsetd` built from the sources in this commit.
+Both were release builds, encoder off.
+
+The raw logs are the `*.log` files here. Each header names the draw, the start time, the binary, the seed, the kernel, the CPU and the filesystem.
+`summary.py` pools every traced write. Quartiles are `statistics.quantiles(n=4, method="inclusive")`.
+
+## How a draw was made
+
+One seed pack was written for each size, 1,000, 5,000 and 20,000 live lessons in the workspace `shared`, and every draw copied that pack.
+Hammer names its workspace from its pid, so it cannot continue a copied pack. The claims posted here are the shape it posts: one lesson, six pseudo-words, one entity.
+A draw then posted 48 new lessons into the copy. 48 is enough for a median and an interquartile range, and it is small beside the seeded pack, so the size under test stays that size.
+`PACKSET_LIVE_CAP` was 20,048, the default cap of 20,000 plus those 48. The default cap would have forgotten a claim on the write that crossed 20,000, and that forgetting is the cap stage, not the walk.
+
+Six draws of each condition, odd draws in the order of `conditions.txt` and even draws in reverse.
+The session ran on 2026-11-03 from 10:41:49 to 10:43:09 UTC.
+
+The first write of a process shapes the pack. On the branch it also copies the live claims into the set index. At 20,000 claims that first write took about 240 ms before and about 360 ms after, of which about 120 ms was the copy. The medians below are the later writes: 47 of the 48 in each draw.
+
+## Steady writes
+
+Rows are six draws, 288 writes, on the Intel Xeon above. Times are milliseconds. The rate is writes a second, wall time of the 48 posts.
+
+| pack | live | dedup before | dedup after | total before | total after | writes/s before | writes/s after |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ext4 | 1,000 | 1.2 (1.1 to 1.2) | 0.7 (0.7 to 0.7) | 3.1 (2.9 to 3.7) | 2.7 (2.4 to 3.0) | 222 (220 to 224) | 246 (241 to 247) |
+| ext4 | 5,000 | 7.2 (6.7 to 7.6) | 3.6 (3.3 to 3.8) | 13.9 (13.2 to 14.4) | 10.3 (9.8 to 10.7) | 59 (58 to 59) | 72 (71 to 72) |
+| ext4 | 20,000 | 23.3 (12.4 to 26.2) | 10.3 (2.1 to 12.1) | 47.6 (21.5 to 50.7) | 35.1 (12.0 to 36.7) | 19 (19 to 20) | 24 (24 to 24) |
+| tmpfs | 1,000 | 1.1 (1.0 to 1.1) | 0.7 (0.7 to 0.7) | 2.2 (2.1 to 2.2) | 1.9 (1.8 to 1.9) | 294 (294 to 295) | 313 (312 to 315) |
+| tmpfs | 5,000 | 7.0 (6.6 to 7.5) | 3.5 (3.2 to 3.8) | 12.8 (12.3 to 13.4) | 9.3 (8.9 to 9.6) | 64 (63 to 64) | 77 (76 to 78) |
+| tmpfs | 20,000 | 22.2 (11.9 to 24.7) | 10.2 (2.1 to 12.0) | 45.3 (19.9 to 47.4) | 33.7 (10.7 to 35.3) | 21 (20 to 22) | 25 (25 to 25) |
+
+The snapshot stage stayed under 0.1 ms once the listing cache was warm. Replace, upsert and the cap stage did not move: a write still checks the same candidates, and the cap was not crossed.
+The wide interquartile range at 20,000 is two kinds of probe text in one pool. A claim that shares only the common words of the seed has the whole pack as candidates, and dedup is the high half. A claim that also shares one of the seed's pseudo-words is decided from the short posting lists, and dedup is the low half. Both halves fell.
+
+## Stages at 20,000 on ext4, median (IQR)
+
+| stage | before | after |
+| --- | --- | --- |
+| prepare | 0.1 (0.1 to 0.1) | 0.1 (0.1 to 0.1) |
+| snapshot | 0.0 (0.0 to 0.0) | 0.0 (0.0 to 0.0) |
+| dedup | 23.3 (12.4 to 26.2) | 10.3 (2.1 to 12.1) |
+| replace | 15.4 (0.0 to 15.8) | 15.4 (0.0 to 15.6) |
+| links | 0.0 (0.0 to 0.0) | 0.2 (0.0 to 0.2) |
+| upsert | 8.7 (8.3 to 9.2) | 9.0 (8.5 to 9.5) |
+| project | 0.0 (0.0 to 0.0) | 0.0 (0.0 to 0.0) |
+| cap | 0.0 (0.0 to 0.0) | 0.0 (0.0 to 0.0) |
+| total | 47.6 (21.5 to 50.7) | 35.1 (12.0 to 36.7) |

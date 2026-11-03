@@ -1,0 +1,58 @@
+# draw 3 of 6, 4 of 12 in it, started 2026-11-03T10:42:17.363437122Z
+# packsetd /tmp/jo0g-bins/branch/packsetd
+# seed /tmp/jo0g-seeds/1000
+# Linux 6.12.94+, Intel(R) Xeon(R) Processor, 8 CPUs
+# dest /dev/shm/jo0g/draw-1k-branch-tmpfs-3 on tmpfs  rw,nosuid,nodev
+tmpfs  rw,nosuid,nodev,noexec,relatime
+# python3 /agent/repos/packset/measurements/jo0g/drive.py probe
+probe_writes=48 seconds=0.1510 write_req_s=317.87
+# exit 0
+# trace
+0fcfdb92032f2897570c4ba7f1550c69 live=1000 total=14.0ms prepare=1.7 snapshot=4.5 dedup=6.6 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+5d3c408225e2d095a9312133e65db07f live=1001 total=1.9ms prepare=0.1 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+d5f7b024e011db6898def80acb50c728 live=1002 total=1.9ms prepare=0.1 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+c7bdf5f19190a3b748cc39ae4c4b72c8 live=1003 total=1.8ms prepare=0.1 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+f96a2e49a6a3c7874d6dc77d5f0b3d8e live=1004 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+cb3768237a8e19701f74bce0a2a25d36 live=1005 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+861ff9a780f4c5b111dd2e15a6538bc4 live=1006 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+179e3288ba1182d1111209ab6d308e0c live=1007 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+37c1c2a9dd0357d59ff37ce7d46c2296 live=1008 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+bdbe64d68e0660b6de566fe8d37f8953 live=1009 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+1ac7de23b6273fe01eb310f2febff57d live=1010 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+6870779ea869ec874f2170f2aa70af18 live=1011 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+b61c13638c281ddaedb6a4d557e914e9 live=1012 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+9d37c518621264c8a78c07d670a76afe live=1013 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+eae021f2fce6b43dbfd06e634b879131 live=1014 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+44345f132189edaf2b0b4933e0dd84a8 live=1015 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+dfd8f38ee36e951a70f60dbfc28bdc7e live=1016 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+74a63d17df06c8d1992d4c676191f4e3 live=1017 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+f8dafc429b45bc2305af51f93068680a live=1018 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+eb602f7fe12975c325edfb1323a27d3f live=1019 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+416514969c0d0e1967c80eb290af0fd8 live=1020 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+774438e7defb347cdced4e9a9bca29ad live=1021 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+b2b560318062bb3eef213763b72abd4f live=1022 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+f16b43a2d606827a737dd289c02c07e3 live=1023 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+3c0334803e65f7bd9bb0eef8260caf69 live=1024 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+bc391215b516beddb6bbf1d5e62cb55c live=1025 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+a1970e4b38f605756c4f333fdf49faed live=1026 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+b1c70a9f669d9cd105d198fc7113a250 live=1027 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+a57d0a11155535fb88db0056b1a4eca0 live=1028 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+f2fa6722acae5c52caa964289003321c live=1029 total=1.9ms prepare=0.1 snapshot=0.0 dedup=0.8 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+513b7930a734f14d55a774efd52f3731 live=1030 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+7489a22e153560664f909ff86f02813c live=1031 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+8283e1f9690abb3ac79eefd7e8181103 live=1032 total=1.9ms prepare=0.1 snapshot=0.0 dedup=0.8 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+5db60aadbefafb1daaf1f8903b5482d4 live=1033 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+a52e09e924a61dbda847f87efe11d370 live=1034 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+1a8c94cc35bc5c8d19c612e6b4c7dfe7 live=1035 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.8 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+0d76da6221df697ed30bd55d12887549 live=1036 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+6a2106b80fae5e0f564f1c63883eb397 live=1037 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+debfc53cb4bd9bb7380b3066bfa385fd live=1038 total=1.9ms prepare=0.1 snapshot=0.0 dedup=0.8 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+b695aa9a09d782a7946ae3516cb87c02 live=1039 total=1.8ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+c938058c49b5cfdabb9ec1775835a1eb live=1040 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+3338107fdc5a452f0da5ccde9e0300a0 live=1041 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.8 links=0.0 upsert=0.4 project=0.0 cap=0.0
+b5550d9e2c3fb97680feaa395dbd7625 live=1042 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+3a5dec6431d4133508d5a2e1e1a416ac live=1043 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+96ee15b1896ac33774d19de0b2266f95 live=1044 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.8 links=0.0 upsert=0.3 project=0.0 cap=0.0
+c40742c0a55482184b078e54be2b62e6 live=1045 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.4 project=0.0 cap=0.0
+7d84a54037f038e4b1bbc02d547427b0 live=1046 total=1.9ms prepare=0.0 snapshot=0.0 dedup=0.7 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
+6bb1f3ba51d2386bd29a45fe7bb06b4c live=1047 total=1.9ms prepare=0.1 snapshot=0.0 dedup=0.8 replace=0.7 links=0.0 upsert=0.3 project=0.0 cap=0.0
