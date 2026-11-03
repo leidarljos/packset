@@ -153,18 +153,30 @@ fn written_last(atom: &Record) -> &str {
 /// first written and no rewrite changes it.
 pub const UPDATED: &str = "updated";
 
-/// Keep the stored `ts` on a rewrite and stamp `updated`. A rewrite of
-/// links, a review clock or a closed window used to put the time of the
-/// rewrite in `ts`, so the time the atom was written was lost.
+/// Keep the time the stored record was created on a rewrite and stamp
+/// `updated`. A rewrite of links, a review clock or a closed window used
+/// to put the time of the rewrite in `ts`, so the time the atom was
+/// written was lost. A stored record from before [`UPDATED`] gets the
+/// time [`created_at`] finds, so a write that reaches it before
+/// [`Store::restore_created`] does keeps that time too.
 fn stamp_write(payload: &mut Record, stored: Option<&Record>, now: &str) {
-    if let Some(created) = stored
-        .and_then(|old| old.get("ts"))
-        .and_then(Value::as_str)
-        .filter(|ts| !ts.is_empty())
-    {
-        payload.insert("ts".into(), Value::String(created.to_string()));
+    if let Some(created) = stored.and_then(created_at) {
+        payload.insert("ts".into(), Value::String(created));
     }
     payload.insert(UPDATED.into(), Value::String(now.to_string()));
+}
+
+/// When a stored record was created: its `ts`, or for a record from
+/// before [`UPDATED`], the earlier time [`created_before_rewrite`] finds.
+fn created_at(atom: &Record) -> Option<String> {
+    let ts = atom
+        .get("ts")
+        .and_then(Value::as_str)
+        .filter(|ts| !ts.is_empty())?;
+    if atom.contains_key(UPDATED) {
+        return Some(ts.to_string());
+    }
+    Some(created_before_rewrite(atom).unwrap_or_else(|| ts.to_string()))
 }
 
 /// The time a record written before [`UPDATED`] existed was created, when
@@ -184,46 +196,175 @@ fn created_before_rewrite(atom: &Record) -> Option<String> {
         .or_else(|| earlier(atom.get("source").and_then(|s| s.get("at"))))
 }
 
-/// Stamp every record a write before [`UPDATED`] left: its `ts` becomes
-/// `updated`, and `ts` goes back to the time it was created where
-/// [`created_before_rewrite`] still finds it. A record that has `updated`
-/// is left alone, so a second open writes nothing.
-fn restore_created(env: &Env, db: Database<Bytes, Bytes>) -> anyhow::Result<usize> {
-    let mut fixed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    {
-        let rtxn = env.read_txn()?;
-        for item in db.iter(&rtxn)? {
-            let (key, raw) = item?;
-            let Ok(Value::Object(mut atom)) = serde_json::from_slice::<Value>(raw) else {
-                continue;
-            };
-            if atom.contains_key(UPDATED) {
-                continue;
+/// A record a writer from before [`UPDATED`] left, stamped: its `ts`
+/// becomes `updated`, and `ts` goes back to [`created_at`]. `None` for a
+/// record that has `updated` already, or no `ts` to move.
+fn stamp_old(mut atom: Record) -> Option<Record> {
+    if atom.contains_key(UPDATED) {
+        return None;
+    }
+    let last = atom
+        .get("ts")
+        .and_then(Value::as_str)
+        .filter(|ts| !ts.is_empty())?
+        .to_string();
+    let created = created_at(&atom)?;
+    atom.insert("ts".into(), Value::String(created));
+    atom.insert(UPDATED.into(), Value::String(last));
+    Some(atom)
+}
+
+/// Stored bytes one step of [`Store::restore_created`] rewrites. A write
+/// that arrives mid-step waits for its commit. Over 50,000 records with
+/// 384-d vectors (394 MiB; 8-core Intel Xeon, on 947c498), a `remember`
+/// during the pass took 9/12 ms (median/max) at 256 KiB steps, 13/14 ms
+/// at 1 MiB and 27/35 ms at 4 MiB, against 8/9 ms after it. The pass took
+/// 3.0, 2.4 and 2.4 s. 1 MiB is as fast as 4 MiB for half the wait.
+const STAMP_STEP_BYTES: usize = 1024 * 1024;
+
+/// Steps of free space the pass needs. LMDB reuses the pages a step frees
+/// two commits later, so two steps are in flight, and leaf splits and the
+/// branch pages above them add to each. On a tmpfs (8-core Intel Xeon, on
+/// 947c498), 50,000 records of 600 B and of 8 KiB (33 and 394 MiB) were
+/// each stamped with 3 MiB free, and each stopped with 2 MiB. Without
+/// steps, the 33 MiB store needed more than 15 MiB.
+const STAMP_ROOM_STEPS: usize = 3;
+
+/// The one field [`Store::restore_created`] reads to pass a record by, so
+/// a pack stamped already is not parsed into records again at each start.
+#[derive(serde::Deserialize)]
+struct Stamp {
+    updated: Option<serde::de::IgnoredAny>,
+}
+
+impl Store {
+    /// Stamp the records a writer from before [`UPDATED`] left, as
+    /// [`stamp_old`] does, about [`STAMP_STEP_BYTES`] to a transaction.
+    ///
+    /// packsetd runs this behind its listener, so an upgraded pack answers
+    /// while it is rewritten. Each step commits on its own, and a step that
+    /// fails leaves its records as they were. Until the pass ends a read
+    /// can show a record as it was before the upgrade, which is how it read
+    /// then: the cached sets are dropped once, after the last step, not at
+    /// each one. A record that has `updated` is passed by, so a second run
+    /// writes nothing. Returns how many records were stamped.
+    ///
+    /// # Errors
+    ///
+    /// The scan's or the failed step's, after its line is printed.
+    pub fn restore_created(&self) -> anyhow::Result<usize> {
+        let mut stamped = 0;
+        let mut after: Option<Vec<u8>> = None;
+        let stopped = loop {
+            let mut step: Vec<Vec<u8>> = Vec::new();
+            let mut bytes = 0usize;
+            let scanned = self.each_unstamped(after.as_deref(), |key, len| {
+                step.push(key.to_vec());
+                bytes = bytes.saturating_add(len);
+                bytes < STAMP_STEP_BYTES
+            });
+            if let Err(err) = scanned {
+                break Some((err, None));
             }
-            let Some(last) = atom
-                .get("ts")
-                .and_then(Value::as_str)
-                .filter(|ts| !ts.is_empty())
-                .map(str::to_string)
-            else {
-                continue;
+            let Some(last) = step.last() else {
+                break None;
             };
-            if let Some(created) = created_before_rewrite(&atom) {
-                atom.insert("ts".into(), Value::String(created));
+            after = Some(last.clone());
+            match self.stamp_step(&step) {
+                Ok(count) => stamped += count,
+                Err(err) => break Some((err, Some(bytes))),
             }
-            atom.insert(UPDATED.into(), Value::String(last));
-            fixed.push((key.to_vec(), serde_json::to_vec(&Value::Object(atom))?));
+        };
+        if stamped > 0 {
+            // After the last commit, as in `forget_workspace`.
+            self.generation.fetch_add(1, Ordering::AcqRel);
         }
+        release_heap();
+        let Some((err, needs)) = stopped else {
+            if stamped > 0 {
+                eprintln!("packsetd: stamped {stamped} records written before `updated`");
+            }
+            return Ok(stamped);
+        };
+        let mut left = 0usize;
+        let _ = self.each_unstamped(None, |_, _| {
+            left += 1;
+            true
+        });
+        // A full disk can read as an I/O error: LMDB reports a short write
+        // that way. The room is said whatever the error, since it is the
+        // first thing to check.
+        let room = needs.map_or_else(String::new, |bytes| {
+            format!(
+                " Stamping them needs {} free in {}.",
+                mebibytes(bytes.saturating_mul(STAMP_ROOM_STEPS)),
+                self.db_dir.display()
+            )
+        });
+        eprintln!(
+            "packsetd: {left} records from before `updated` stay as they were: {err}.{room} \
+             The next start tries again, and writes go on meanwhile."
+        );
+        Err(err)
     }
-    if fixed.is_empty() {
-        return Ok(0);
+
+    /// Visit each key after `after` whose record has no `updated`, with the
+    /// length stored, until `visit` returns `false`.
+    fn each_unstamped(
+        &self,
+        after: Option<&[u8]>,
+        mut visit: impl FnMut(&[u8], usize) -> bool,
+    ) -> anyhow::Result<()> {
+        use std::ops::Bound;
+        let rtxn = self.env.read_txn()?;
+        let range = (
+            after.map_or(Bound::Unbounded, Bound::Excluded),
+            Bound::Unbounded,
+        );
+        for item in self.db.range(&rtxn, &range)? {
+            let (key, raw) = item?;
+            let unstamped = matches!(
+                serde_json::from_slice::<Stamp>(raw),
+                Ok(Stamp { updated: None })
+            );
+            if unstamped && !visit(key, raw.len()) {
+                break;
+            }
+        }
+        Ok(())
     }
-    let mut wtxn = env.write_txn()?;
-    for (key, blob) in &fixed {
-        db.put(&mut wtxn, key, blob)?;
+
+    /// Stamp one step's records in one transaction and say how many. Each
+    /// is read again under the write lock, so a write since the scan is
+    /// what is kept.
+    fn stamp_step(&self, step: &[Vec<u8>]) -> anyhow::Result<usize> {
+        let mut wtxn = self.env.write_txn()?;
+        let mut count = 0;
+        for key in step {
+            let stored = self
+                .db
+                .get(&wtxn, key)?
+                .and_then(|raw| serde_json::from_slice::<Value>(raw).ok());
+            let Some(atom) = stored.and_then(|v| match v {
+                Value::Object(map) => stamp_old(map),
+                _ => None,
+            }) else {
+                continue;
+            };
+            self.db.put(&mut wtxn, key, &serde_json::to_vec(&atom)?)?;
+            count += 1;
+        }
+        if count == 0 {
+            return Ok(0);
+        }
+        wtxn.commit()?;
+        Ok(count)
     }
-    wtxn.commit()?;
-    Ok(fixed.len())
+}
+
+/// `n` bytes in MiB, to one decimal, for a line a person reads.
+fn mebibytes(n: usize) -> String {
+    format!("{:.1} MiB", n as f64 / (1024.0 * 1024.0))
 }
 
 /// What a search runs over: the snapshot, the inverted index, the tokens
@@ -362,10 +503,6 @@ impl Store {
         let mut wtxn = env.write_txn()?;
         let db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, None)?;
         wtxn.commit()?;
-        let restored = restore_created(&env, db)?;
-        if restored > 0 {
-            eprintln!("packsetd: stamped {restored} records written before `updated`");
-        }
         // A store created while the file was extended to the map still has
         // that tail. The pages at and below the last used page are the
         // database; the rest can go back to the filesystem. A later write
@@ -2162,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_from_before_updated_gets_its_written_time_back_on_open() {
+    fn a_record_from_before_updated_gets_its_written_time_back_from_the_pass() {
         let dir = tempfile::tempdir().unwrap();
         let rewritten = "2026-10-18T19:31:19.444Z";
         let rows = [
@@ -2170,6 +2307,9 @@ mod tests {
             json!({"id": "moved", "workspace": "w", "text": "a",
                    "ts": rewritten, "valid_from": "2026-10-16T10:07:21.644Z",
                    "source": {"at": "2026-10-16T10:07:21Z"}}),
+            // As `moved`, and written again before the pass reaches it.
+            json!({"id": "early", "workspace": "w", "text": "f",
+                   "ts": rewritten, "valid_from": "2026-10-16T10:07:21.644Z"}),
             // Never rewritten: ts and valid_from agree.
             json!({"id": "kept", "workspace": "w", "text": "b",
                    "ts": "2026-10-12T08:00:00.000Z",
@@ -2198,6 +2338,17 @@ mod tests {
         }
         let store = Store::open(dir.path()).unwrap();
         let got = |id: &str| store.get("w", id).unwrap().unwrap();
+        assert_eq!(got("moved")["ts"], json!(rewritten), "the open stamped");
+        assert!(!got("moved").contains_key(UPDATED), "the open stamped");
+        store
+            .upsert(&record(
+                json!({"id": "early", "workspace": "w", "text": "g",
+                                   "ts": "2026-10-20T00:00:00.000Z"}),
+            ))
+            .unwrap();
+        assert_eq!(got("early")["ts"], json!("2026-10-16T10:07:21.644Z"));
+        assert_eq!(store.restore_created().unwrap(), 5);
+        assert_eq!(got("early")["text"], json!("g"), "the pass undid a write");
         assert_eq!(got("moved")["ts"], json!("2026-10-16T10:07:21.644Z"));
         assert_eq!(got("moved")[UPDATED], json!(rewritten));
         assert_eq!(got("kept")["ts"], json!("2026-10-12T08:00:00.000Z"));
@@ -2207,12 +2358,11 @@ mod tests {
         assert_eq!(got("bare")["ts"], json!(rewritten));
         assert_eq!(got("bare")[UPDATED], json!(rewritten));
         let before: Vec<Record> = store.scan(Some("w")).unwrap();
-        drop(store);
-        let again = Store::open(dir.path()).unwrap();
+        assert_eq!(store.restore_created().unwrap(), 0);
         assert_eq!(
-            again.scan(Some("w")).unwrap(),
+            store.scan(Some("w")).unwrap(),
             before,
-            "a second open rewrote"
+            "a second pass rewrote"
         );
     }
 

@@ -97,6 +97,10 @@ pub fn run() -> anyhow::Result<()> {
     if owned {
         watch_parent(Arc::clone(&service), parent_signal);
     }
+    // An upgraded pack is stamped behind the listener, so `packset ensure`
+    // does not wait on it and its failure does not stop the writer.
+    let stamping = Arc::clone(&service);
+    std::thread::spawn(move || stamping.store().restore_created());
     // Every user on the host reaches loopback; the token is what keeps the
     // pack its owner's. `PACKSET_AUTH=off` is for a client that cannot send it.
     let token = if std::env::var("PACKSET_AUTH").is_ok_and(|v| v.trim() == "off") {
