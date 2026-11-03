@@ -98,7 +98,8 @@ Rows are six runs each, of the store at 177c9f5333e2613b17f6481a95c7c5c5ac321600
 | tmpfs, `huge=always` | after, holding 21 MiB | stamping | 2048 | 20692 | 42700 | 36704 (36656 to 36752) | failed 6 of 6 |
 | tmpfs, `huge=always` | after, holding 21 MiB | current | 2048 | 20692 | 42700 | 35772 (35772 to 35820) | failed 6 of 6 |
 
-Before the fix a start kept the pages it read, so it peaked at about the pack, and on ext4 6056 KiB of the data file was still resident after the pass.
+Before the fix, a start kept the pages it read, so it peaked at about the pack.
+On ext4, 6056 KiB of the data file was still resident after the pass.
 With the fix, no page of the data file stayed resident once a pass ended.
 
 ### The smallest regression the bound catches
