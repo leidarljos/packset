@@ -271,10 +271,12 @@ fn tombstone_key(key: &[u8]) -> Vec<u8> {
 
 /// The atom database, plus the lock that makes it one writer.
 pub struct Store {
+    /// Declared before `_lock`: fields drop in order, and the environment
+    /// has to be closed before another opener can take the lock.
     env: Env,
     db: Database<Bytes, Bytes>,
-    /// Held open for as long as the store is: dropping it drops the lock.
-    _lock: File,
+    /// Held for as long as the store is: dropping it drops the lock.
+    _lock: HomeLock,
     /// Bumped by every write, so a reader can tell a stale snapshot.
     generation: AtomicU64,
     /// Unix millis of the last [`Self::release_after_write`].
@@ -308,6 +310,16 @@ pub struct Store {
     scanned: AtomicU64,
     #[cfg(test)]
     tombstones_read: AtomicU64,
+}
+
+impl Drop for Store {
+    /// heed keeps every environment it opens in a table of its own and
+    /// closes one only after `prepare_for_closing`. Without it a dropped
+    /// store keeps three descriptors, its map and an LMDB thread key until
+    /// the process ends, and glibc has 1024 keys.
+    fn drop(&mut self) {
+        let _closing = self.env.clone().prepare_for_closing();
+    }
 }
 
 /// What `status` reports over one workspace: live, tombstoned and expired
@@ -1792,7 +1804,7 @@ fn private_home(root: &Path) -> std::io::Result<()> {
 }
 
 /// Take the exclusive lock, or say who has it. One writer per `memory.lmdb`.
-fn take_lock(path: &Path) -> anyhow::Result<File> {
+fn take_lock(path: &Path) -> anyhow::Result<HomeLock> {
     use std::os::fd::AsRawFd;
     let file = fs::OpenOptions::new()
         .create(true)
@@ -1803,11 +1815,29 @@ fn take_lock(path: &Path) -> anyhow::Result<File> {
     if taken != 0 {
         anyhow::bail!("store home is already open");
     }
-    Ok(file)
+    Ok(HomeLock(file))
 }
 
+/// The `flock` on `packsetd.lock`, released on drop.
+///
+/// The lock belongs to the open file description, and a child forked while
+/// the store is open shares that description until it execs. Closing this
+/// descriptor alone leaves the home locked for as long as such a child
+/// runs; unlocking releases it whoever else holds the description.
+struct HomeLock(File);
+
+impl Drop for HomeLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a libc call on a fd this lock owns.
+        unsafe { flock(self.0.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+// `<sys/file.h>`; the same values on Linux, macOS and the BSDs.
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
+const LOCK_UN: i32 = 8;
 
 extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
@@ -1859,28 +1889,6 @@ mod tests {
 
     fn record(value: Value) -> Record {
         value.as_object().unwrap().clone()
-    }
-
-    /// Open a home this test closed a moment ago. A test running beside
-    /// this one can fork a child (`git`, `cat`, the reader in
-    /// `a_foreign_reader_keeps_the_tail`) while the earlier store is open.
-    /// Until that child execs, it holds a copy of the lock file's open
-    /// description, and with it the `flock`, so the lock is right to
-    /// refuse. The reopen waits for the child to exec, up to five seconds.
-    fn reopen(home: &Path) -> Store {
-        let started = std::time::Instant::now();
-        loop {
-            match Store::open(home) {
-                Ok(store) => return store,
-                Err(err)
-                    if err.to_string() == "store home is already open"
-                        && started.elapsed() < std::time::Duration::from_secs(5) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(err) => panic!("reopen {}: {err}", home.display()),
-            }
-        }
     }
 
     fn store() -> (tempfile::TempDir, Store) {
@@ -1968,7 +1976,7 @@ mod tests {
             before > 64 * 1024 * 1024,
             "the fixture did not allocate the map ({before} bytes)"
         );
-        let store = reopen(dir.path());
+        let store = Store::open(dir.path()).unwrap();
         assert_eq!(
             store.get("w", "one").unwrap().unwrap()["text"],
             json!("kept")
@@ -2045,7 +2053,7 @@ mod tests {
         let home = dir.path().to_path_buf();
         let data = path.clone();
         let during = std::thread::spawn(move || {
-            let store = reopen(&home);
+            let store = Store::open(&home).unwrap();
             let text = store.get("w", "one").unwrap().unwrap()["text"].clone();
             drop(store);
             (text, allocated_bytes(&data))
@@ -2064,7 +2072,7 @@ mod tests {
         let home = dir.path().to_path_buf();
         let data = path.clone();
         let after = std::thread::spawn(move || {
-            let store = reopen(&home);
+            let store = Store::open(&home).unwrap();
             let text = store.get("w", "one").unwrap().unwrap()["text"].clone();
             drop(store);
             assert_eq!(text, json!("kept"));
@@ -2188,7 +2196,7 @@ mod tests {
             }
             wtxn.commit().unwrap();
         }
-        let store = reopen(dir.path());
+        let store = Store::open(dir.path()).unwrap();
         let got = |id: &str| store.get("w", id).unwrap().unwrap();
         assert_eq!(got("moved")["ts"], json!("2026-10-16T10:07:21.644Z"));
         assert_eq!(got("moved")[UPDATED], json!(rewritten));
@@ -2200,7 +2208,7 @@ mod tests {
         assert_eq!(got("bare")[UPDATED], json!(rewritten));
         let before: Vec<Record> = store.scan(Some("w")).unwrap();
         drop(store);
-        let again = reopen(dir.path());
+        let again = Store::open(dir.path()).unwrap();
         assert_eq!(
             again.scan(Some("w")).unwrap(),
             before,
@@ -2504,7 +2512,7 @@ mod tests {
         };
         check(&store);
         drop(store);
-        check(&reopen(dir.path()));
+        check(&Store::open(dir.path()).unwrap());
     }
 
     /// Advising the database cold and trimming the heap leaves a claim readable.
