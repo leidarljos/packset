@@ -1,3 +1,7 @@
 [toolchain]
-channel = "1.89.0"
+# The channel every workflow installs. Cargo uses this file even when an
+# action sets a different default, so a workflow that names another channel
+# does not change the compiler the steps run. 1.97.1 is the clippy the
+# workflows already asked for; 1.89.0 left that clippy unrun.
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]

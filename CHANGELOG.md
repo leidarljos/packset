@@ -2,6 +2,8 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+<!-- towncrier release notes start -->
+
 ## 0.17.3 (2026-11-01)
 
 - The writer gives free heap back after a write, at most once every 50

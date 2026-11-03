@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # rust-toolchain.toml names this same channel. Cargo runs the file's
+      # pin, so a workflow that installs a different compiler does not
+      # change the one these steps actually run.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: 1.97.1
@@ -31,6 +34,22 @@ jobs:
       # neither is needed to build or run the writer.
       - name: Clippy
         run: cargo clippy --locked --workspace --exclude packset-milli --exclude packset-embed --all-targets -- -D warnings
+      - name: Workspace tests
+        run: cargo test --locked --workspace --exclude packset-milli --exclude packset-embed --no-fail-fast
+
+  # The Linux job above is the suite. This runner does not build ONNX
+  # Runtime, so the encoder crate stays out, and packset-milli stays out
+  # for the same reason the Linux job leaves it out: a native build the
+  # writer does not need in order to answer.
+  rust-test-macos:
+    name: cargo test on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Workspace tests
         run: cargo test --locked --workspace --exclude packset-milli --exclude packset-embed --no-fail-fast
 
@@ -158,3 +177,21 @@ jobs:
           set -euo pipefail
           python -m pip install -q 'cogapp==3.6.0'
           cog --check --diff @cogfiles.txt
+
+  changelog:
+    name: towncrier build --draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Draft only: the job prints the fragments and must not rewrite
+      # CHANGELOG.md. The version is the workspace crate version, which is
+      # the number a release would collect the fragments under.
+      - name: towncrier build --draft
+        run: |
+          set -euo pipefail
+          python -m pip install -q 'towncrier==26.9.0'
+          ver=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          python -m towncrier build --draft --version "$ver"

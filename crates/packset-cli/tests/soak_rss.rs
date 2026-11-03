@@ -397,7 +397,7 @@ fn across(jobs: usize, work: &(impl Fn(usize) + Sync)) {
 }
 
 fn write_claim(url: &str, workspace: usize, n: usize) {
-    let set = if n % 2 == 0 { "notes" } else { "refs" };
+    let set = if n.is_multiple_of(2) { "notes" } else { "refs" };
     post(
         url,
         "/v1/atoms",
@@ -476,7 +476,7 @@ fn anonymous_memory_stays_flat_under_field_load() {
         embedded,
         384,
         "the fake encoder did not land a vector: {}",
-        &listed.chars().take(240).collect::<String>()
+        listed.chars().take(240).collect::<String>()
     );
     let mut held = [0u64; 3];
     for (window, sample) in held.iter_mut().enumerate() {
