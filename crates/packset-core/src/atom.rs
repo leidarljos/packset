@@ -102,7 +102,7 @@ pub fn is_accession(value: &str) -> bool {
         && !text.contains(|c: char| c.is_whitespace() || c == ',')
 }
 
-/// Where an atom came from. Admission reads this, not the wording.
+/// Where an atom came from.
 pub const ORIGINS: &[&str] = &[
     "user-declared",
     "agent-derived",
@@ -171,25 +171,6 @@ pub fn promotion_horizon(origin: &str, content: Option<&str>) -> &'static str {
         }
     }
     "standing"
-}
-
-/// Whether this write is held as a proposal instead of stored.
-///
-/// An agent writes its own memories: an `agent-derived` lesson and a hook
-/// write are live at once, keep their origin, and are reviewed and pruned
-/// afterwards. `hold` is the writer's opt-in (`PACKSET_HOLD_AGENT_WRITES=1`)
-/// to file them as proposals that wait for an accept instead.
-#[must_use]
-pub fn needs_accept(origin: &str, hook: bool, hold: bool) -> bool {
-    hold && (hook || origin == "agent-derived")
-}
-
-/// Whether this writer holds agent and hook writes as proposals: only when
-/// `PACKSET_HOLD_AGENT_WRITES` is `1`, `true` or `yes`.
-#[must_use]
-pub fn hold_agent_writes() -> bool {
-    std::env::var("PACKSET_HOLD_AGENT_WRITES")
-        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
 /// Where an origin sits in the one order a write may only move down:
@@ -381,15 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_derived_write_is_live_unless_the_writer_holds() {
-        assert!(!needs_accept("agent-derived", false, false));
-        assert!(!needs_accept("user-declared", true, false));
-        assert!(needs_accept("agent-derived", false, true));
-        assert!(needs_accept("user-declared", true, true));
-        assert!(!needs_accept("user-declared", false, true));
-        assert!(!needs_accept("peer", false, true));
-        assert!(!needs_accept("tool-echo", false, true));
-        assert!(!needs_accept("external", false, true));
+    fn the_five_origins_are_known_and_unknown_is_not() {
         assert!(ORIGINS.iter().all(|name| known_origin(name)));
         assert!(!known_origin("forged"));
         assert!(!known_origin(UNKNOWN_ORIGIN));

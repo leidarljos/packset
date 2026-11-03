@@ -306,40 +306,6 @@ pub fn compact_day(
     Ok(out)
 }
 
-/// Whether an open proposal is this write again.
-///
-/// A retry of the same text, kind, origin and hook is the proposal already
-/// held. It does not append another one.
-fn same_hold(rec: &Value, atom: &Record) -> bool {
-    let text = atom
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let norm = norm_claim(text);
-    if norm.is_empty() || norm_claim(rec.get("text").and_then(Value::as_str).unwrap_or("")) != norm
-    {
-        return false;
-    }
-    if rec.get("origin").and_then(Value::as_str) != Some(packset_core::record::origin_of(atom)) {
-        return false;
-    }
-    if rec.get("hook").and_then(Value::as_bool).unwrap_or(false)
-        != packset_core::record::hook_of(atom)
-    {
-        return false;
-    }
-    match (
-        rec.get("atom")
-            .and_then(|body| body.get("kind"))
-            .and_then(Value::as_str),
-        atom.get("kind").and_then(Value::as_str),
-    ) {
-        (Some(left), Some(right)) => left == right,
-        _ => true,
-    }
-}
-
 /// The last record for one proposal id. The file is append-only, so the
 /// later status is the answer.
 fn latest(home: &Home, workspace: &str, proposal_id: &str) -> Option<Value> {
@@ -369,57 +335,6 @@ pub fn accepted_atom(home: &Home, workspace: &str, proposal_id: &str) -> Option<
         .map(str::to_string)
 }
 
-/// File a write that must not become a live atom.
-///
-/// An `agent-derived` lesson and a hook write land here. The atom is kept
-/// on the proposal, so accept can store that lesson rather than a mined
-/// one. The same write again returns the open proposal.
-///
-/// # Errors
-///
-/// The append's.
-pub fn hold(
-    home: &Home,
-    workspace: &str,
-    atom: &Record,
-    why: &str,
-    new_id: impl FnOnce() -> String,
-) -> Result<Value, CheapError> {
-    if let Some(existing) = list_open(home, workspace)
-        .into_iter()
-        .find(|rec| same_hold(rec, atom))
-    {
-        return Ok(existing);
-    }
-    let text = atom
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let origin = packset_core::record::origin_of(atom);
-    let mut body = atom.clone();
-    body.remove("embedding");
-    let rec = json!({
-        "schema": SCHEMA,
-        "id": new_id(),
-        "workspace": workspace,
-        "text": text,
-        "origin": origin,
-        "hook": packset_core::record::hook_of(atom),
-        "job": "admission",
-        "when": "onDemand",
-        "status": "open",
-        "ts": clock::utcnow(),
-        "span": text,
-        "verdict": "SUPPORTED",
-        "transcript": "",
-        "why": why,
-        "atom": body,
-    });
-    append(home, workspace, &rec).map_err(|e| CheapError(e.to_string()))?;
-    Ok(rec)
-}
-
 /// The atom an accepted proposal becomes, unstored.
 ///
 /// # Errors
@@ -439,10 +354,10 @@ pub fn accept(
     if verdict != "SUPPORTED" {
         return Err(CheapError(format!("extractAccept rejected: {verdict}")));
     }
-    // An admission hold carries the atom that was refused. Accept stores
-    // that atom. The origin rises, which is the record that the person
-    // accepted it. Kind, level, entities, source and text stay. The hook
-    // flag comes off, or the store would hold the write again.
+    // An admission proposal already on file carries the atom that was
+    // held. Accept stores that atom. The origin rises, which is the
+    // record that the person accepted it. Kind, level, entities, source
+    // and text stay. The hook flag comes off: the person accepted it.
     if let Some(stored) = rec.get("atom").and_then(Value::as_object) {
         let mut atom = stored.clone();
         atom.insert("origin".into(), json!(packset_core::atom::USER_DECLARED));
@@ -686,85 +601,56 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_derived_lesson_reaches_user_declared_only_through_accept() {
+    fn an_admission_proposal_on_file_is_the_atom_accept_returns() {
         let (_dir, home) = home();
-        let mut next = ids();
-        let lesson = json!({
-            "text": "The fuse is CombMNZ.",
+        let path = proposals_path(&home, "w");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // The line a writer that held agent writes appended: job admission,
+        // the atom on the record, verdict SUPPORTED. Old packs still have it.
+        let rec = json!({
+            "schema": SCHEMA,
+            "id": "p-held",
+            "workspace": "w",
+            "text": "The fuse is CombMNZ for this seat.",
             "origin": "agent-derived",
-            "kind": "lesson",
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        let rec = hold(&home, "w", &lesson, "agent-derived", &mut next).unwrap();
-        assert_eq!(rec["origin"], json!("agent-derived"));
-        assert_eq!(rec["status"], json!("open"));
+            "hook": true,
+            "job": "admission",
+            "when": "onDemand",
+            "status": "open",
+            "ts": "2026-08-20T00:00:00Z",
+            "span": "The fuse is CombMNZ for this seat.",
+            "verdict": "SUPPORTED",
+            "transcript": "",
+            "why": "agent-derived",
+            "atom": {
+                "text": "The fuse is CombMNZ for this seat.",
+                "origin": "agent-derived",
+                "kind": "lesson",
+                "level": "explicit",
+                "entities": ["seat:inky", "issue:demo-amz9", "horizon:transient"],
+                "source": {"via": "ljos", "harness": "inky"},
+                "embedding": [0.1, 0.2],
+                "hook": true
+            }
+        });
+        let line = serde_json::to_string(&rec).unwrap();
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        assert_eq!(list_open(&home, "w").len(), 1);
         assert!(packset_core::atom::launders(
             "agent-derived",
             "user-declared"
         ));
-        let open = list_open(&home, "w");
-        assert_eq!(open.len(), 1);
-        let (atom, _) = accept(&home, "w", rec["id"].as_str().unwrap()).unwrap();
-        assert_eq!(atom["origin"], json!("user-declared"));
-    }
-
-    #[test]
-    fn a_held_atom_is_what_accept_writes_and_a_retry_is_the_same_proposal() {
-        let (_dir, home) = home();
-        let mut next = ids();
-        let lesson = json!({
-            "text": "The fuse is CombMNZ for this seat.",
-            "origin": "agent-derived",
-            "kind": "lesson",
-            "level": "explicit",
-            "entities": ["seat:inky", "issue:demo-amz9", "horizon:transient"],
-            "source": {"via": "ljos", "harness": "inky"},
-            "embedding": [0.1, 0.2],
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        let first = hold(&home, "w", &lesson, "agent-derived", &mut next).unwrap();
-        let again = hold(&home, "w", &lesson, "agent-derived", &mut next).unwrap();
-        assert_eq!(first["id"], again["id"]);
-        assert_eq!(list_open(&home, "w").len(), 1);
-        assert!(
-            first.get("embedding").is_none(),
-            "the proposal stores no vector"
-        );
-        assert!(
-            first["atom"].get("embedding").is_none(),
-            "the held atom stores no vector"
-        );
-        let (atom, _) = accept(&home, "w", first["id"].as_str().unwrap()).unwrap();
+        let (atom, _) = accept(&home, "w", "p-held").unwrap();
         assert_eq!(atom["origin"], json!("user-declared"));
         assert_eq!(atom["kind"], json!("lesson"));
         assert_eq!(atom["level"], json!("explicit"));
         assert_eq!(atom["text"], json!("The fuse is CombMNZ for this seat."));
         assert_eq!(atom["source"]["via"], json!("ljos"));
+        assert_eq!(atom["workspace"], json!("w"));
         let tags = atom["entities"].as_array().unwrap();
         assert!(tags.iter().any(|t| t == "issue:demo-amz9"), "{tags:?}");
         assert!(atom.get("hook").is_none());
-    }
-
-    #[test]
-    fn a_hook_write_is_filed_as_a_proposal() {
-        let (_dir, home) = home();
-        let mut next = ids();
-        let lesson = json!({
-            "text": "A correction the hook caught.",
-            "hook": true,
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        let rec = hold(&home, "w", &lesson, "hook", &mut next).unwrap();
-        assert_eq!(rec["hook"], json!(true));
-        assert_eq!(rec["origin"], json!("unknown"));
-        assert_eq!(rec["why"], json!("hook"));
-        assert_eq!(list_open(&home, "w").len(), 1);
+        assert!(atom.get("embedding").is_none(), "{atom:?}");
     }
 
     #[test]
