@@ -2087,7 +2087,7 @@ mod tests {
 
     /// A store whose file already fills the map still opens, keeps its
     /// claims, accepts another write, and gives the unused tail back.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_fully_allocated_map_still_opens() {
         use std::os::fd::AsRawFd;
@@ -2138,7 +2138,7 @@ mod tests {
 
     /// A second process in `lock.mdb`, the way `mdb_stat` sits there, keeps
     /// the allocated tail. Once that process leaves, the next open cuts it.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_foreign_reader_keeps_the_tail() {
         if let Ok(home) = std::env::var("PACKSET_FOREIGN_READER") {
@@ -2223,7 +2223,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn hold_reader(home: &Path) {
         use std::io::Read;
         let env = unsafe {
