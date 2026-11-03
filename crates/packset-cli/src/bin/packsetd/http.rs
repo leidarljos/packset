@@ -807,12 +807,13 @@ fn written(mut atom: Map<String, Value>) -> Map<String, Value> {
 /// on the record already.
 fn stored(atom: Map<String, Value>) -> Map<String, Value> {
     let mut atom = written(atom);
-    // A retired id already named itself in `warning`. validate may also
-    // have written the line for an unknown origin or text past the soft
-    // cap, and that line already names every flag the text earned. A
-    // content-flag line is joined onto a warning that does not already
-    // carry it, so neither line is dropped and the flag line is not said
-    // twice. The client prints one line.
+    // `refuse_retired` joins its line onto a warning `validate` already
+    // wrote for an unknown origin or text past the soft cap, so both
+    // stay in the one field. That admission line names every flag the
+    // text earned and starts with "stored with ", and the joined line
+    // does too, so it is left whole. A content-flag line is joined only
+    // onto a warning that does not start that way, so the flag line is
+    // not said twice. The client prints one line.
     let prior = atom
         .get("warning")
         .and_then(Value::as_str)
@@ -2277,6 +2278,78 @@ mod tests {
             "search returned the tombstone: {:?}",
             hits.body
         );
+    }
+
+    /// A post that names a retired id and an unknown origin answers both
+    /// warnings. The admission line names the value that was sent, and the
+    /// retired line names the id the tombstone still holds.
+    #[test]
+    fn a_retired_id_with_an_unknown_origin_keeps_both_warnings() {
+        use packset_core::record::UNKNOWN_ORIGIN_FLAG;
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let q = HashMap::new();
+        let id = "lessonid000000000000000000000b";
+        let first = post(
+            &svc,
+            "/v1/atoms",
+            &json!({
+                "workspace": "w",
+                "kind": "lesson",
+                "id": id,
+                "text": "Retire this claim.",
+                "origin": "user-declared"
+            }),
+        );
+        assert_eq!(first.body["id"], json!(id));
+        let deleted = route(
+            &svc,
+            &panel,
+            &Method::Post,
+            "/v1/atoms/delete",
+            &q,
+            json!({"workspace": "w", "id": id}).as_object().unwrap(),
+        );
+        assert_eq!(deleted.code, 200, "{:?}", deleted.body);
+        assert_eq!(deleted.body["tombstone"], json!(true));
+        let again = post(
+            &svc,
+            "/v1/atoms",
+            &json!({
+                "workspace": "w",
+                "kind": "lesson",
+                "id": id,
+                "origin": "Agent",
+                "text": "A note whose origin is not one of the five."
+            }),
+        );
+        let fresh = again.body["id"].as_str().unwrap();
+        assert_ne!(fresh, id);
+        assert_eq!(again.body["origin"], json!("unknown"));
+        assert_eq!(again.body["labels"], json!([UNKNOWN_ORIGIN_FLAG]));
+        let admission = format!(
+            "stored with {UNKNOWN_ORIGIN_FLAG} ('Agent'); anyone who reads this pack reads the text"
+        );
+        let retired = format!(
+            "{id} is retired; stored under a new id. A deleted atom does not come back under its old id"
+        );
+        assert_eq!(
+            again.body["warning"],
+            json!(format!("{admission} {retired}"))
+        );
+        let mut getq = HashMap::new();
+        getq.insert("workspace".into(), "w".into());
+        let got = route(
+            &svc,
+            &panel,
+            &Method::Get,
+            &format!("/v1/atoms/{fresh}"),
+            &getq,
+            &Map::new(),
+        );
+        assert_eq!(got.code, 200, "{:?}", got.body);
+        assert_eq!(got.body["warning"], json!(format!("{admission} {retired}")));
     }
 
     fn search_query(rerank: Option<&str>) -> HashMap<String, String> {

@@ -1501,14 +1501,19 @@ impl Service {
             .unwrap_or(false)
         {
             // The line a client prints. It names the id that stayed a
-            // tombstone; the record's own id is the fresh one.
+            // tombstone; the record's own id is the fresh one. validate
+            // may already have written the line for an unknown origin or
+            // text past the soft cap. That line stays, and this one follows
+            // it.
             atom.insert("id".into(), Value::String(new_id()));
-            atom.insert(
-                "warning".into(),
-                Value::String(format!(
-                    "{id} is retired; stored under a new id. A deleted atom does not come back under its old id"
-                )),
+            let retired = format!(
+                "{id} is retired; stored under a new id. A deleted atom does not come back under its old id"
             );
+            let line = match atom.get("warning").and_then(Value::as_str) {
+                Some(prev) if !prev.is_empty() => format!("{prev} {retired}"),
+                _ => retired,
+            };
+            atom.insert("warning".into(), Value::String(line));
             return Ok(None);
         }
         Ok(Some(existing))
