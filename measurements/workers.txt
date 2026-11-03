@@ -1,0 +1,19 @@
+947c4985e03c04eceb86a3d32c2808b48ff9049d cc -O2 -pthread measurements/arenas.c -o /tmp/arenas && for n in 1 4 8 32; do /tmp/arenas $n; done
+
+Intel Xeon (family 6, model 207), 8 cores, glibc 2.39, Linux 6.12.94+
+Default thread stack 8192 KiB. Each thread mallocs 64 KiB and touches it.
+
+VmSize grows by one 8 MiB stack plus one 64 MiB arena a thread.
+The 64 MiB is glibc HEAP_MAX_SIZE on 64-bit: twice DEFAULT_MMAP_THRESHOLD_MAX, which is 4 MiB times sizeof(long) (glibc 2.39 malloc/malloc.c and malloc/arena.c).
+VmRSS does not grow by that. The reservation is address space, and it is the most an arena can become once the thread allocates into it.
+
+| threads | VmRSS before kB | VmRSS after kB | VmSize before kB | VmSize after kB | VmSize delta MiB |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1512 | 1844 | 2684 | 76416 | 72 |
+| 4 | 1512 | 2072 | 2684 | 297612 | 288 |
+| 8 | 1512 | 2380 | 2684 | 592540 | 576 |
+| 32 | 1512 | 4208 | 2684 | 2362108 | 2304 |
+
+Four workers reserve 256 MiB of arenas (288 MiB with stacks). Eight reserve 512 MiB (576 MiB with stacks). Thirty-two reserve 2 GiB of arenas (2304 MiB with stacks).
+
+Queue. Rust 1.89 `TcpListener::bind` listens with backlog 128 on every platform but Horizon and Haiku (`library/std/src/sys/net/connection/socket.rs`, the `backlog = 128` arm). This host's `net.core.somaxconn` is 4096, the Linux default since 5.4.

@@ -49,12 +49,19 @@ pub const IGNORE_FILE_NAMES: &[&str] = &[
     ".grokindexingignore",
 ];
 
-/// Past this many files the outline lists none of them.
-pub const MAP_TOO_LARGE: usize = 5000;
-/// The most paths one outline names.
-pub const MAP_LIST_CAP: usize = 500;
-/// The most characters one attached body carries.
+/// The most characters read from a path into one attach. A path can name
+/// a log of any size; the turn keeps the first 32 KiB, one attach a seat
+/// can still read beside the question.
 pub const ATTACH_CAP: usize = 32 * 1024;
+/// The most paths one outline names. Five hundred names, at the path
+/// lengths in this tree, serialize to about 23 KiB
+/// (`measurements/outline.txt`), inside [`ATTACH_CAP`], so the file list
+/// is one attach.
+pub const MAP_LIST_CAP: usize = 500;
+/// Past this many tracked files the outline names none of them. Ten times
+/// [`MAP_LIST_CAP`]: a sample under a tenth of the checkout is not a
+/// listing, and the answer keeps the count and the tree.
+pub const MAP_TOO_LARGE: usize = MAP_LIST_CAP * 10;
 
 fn read_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()

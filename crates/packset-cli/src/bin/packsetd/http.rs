@@ -24,17 +24,35 @@ use crate::wire::{self, Method};
 pub const LOOPBACK: &str = "127.0.0.1";
 /// The port the clients look for.
 pub const DEFAULT_PORT: u16 = 8761;
-/// Workers when `PACKSET_WORKERS` does not name a number. Not the core count.
+/// Workers when `PACKSET_WORKERS` does not name a number.
+///
+/// Four is fixed. One worker stays off searches and writes
+/// ([`crate::wire::dear_limit`]), so four leaves three for that work and
+/// one for health and status. Each thread reserves a 64 MiB glibc arena;
+/// four is 256 MiB of address space, measured in `measurements/workers.txt`.
+/// Thirty-two threads, the laptop this cap was sized on, reserve 2 GiB of
+/// arenas before a seat has asked.
 pub const DEFAULT_WORKERS: usize = 4;
-/// The ceiling on workers. 32 threads each kept a 64 MB malloc arena
-/// (2 GB idle) on a 32-thread laptop.
+/// The ceiling on `PACKSET_WORKERS`. glibc's per-thread heap max on 64-bit
+/// is 64 MiB (`HEAP_MAX_SIZE`, twice the 32 MiB mmap threshold). Eight
+/// threads reserve 512 MiB of arenas. Thirty-two reserve 2 GiB while idle,
+/// which is the machine the ceiling was set against.
+/// `measurements/workers.txt` records the same 64 MiB a thread on glibc 2.39.
 pub const MAX_WORKERS: usize = 8;
 /// Connections that may wait for a worker before the next is told busy.
+/// 128 is the backlog `std::net::TcpListener::bind` passes to `listen`,
+/// so the queue and the kernel backlog are the same depth.
 pub const DEFAULT_QUEUE: usize = 128;
-/// The ceiling on the queue: each waiting connection holds a descriptor.
+/// The ceiling on `PACKSET_QUEUE`. Each waiting connection holds a
+/// descriptor. 4096 is Linux `somaxconn` since 5.4, the most the kernel
+/// will allow a listen backlog to be. The application queue stops there.
 pub const MAX_QUEUE: usize = 4096;
 /// How long the writer stays quiet before it returns free heap and drops
-/// cached database pages, when `PACKSET_IDLE_TRIM` is unset.
+/// cached database pages, when `PACKSET_IDLE_TRIM` is unset. A minute is
+/// longer than the gap between two calls in one sitting, a search being
+/// tens of milliseconds, so the pages are not given back and faulted in
+/// on every pause. A writer left up after the sitting does not keep them
+/// until it exits.
 pub const DEFAULT_IDLE_TRIM: Duration = Duration::from_secs(60);
 
 /// How long a quiet stretch lasts before idle memory is released.

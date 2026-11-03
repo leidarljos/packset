@@ -1,0 +1,41 @@
+947c4985e03c04eceb86a3d32c2808b48ff9049d git ls-files
+
+Intel Xeon (family 6, model 207), 8 cores, Linux 6.12.94+
+
+This tree has 166 tracked paths, mean 32.5 bytes, median 32.
+The figure is the JSON of status, count, listed and files only, with paths shaped like those tracked paths. The tree array and the other fields of the outline are extra and small beside the file list.
+Five hundred paths are 23189 bytes. A checkout of 5000 still lists 500 and is 23190 bytes. Past 5000 the file list is empty.
+
+| tracked | status | listed | json bytes |
+| --- | --- | --- | --- |
+| 500 | synced | 500 | 23189 |
+| 5000 | synced | 500 | 23190 |
+| 20000 | too-large | 0 | 65 |
+
+Command, from the checkout:
+
+```
+python3 - << 'PY'
+import json, statistics, subprocess
+files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+lens = [len(p) for p in files]
+print(f"tracked {len(files)}")
+print(f"path_bytes mean {statistics.mean(lens):.1f} median {statistics.median(lens):.0f}")
+
+def synth(n):
+    return [f"{files[i % len(files)]}-extra-{i}" for i in range(n)]
+
+def dump(n, listed_cap, too_large):
+    paths = synth(n)
+    if n > too_large:
+        shown, status = [], "too-large"
+    else:
+        shown, status = paths[:listed_cap], "synced"
+    raw = json.dumps({"status": status, "count": n, "listed": len(shown), "files": shown})
+    print(f"n={n} status={status} listed={len(shown)} json_bytes={len(raw)}")
+
+dump(500, 500, 5000)
+dump(5000, 500, 5000)
+dump(20000, 500, 5000)
+PY
+```

@@ -43,7 +43,10 @@ fn found_binary() -> Option<PathBuf> {
     FOUND.get(discover)
 }
 
-/// How long a miss is kept.
+/// How long a miss is kept before discovery walks again. A burst of
+/// searches in one sitting shares one walk of `PATH`. Five seconds covers
+/// that burst, and a binary installed during the sitting is found on the
+/// next question.
 pub const LOOK_AGAIN: Duration = Duration::from_secs(5);
 
 /// The last answer, found or not, and when.
@@ -736,7 +739,10 @@ pub fn encode_sparse(text: &str) -> Option<Sparse> {
     None
 }
 
-/// How deep the second stage reads: the deepest cut-off the locomo table scores.
+/// How deep the second stage reads. LoCoMo's published cut-offs are 1, 5,
+/// 10 and 20, and 20 is the last of them (`CUTOFFS` in the locomo example).
+/// Each candidate is a forward pass, so the stage stops where that table
+/// stops.
 pub const RERANK_DEPTH: usize = 20;
 
 /// Whether the live search path runs the second stage by default. Off unless
@@ -818,7 +824,12 @@ pub fn rerank_hits(question: &str, hits: &[Value]) -> Option<Vec<Value>> {
 }
 
 /// How long a search waits for a busy cross-encoder before it answers
-/// without the second stage.
+/// without the second stage. A staged query on loopback was p50 244 ms
+/// (`docs/orgmode/explanation.org`, 2026-10-08). 400 ms sits above that, so
+/// a pass already running usually returns inside the wait, and the search
+/// then answers with the first-stage order. Six prompts at once made the
+/// last wait eight seconds for a two-second pass when each stood behind
+/// the one before it.
 pub const RERANK_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The slot's lock, if it can be had within `wait`.

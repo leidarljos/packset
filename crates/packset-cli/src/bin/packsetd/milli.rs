@@ -35,9 +35,12 @@ struct Backfill {
     seen: std::collections::HashSet<(PathBuf, String)>,
 }
 
-/// How many set backfills one process remembers. `off` remembers all of
-/// them. A set that falls out is uploaded once more on its next scoped
-/// search, which is the same work the first search did.
+/// How many set names one process remembers as already backfilled.
+/// A set is a slice a person names; a sitting names tens of them.
+/// 1024 is the power of two past a thousand, so a writer that mints a set
+/// per run re-uploads only after a thousand distinct names. `off` remembers
+/// all of them. A set that falls out is uploaded once more on its next
+/// scoped search, which is the same work the first search did.
 pub const DEFAULT_BACKFILL_CAP: usize = 1024;
 
 fn backfill_cap() -> usize {

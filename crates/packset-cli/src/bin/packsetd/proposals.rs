@@ -18,7 +18,11 @@ use crate::store::Record;
 
 /// Schema name for a proposal record.
 pub const SCHEMA: &str = "inside.proposal/v1";
-/// A claim shorter than this is not worth proposing.
+/// A claim shorter than this is not proposed. Eight characters is
+/// "It works", the shortest sentence in this voice with a subject and a
+/// verb. The miner takes the first sentence with its closing stop off, so
+/// "yes", "done" and "short" fall under the floor and a two-word result
+/// does not.
 pub const MIN_CLAIM: usize = 8;
 
 /// A cheap-model job is not allowed at this point in the cycle.

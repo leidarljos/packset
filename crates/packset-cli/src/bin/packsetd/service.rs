@@ -59,17 +59,26 @@ fn purge_attach(held: &mut BTreeMap<String, HeldAttach>, now: std::time::Instant
     held.retain(|_, slot| now.saturating_duration_since(slot.at) < ATTACH_TTL);
 }
 
-/// The writer: the store, the cards, and the one-shot attach slots.
-/// How many search hits seed an activation.
+/// How many search hits seed an activation. Five is the recall@5 cut the
+/// retrieval tables report, and it is large enough that two ballots can
+/// agree on more than one hit. Fewer than two agreed seeds is a weak
+/// island and is not fired. Seeding the long tail would spread from hits
+/// the cue barely matched.
 const ACTIVATION_SEEDS: usize = 5;
-/// How far activation spreads along the links.
+/// How far activation spreads. Each hop keeps half
+/// ([`packset_core::island::HOP_DECAY`]), so two hops still carry a quarter
+/// before fan-out. A third hop would carry an eighth, and a hub washes
+/// that out. The island verb reports this spread.
 const ACTIVATION_HOPS: usize = 2;
 /// The most claims one consolidation bucket may hold before it is passed
 /// over; a shared head of three words that a thousand claims open with is
 /// not a rewrite candidate list.
 const CONSOLIDATE_BUCKET_MAX: usize = 64;
 /// How many of an island's strongest claims fire together when asked.
-const FIRE_TOP: usize = 8;
+/// [`packset_core::island::FIRE_LINK_MAX`] is the most links one fire will
+/// add, the same cap as a claim's neighbourhood. A larger set would ask
+/// for edges the fire rule drops.
+const FIRE_TOP: usize = packset_core::island::FIRE_LINK_MAX;
 
 /// Entities with `horizon:standing` and without `horizon:transient`.
 /// A recalled review and a consolidation survivor both call this.
@@ -85,7 +94,9 @@ fn promoted_entities(atom: &Record) -> Value {
     list.push(Value::String(format!("horizon:{horizon}")));
     Value::Array(list)
 }
-/// How long the same claims stay fired: a second fire inside it is held.
+/// How long the same claims stay fired: a second fire inside the hour is
+/// held. Follow-ups in one sitting must not tighten the same links twice.
+/// The next hour may fire again.
 const FIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Record `key` unless it is already inside the window. Expired keys go,
@@ -112,6 +123,7 @@ fn hold_key(recent: &mut HashMap<String, std::time::Instant>, key: String, cap: 
     false
 }
 
+/// The writer: the store, the cards, and the one-shot attach slots.
 pub struct Service {
     home: Home,
     store: Store,
@@ -292,14 +304,19 @@ enum ProjectionOp {
     Delete(String),
 }
 
-/// How long the projection waits after the last write before it is indexed:
-/// a burst is indexed once when it pauses, not once per write.
+/// How long the projection waits after the last write before it is indexed.
+/// A burst is indexed once when it pauses. 200 ms is longer than the gap
+/// between two writes of one turn and shorter than the pause between turns.
+/// A search does not wait this out: a read flushes first.
 const PROJECTION_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
-/// The longest a steady stream of writes keeps the index waiting, and the
-/// batch size that ends the wait early. The indexer is one process run per
-/// flush, and a run every few seconds on four cores leaves the encoder its
-/// share; a run every write did not.
+/// The longest a steady stream of writes keeps the index waiting. The
+/// indexer is one process run per flush. On the default four workers, a
+/// run every few seconds leaves the encoder its share; a run every write
+/// did not. Three seconds is that bound.
 const PROJECTION_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Writes that end the wait early. A turn is a handful of atoms. 512 is
+/// past any one turn, so a bulk import flushes in chunks instead of holding
+/// the queue until [`PROJECTION_MAX_WAIT`].
 const PROJECTION_BATCH: usize = 512;
 
 /// Apply queued projection ops to the index at `dir`, consecutive runs of
@@ -345,12 +362,18 @@ fn flush_queued(pending: &Mutex<Vec<ProjectionOp>>, projecting: &Mutex<()>, dir:
     flush_projection_ops(ops, dir);
 }
 
-/// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand, a
-/// size at which the hook still answers a prompt in a tenth of a second.
+/// The live cap when `PACKSET_LIVE_CAP` says nothing: twenty thousand.
+/// A query over ten thousand atoms is p50 31 to 64 ms on loopback
+/// (`docs/orgmode/explanation.org`, 2026-10-08, release build). Twice that
+/// pack, at the same cost again, is still about a tenth of a second, which
+/// is what a hook can spend before it delays a prompt.
 pub const DEFAULT_LIVE_CAP: usize = 20_000;
 
-/// How many missed reviews, each past twice the claim's interval, make a
-/// never-recalled forgettable claim forgotten.
+/// How many missed reviews, each past twice the claim's interval, tombstone
+/// a forgettable claim that was never recalled and never fired. The first
+/// miss lapses it and halves its stability. The second lapses the
+/// rescheduled claim. The third forgets it. A habit, preference, goal,
+/// prediction or rule is never forgotten this way.
 pub const NEGLECT_LIMIT: u64 = 3;
 
 /// Kinds the cap may forget. A standing choice, a rule, a reading, a goal, a
@@ -382,15 +405,17 @@ struct Shaped {
     used: AtomicU64,
 }
 
-/// Shapes kept when `PACKSET_SHAPE_CAP` is unset. Above the live cap, so
-/// one workspace's claims stay shaped and a second checkout still fits.
-pub const DEFAULT_SHAPE_CAP: usize = 65_536;
+/// Shapes kept when `PACKSET_SHAPE_CAP` is unset. The smallest power of
+/// two that holds two workspaces at [`DEFAULT_LIVE_CAP`], so one checkout
+/// stays shaped and a second still fits.
+pub const DEFAULT_SHAPE_CAP: usize = (DEFAULT_LIVE_CAP * 2).next_power_of_two();
 
 /// Keys kept in the fire map, and the same number in the cue map, when
-/// `PACKSET_FIRE_CAP` is unset. An hour of distinct prompts fits. The
-/// cue path used to insert without dropping expired keys, and then
-/// shared this cap with fires, so a burst of titles pushed fires out.
-pub const DEFAULT_FIRE_CAP: usize = 4_096;
+/// `PACKSET_FIRE_CAP` is unset. One prompt a second across [`FIRE_WINDOW`]
+/// is 3600 keys. This is the next power of two above that, so the hour
+/// fits. The cue path used to insert without dropping expired keys, and
+/// then shared this cap with fires, so a burst of titles pushed fires out.
+pub const DEFAULT_FIRE_CAP: usize = (FIRE_WINDOW.as_secs() as usize).next_power_of_two();
 
 fn fire_cap_from_env() -> usize {
     match std::env::var("PACKSET_FIRE_CAP") {
