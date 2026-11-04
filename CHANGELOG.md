@@ -15,9 +15,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   The record is stored as written.
   `provenance_floor` keeps the lowest each part has held, and `warnings` names the rise.
   Accept still raises with no such label.
-- `PACKSET_HOLD_AGENT_WRITES=1` files the review proposal and stores the atom, with `warnings` naming the proposal.
-  The atom is searchable at once.
-  Accept raises the stored record's origin.
+- `PACKSET_HOLD_AGENT_WRITES=1` is an opt-in hold.
+  An `agent-derived` write and a hook write are filed as proposals and stay out of search until accept.
+  The answer is `held as proposal ID`.
+  With the variable unset, those writes are stored at once and keep their origin.
 - A cheap-model job off its point in the cycle is proposed, and the proposal carries `warning`.
   A proposal whose verdict is not `SUPPORTED` is accepted, and the atom carries `warnings` naming the verdict.
 

@@ -125,9 +125,9 @@ pub struct Service {
     /// that crossed it, so a herd of seats writing into one pack cannot
     /// grow it without bound.
     live_cap: usize,
-    /// Whether an `agent-derived` write and a hook write are also filed as review proposals.
+    /// Whether an `agent-derived` write and a hook write wait as proposals.
     /// Off unless `PACKSET_HOLD_AGENT_WRITES` is set.
-    /// The atom is stored either way.
+    /// The default stores them.
     hold_agent_writes: bool,
     /// The day each workspace was last swept for neglect, so a write sweeps
     /// at most once a day.
@@ -890,7 +890,7 @@ impl Service {
             .collect()
     }
 
-    /// The same service, filing review proposals or not.
+    /// The same service, holding writes for an accept or storing them.
     #[must_use]
     pub fn with_hold_agent_writes(mut self, hold: bool) -> Self {
         self.hold_agent_writes = hold;
@@ -1117,11 +1117,13 @@ impl Service {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            // The proposal is the review label.
-            // The atom is stored below.
+            // Opt-in only.
+            // The default falls through and stores the atom.
             let rec = crate::proposals::hold(&self.home, &workspace, &atom, why, new_id)?;
             let id = rec.get("id").and_then(Value::as_str).unwrap_or("");
-            record::push_warning(&mut atom, format!("review {why} {id}"));
+            return Err(anyhow::Error::new(AtomError(format!(
+                "held as proposal {id}: {why}"
+            ))));
         }
         let workspace = atom
             .get("workspace")
@@ -3516,23 +3518,56 @@ mod tests {
         assert_eq!(record::origin_of(&got), "unknown");
     }
 
-    /// A holding writer stores the lesson and files the review proposal.
-    /// An update that raises the origin is stored; the floor keeps the lower origin and `warnings` names the rise.
+    /// The variable is off unless set.
+    /// Off, the lesson is stored and keeps its origin.
+    /// On, it waits as a proposal and search does not see it until accept.
     #[test]
-    fn a_held_lesson_is_stored_and_a_rise_is_labeled() {
+    fn hold_is_opt_in_and_the_default_stores() {
+        let lesson = || {
+            let mut lesson = atom("The fuse is CombMNZ.");
+            lesson.insert("kind".into(), json!("lesson"));
+            lesson.insert("origin".into(), json!("agent-derived"));
+            lesson
+        };
+        let (_dir, open) = service();
+        let open = open.with_hold_agent_writes(false);
+        let stored = open.add(lesson()).unwrap();
+        assert_eq!(stored["origin"], json!("agent-derived"));
+        assert_eq!(open.store.live("w").unwrap().len(), 1);
+        assert!(crate::proposals::list_open(&open.home, "w").is_empty());
+
+        let (_dir, held) = holding_service();
+        let err = held.add(lesson()).unwrap_err();
+        assert!(err.to_string().contains("held as proposal"), "{err}");
+        assert!(err.to_string().contains("agent-derived"), "{err}");
+        assert!(held.store.live("w").unwrap().is_empty());
+        let proposals = crate::proposals::list_open(&held.home, "w");
+        assert_eq!(proposals.len(), 1);
+        let id = proposals[0]["id"].as_str().unwrap();
+        assert!(err.to_string().contains(id), "{err}");
+        let accepted = held.accept("w", id).unwrap();
+        assert_eq!(accepted["origin"], json!("user-declared"));
+        assert_eq!(held.store.live("w").unwrap().len(), 1);
+    }
+
+    /// A holding writer keeps the lesson out of search.
+    /// A row already in the store can still be raised; the floor keeps the lower origin and `warnings` names the rise.
+    #[test]
+    fn a_held_lesson_stays_out_and_a_rise_is_labeled() {
         let (_dir, svc) = holding_service();
         let mut lesson = atom("The fuse is CombMNZ.");
         lesson.insert("kind".into(), json!("lesson"));
         lesson.insert("origin".into(), json!("agent-derived"));
-        let stored = svc.add(lesson).unwrap();
-        let lines = warning_lines(&stored);
-        assert!(lines.contains("review agent-derived"), "{lines}");
-        assert_eq!(stored["origin"], json!("agent-derived"));
-        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+        let err = svc.add(lesson).unwrap_err();
+        assert!(err.to_string().contains("held as proposal"), "{err}");
+        assert!(svc.store.live("w").unwrap().is_empty());
         let open = crate::proposals::list_open(&svc.home, "w");
         assert_eq!(open.len(), 1);
         assert_eq!(open[0]["origin"], json!("agent-derived"));
-        assert!(lines.contains(open[0]["id"].as_str().unwrap()), "{lines}");
+        assert!(
+            err.to_string().contains(open[0]["id"].as_str().unwrap()),
+            "{err}"
+        );
 
         let id = "b".repeat(32);
         let mut raw = atom("The fuse is CombMNZ again.");
@@ -3556,7 +3591,12 @@ mod tests {
 
         let accepted = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
         assert_eq!(accepted["origin"], json!("user-declared"));
-        assert_eq!(accepted["id"], stored["id"]);
+        assert!(svc
+            .store
+            .live("w")
+            .unwrap()
+            .iter()
+            .any(|atom| atom.get("id") == accepted.get("id")));
     }
 
     /// Null and `""` are the origin validate defaults to user-declared.
@@ -3886,8 +3926,7 @@ mod tests {
         assert_eq!(aside[record::PROVENANCE_FLOOR], floor);
     }
 
-    /// A holding writer stores the lesson and files the proposal.
-    /// Accept raises that record.
+    /// A holding writer keeps the lesson out until accept, which stores it as `user-declared`.
     /// Putting the origin back down sticks, and the next rise is stored with a label.
     /// The floor keeps the lower origin.
     #[test]
@@ -3897,12 +3936,14 @@ mod tests {
         lesson.insert("kind".into(), json!("lesson"));
         lesson.insert("origin".into(), json!("agent-derived"));
         lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
-        let stored = svc.add(lesson).unwrap();
+        let err = svc.add(lesson).unwrap_err();
+        assert!(err.to_string().contains("held as proposal"), "{err}");
+        assert!(svc.store.live("w").unwrap().is_empty());
         let open = crate::proposals::list_open(&svc.home, "w");
         assert_eq!(open.len(), 1);
         let accepted = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
         assert_eq!(accepted["origin"], json!("user-declared"));
-        assert_eq!(accepted["id"], stored["id"]);
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
         let id = accepted["id"].as_str().unwrap();
 
         let mut back = Map::new();
@@ -3968,21 +4009,16 @@ mod tests {
             json!(["seat:inky", "issue:demo-amz9", "horizon:transient"]),
         );
         lesson.insert("source".into(), json!({"via": "ljos", "harness": "inky"}));
-        let stored_first = svc.add(lesson.clone()).unwrap();
-        let again = svc.add(lesson).unwrap();
-        assert_eq!(again["id"], stored_first["id"]);
+        let err = svc.add(lesson.clone()).unwrap_err();
+        let again = svc.add(lesson).unwrap_err();
+        assert!(svc.store.live("w").unwrap().is_empty());
         let open = crate::proposals::list_open(&svc.home, "w");
         assert_eq!(open.len(), 1);
         let id = open[0]["id"].as_str().unwrap();
+        assert!(err.to_string().contains(id), "{err}");
         assert!(
-            warning_lines(&stored_first).contains(id),
-            "the review label names the proposal: {}",
-            warning_lines(&stored_first)
-        );
-        assert!(
-            warning_lines(&again).contains(id),
-            "{}",
-            warning_lines(&again)
+            again.to_string().contains(id),
+            "a retry is the same proposal: {again}"
         );
         let stored = svc.accept("w", id).unwrap();
         assert_eq!(stored["kind"], json!("lesson"));
@@ -4012,17 +4048,31 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_write_is_stored_and_accept_raises_it() {
+    fn a_hook_write_is_held_until_accept_and_stored_when_the_hold_is_off() {
+        let caught = || {
+            let mut caught = atom("A correction the hook caught in the cue.");
+            caught.insert("kind".into(), json!("preference"));
+            caught.insert("hook".into(), json!(true));
+            caught
+        };
+        let (_dir, open) = service();
+        let open = open.with_hold_agent_writes(false);
+        let stored_now = open.add(caught()).unwrap();
+        assert_eq!(stored_now["kind"], json!("preference"));
+        assert_eq!(stored_now["hook"], json!(true));
+        assert_eq!(open.store.live("w").unwrap().len(), 1);
+        assert!(crate::proposals::list_open(&open.home, "w").is_empty());
+
         let (_dir, svc) = holding_service();
-        let mut caught = atom("A correction the hook caught in the cue.");
-        caught.insert("kind".into(), json!("preference"));
-        caught.insert("hook".into(), json!(true));
-        let held = svc.add(caught).unwrap();
-        assert!(warning_lines(&held).contains("review hook"), "{held:?}");
-        assert_eq!(svc.store.live("w").unwrap().len(), 1);
-        let open = crate::proposals::list_open(&svc.home, "w");
-        assert_eq!(open.len(), 1);
-        let stored = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
+        let err = svc.add(caught()).unwrap_err();
+        assert!(err.to_string().contains("held as proposal"), "{err}");
+        assert!(err.to_string().contains("hook"), "{err}");
+        assert!(svc.store.live("w").unwrap().is_empty());
+        let proposals = crate::proposals::list_open(&svc.home, "w");
+        assert_eq!(proposals.len(), 1);
+        let stored = svc
+            .accept("w", proposals[0]["id"].as_str().unwrap())
+            .unwrap();
         assert_eq!(stored["kind"], json!("preference"));
         assert_eq!(stored["origin"], json!("user-declared"));
         assert_ne!(stored.get("hook"), Some(&json!(true)));
@@ -4031,13 +4081,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_write_is_labeled_and_an_echo_promotes_at_its_origin() {
+    fn a_held_hook_stays_out_and_an_echo_promotes_at_its_origin() {
         let (_dir, svc) = holding_service();
         let mut caught = atom("A correction the hook caught in the cue.");
         caught.insert("hook".into(), json!(true));
-        let held = svc.add(caught).unwrap();
-        assert!(warning_lines(&held).contains("review hook"), "{held:?}");
-        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+        let err = svc.add(caught).unwrap_err();
+        assert!(err.to_string().contains("hook"), "{err}");
+        assert!(svc.store.live("w").unwrap().is_empty());
 
         let mut echo = atom("A lesson stored before anyone reviewed it.");
         echo.insert("origin".into(), json!("tool-echo"));

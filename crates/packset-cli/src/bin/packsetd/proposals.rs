@@ -441,8 +441,8 @@ pub fn accept(
         .ok_or_else(|| CheapError(format!("no open proposal {proposal_id}")))?;
     let verdict = rec.get("verdict").and_then(Value::as_str).unwrap_or("NEI");
     let flagged = verdict != "SUPPORTED";
-    // An admission hold carries the atom that was stored.
-    // Accept raises
+    // An admission hold carries the atom that waited.
+    // Accept stores
     // that atom. The origin rises, which is the record that the person
     // accepted it. Kind, level, entities, source and text stay. The hook
     // flag comes off, or the store would hold the write again.

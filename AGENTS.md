@@ -82,7 +82,8 @@ strings, so a change to it is a change in what the daemon accepts.
 ## Labels
 
 A write the seat asked for is stored.
-These used to stop the write, and now ride along as labels:
+These used to stop the write, and now ride along as labels.
+`PACKSET_HOLD_AGENT_WRITES=1` is the one opt-in that still holds a write back:
 
 - Credential-shaped text, hidden characters, and text that instructs the reader are `warnings` on the atom.
   A card is written, and the answer carries the same lines.
@@ -90,11 +91,13 @@ These used to stop the write, and now ride along as labels:
 - A rise in `origin` or `source.basis` is stored.
   `provenance_floor` keeps the lowest each part has held, and `warnings` names the rise.
   Accept raises with no such label.
-- `PACKSET_HOLD_AGENT_WRITES=1` files the review proposal and stores the atom.
-  `warnings` names the proposal.
-  The atom is searchable at once.
+- `PACKSET_HOLD_AGENT_WRITES=1` is an opt-in hold, off unless set.
+  An `agent-derived` write and a hook write are filed as proposals and stay out of search until accept.
+  The answer is `held as proposal ID`.
+  With the variable unset, those writes are stored at once and keep their origin.
 - A cheap-model job off its point in the cycle is proposed, with `warning` on the proposal.
   Accept of a verdict other than `SUPPORTED` stores the atom and `warnings` names the verdict.
 
 A malformed record, a tool dump, a retired id, a second writer, the owner token, and a bind that is not `127.0.0.1` still stop.
 Those are the shape of a record, the one-writer file, or the address the client dials.
+The hold above stops only when the variable is set.

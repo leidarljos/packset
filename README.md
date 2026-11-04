@@ -78,7 +78,8 @@ $ packset island fusing two ballots     # the memories a task activates
 - Credential-shaped text, hidden characters, and text that instructs the reader are stored.
   The atom's `warnings` names them, and a card is written with the same lines in the answer.
   A prose miss is `prose.warning` on every origin.
-  `PACKSET_HOLD_AGENT_WRITES=1` files a review proposal and still stores the atom.
+  `PACKSET_HOLD_AGENT_WRITES=1` is an opt-in: an `agent-derived` write and a hook write wait as proposals until accept.
+  With the variable unset they are stored at once.
   A cheap-model job off its point in the cycle is proposed with `warning` on the proposal.
 
 The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html). The MemoryAgentBench scorer and verdict files are private; I share them on request.
