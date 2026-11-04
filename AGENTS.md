@@ -98,6 +98,8 @@ These used to stop the write, and now ride along as labels.
 - A cheap-model job off its point in the cycle is proposed, with `warning` on the proposal.
   Accept of a verdict other than `SUPPORTED` stores the atom and `warnings` names the verdict.
 
-A malformed record, a tool dump, a retired id, a second writer, the owner token, and a bind that is not `127.0.0.1` still stop.
+A malformed record, a tool dump, or a retired id still stops.
+A second writer still stops, and so does the owner token.
+A bind that is not `127.0.0.1` still stops.
 Those are the shape of a record, the one-writer file, or the address the client dials.
 The hold above stops only when the variable is set.

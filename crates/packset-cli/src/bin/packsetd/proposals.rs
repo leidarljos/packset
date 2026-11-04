@@ -2,7 +2,9 @@
 //!
 //! Nothing here writes an atom.
 //! A proposal is a review label with a verdict on it.
-//! Accept hands the caller an atom to store, including when the verdict is not `SUPPORTED`: that verdict rides on the atom as a warning.
+//! Accept hands the caller an atom to store.
+//! This includes a verdict that is not `SUPPORTED`.
+//! That verdict rides on the atom as a warning.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -442,10 +444,10 @@ pub fn accept(
     let verdict = rec.get("verdict").and_then(Value::as_str).unwrap_or("NEI");
     let flagged = verdict != "SUPPORTED";
     // An admission hold carries the atom that waited.
-    // Accept stores
-    // that atom. The origin rises, which is the record that the person
-    // accepted it. Kind, level, entities, source and text stay. The hook
-    // flag comes off, or the store would hold the write again.
+    // Accept stores that atom.
+    // The origin rises, which is the record that the person accepted it.
+    // Kind, level, entities, source and text stay.
+    // The hook flag comes off, or the store would hold the write again.
     if let Some(stored) = rec.get("atom").and_then(Value::as_object) {
         let mut atom = stored.clone();
         atom.insert("origin".into(), json!(packset_core::atom::USER_DECLARED));

@@ -808,7 +808,9 @@ impl Provenance {
 /// A higher origin or basis is stored, and `warnings` names the rise.
 /// `what` names the write in that label.
 /// Accept is the rise that does not come through here, so it carries no label from this function.
-/// The floor is the writer's: a caller cannot forge it by setting the field on `after` before this runs, because the value written here is computed from `stored`.
+/// The floor is the writer's.
+/// A caller cannot forge it by setting the field on `after` before this runs.
+/// The value written here is computed from `stored`.
 pub fn hold_provenance(stored: &Map<String, Value>, after: &mut Map<String, Value>, what: &str) {
     let before = Provenance::of(stored);
     let floor = Provenance::floor(stored);

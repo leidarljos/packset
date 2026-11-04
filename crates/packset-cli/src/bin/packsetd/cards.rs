@@ -101,7 +101,9 @@ fn set_mode(_path: &Path, _mode: u32) {}
 
 /// Write a card, refusing text past `cap`.
 ///
-/// Credential-shaped text, hidden characters, and prose past the card's ceiling are written, and the returned lines are the labels.
+/// Credential-shaped text and hidden characters are written.
+/// Prose past the card's ceiling is written too.
+/// The returned lines are the labels.
 /// # Errors
 ///
 /// [`WriteError::Overflow`] past the cap, [`WriteError::Io`] when the write fails.
