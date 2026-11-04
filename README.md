@@ -20,10 +20,19 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 ## Install
 
 ```console
-$ cargo binstall --locked packset
+$ cargo binstall packset
+# or: cargo binstall --locked packset
 # or: cargo install --locked packset
 $ packset ensure
 ```
+
+`cargo binstall packset` downloads `packset-v<version>-<target>.tar.gz`.
+Hosts are aarch64-apple-darwin and x86_64-apple-darwin.
+Linux hosts are aarch64-unknown-linux-gnu and x86_64-unknown-linux-gnu.
+The archive holds packset, packsetd, packset-mcp and packset-embed.
+A .sha256 file is published beside the archive.
+`--locked` builds from source when the target has no archive.
+That source build uses Cargo.lock.
 
 That installs `packset`, the writer `packsetd` and the read-only MCP
 surface `packset-mcp`. The `packset-daemon` crate on crates.io stops at
