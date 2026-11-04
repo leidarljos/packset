@@ -173,12 +173,13 @@ pub fn promotion_horizon(origin: &str, content: Option<&str>) -> &'static str {
     "standing"
 }
 
-/// Whether this write is held as a proposal instead of stored.
+/// Whether this write is also filed as a review proposal.
 ///
-/// An agent writes its own memories: an `agent-derived` lesson and a hook
-/// write are live at once, keep their origin, and are reviewed and pruned
-/// afterwards. `hold` is the writer's opt-in (`PACKSET_HOLD_AGENT_WRITES=1`)
-/// to file them as proposals that wait for an accept instead.
+/// An `agent-derived` lesson and a hook write are stored at once, keep their origin, and are reviewed afterwards.
+/// `hold` is the writer's opt-in (`PACKSET_HOLD_AGENT_WRITES=1`) to file them as proposals as well.
+/// The proposal is a label.
+/// It does not keep the atom out of search.
+/// Accept raises the origin later.
 #[must_use]
 pub fn needs_accept(origin: &str, hook: bool, hold: bool) -> bool {
     hold && (hook || origin == "agent-derived")

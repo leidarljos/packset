@@ -4,13 +4,14 @@
 //! whole point: prose past the cap is an error rather than a truncation, so
 //! nobody loses a sentence to a silent trim. Overflow archives the text and
 //! then refuses, which is what gives the miner something to work on.
+//! Credential-shaped text and prose past the readability ceiling are written, and the caller gets the labels.
 
 use std::fs;
 use std::io;
 use std::path::Path;
 
 use packset_core::prose;
-use packset_core::record::{reject_unsafe, AtomError};
+use packset_core::record::{content_warnings, AtomError};
 
 /// A card would exceed its cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ impl std::error::Error for Overflow {}
 pub enum WriteError {
     /// Past the character cap.
     Overflow(Overflow),
-    /// Unsafe text, or prose too complex for the working core.
+    /// The edit did not name one entry.
     Refused(AtomError),
     /// The filesystem said no.
     Io(io::Error),
@@ -100,12 +101,11 @@ fn set_mode(_path: &Path, _mode: u32) {}
 
 /// Write a card, refusing text past `cap`.
 ///
+/// Credential-shaped text, hidden characters, and prose past the card's ceiling are written, and the returned lines are the labels.
 /// # Errors
 ///
-/// [`WriteError::Overflow`] past the cap, [`WriteError::Refused`] for unsafe or
-/// too-complex prose, [`WriteError::Io`] when the write fails.
-pub fn write_capped(path: &Path, text: &str, cap: usize) -> Result<(), WriteError> {
-    reject_unsafe(text)?;
+/// [`WriteError::Overflow`] past the cap, [`WriteError::Io`] when the write fails.
+pub fn write_capped(path: &Path, text: &str, cap: usize) -> Result<Vec<String>, WriteError> {
     let length = text.chars().count();
     if length > cap {
         let already = read_text(path).chars().count();
@@ -115,8 +115,11 @@ pub fn write_capped(path: &Path, text: &str, cap: usize) -> Result<(), WriteErro
             "{name} is {length} characters; cap is {cap}; room left on disk was {remaining}"
         ))));
     }
+    let mut warnings = content_warnings(text);
     if !text.trim().is_empty() {
-        prose::refuse(text, prose::Role::File).map_err(AtomError::from)?;
+        if let Err(why) = prose::refuse(text, prose::Role::File) {
+            warnings.push(why.0);
+        }
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -130,7 +133,7 @@ pub fn write_capped(path: &Path, text: &str, cap: usize) -> Result<(), WriteErro
         set_mode(path, 0o444);
     }
     written?;
-    Ok(())
+    Ok(warnings)
 }
 
 /// Paragraphs, which is what a card is a list of.
@@ -161,12 +164,12 @@ fn entries(text: &str) -> Vec<String> {
 /// # Errors
 ///
 /// As [`write_capped`].
-pub fn add_entry(path: &Path, entry: &str, cap: usize) -> Result<(), WriteError> {
+/// Empty when the card already carried `entry`.
+pub fn add_entry(path: &Path, entry: &str, cap: usize) -> Result<Vec<String>, WriteError> {
     let entry = entry.trim();
-    reject_unsafe(entry)?;
     let current = read_text(path);
     if !entry.is_empty() && current.contains(entry) {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut parts = entries(&current);
     parts.push(entry.to_string());
@@ -185,9 +188,8 @@ pub fn replace_entry(
     needle: &str,
     replacement: &str,
     cap: usize,
-) -> Result<(), WriteError> {
+) -> Result<Vec<String>, WriteError> {
     let replacement = replacement.trim();
-    reject_unsafe(replacement)?;
     let current = read_text(path);
     let hits: Vec<String> = entries(&current)
         .into_iter()
@@ -210,7 +212,7 @@ pub fn replace_entry(
 ///
 /// [`WriteError::Refused`] unless exactly one entry matches, else as
 /// [`write_capped`].
-pub fn remove_entry(path: &Path, needle: &str, cap: usize) -> Result<(), WriteError> {
+pub fn remove_entry(path: &Path, needle: &str, cap: usize) -> Result<Vec<String>, WriteError> {
     let current = read_text(path);
     let all = entries(&current);
     let hits: Vec<&String> = all.iter().filter(|e| e.contains(needle)).collect();
@@ -334,12 +336,18 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_never_reaches_the_card() {
+    fn a_credential_is_written_and_labeled() {
         let dir = temp();
         let path = dir.path().join("USER.md");
-        let err = write_capped(&path, "api_key=abcd1234efgh", USER_CAP).unwrap_err();
-        assert!(matches!(err, WriteError::Refused(_)), "{err}");
-        assert_eq!(read_text(&path), "");
+        let text = "api_key=abcd1234efgh";
+        let warnings = write_capped(&path, text, USER_CAP).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|line| line.contains("credential-shaped")),
+            "{warnings:?}"
+        );
+        assert_eq!(read_text(&path), text);
     }
 
     #[test]

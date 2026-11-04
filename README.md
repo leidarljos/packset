@@ -66,7 +66,20 @@ $ packset island fusing two ballots     # the memories a task activates
   | 32 | 19200 | 292.56 s | 66 req/s | 0 | shared, 6382 live + 18 closed of 6400 |
   | 32 | 19200 | 826.18 s | 23 req/s | 0 | shared, 6382 live + 18 closed of 6400 (rerun 2026-10-08; slower container, same counts) |
 - Trust rows and personas live in the pack and reach the seat's consensus.
-- `origin` and `source.basis` say who stood behind a claim, and the pack keeps them from rising: `user-declared` ranks above every other origin and `person` above every other basis. An update, or a post over a live id, may keep or lower them; only an accept raises one, and a record with no origin reads as `unknown`. The pack does not decide who may create. A client that posts a new atom can still say `user-declared` and `person`, and the pack stores what it was told. Who may write as the person is the seat's call ([ljos](https://leidarljos.github.io)), not the pack's.
+- `origin` and `source.basis` say who stood behind a claim.
+  `user-declared` ranks above every other origin and `person` above every other basis.
+  An update, or a post over a live id, is stored as written, including a rise.
+  `provenance_floor` keeps the lowest each part has held, and `warnings` names the rise.
+  Accept raises with no such label.
+  A record with no origin reads as `unknown`.
+  The pack does not decide who may create.
+  A client that posts a new atom can still say `user-declared` and `person`, and the pack stores what it was told.
+  Who may write as the person is the seat's call ([ljos](https://leidarljos.github.io)), not the pack's.
+- Credential-shaped text, hidden characters, and text that instructs the reader are stored.
+  The atom's `warnings` names them, and a card is written with the same lines in the answer.
+  A prose miss is `prose.warning` on every origin.
+  `PACKSET_HOLD_AGENT_WRITES=1` files a review proposal and still stores the atom.
+  A cheap-model job off its point in the cycle is proposed with `warning` on the proposal.
 
 The numbers, their jobs and how to regenerate them are on the [explanation page](https://leidarljos.github.io/packset/explanation.html). The MemoryAgentBench scorer and verdict files are private; I share them on request.
 

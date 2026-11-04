@@ -617,7 +617,17 @@ fn route(
                 match service.write_set(&workspace, name, body) {
                     Err(WriteError::Overflow(o)) => Answer::err(413, o),
                     Err(other) => Answer::err(400, other),
-                    Ok(stored) => answer(service.pack(&workspace, Some(&stored))),
+                    Ok((stored, warnings)) => match service.pack(&workspace, Some(&stored)) {
+                        Ok(mut value) => {
+                            if !warnings.is_empty() {
+                                if let Some(obj) = value.as_object_mut() {
+                                    obj.insert("warnings".into(), json!(warnings));
+                                }
+                            }
+                            Answer::ok(value)
+                        }
+                        Err(e) => Answer::err(400, root_message(&e)),
+                    },
                 }
             }
         },
@@ -777,8 +787,8 @@ fn root_message(err: &anyhow::Error) -> String {
     err.to_string()
 }
 
-/// A refused cheap-model job answers 403: the caller is not wrong about the
-/// request, it is asking at a point in the cycle where the job does not run.
+/// An unknown cheap-model job answers 403: there is no action to run.
+/// A known job off its point in the cycle runs and labels the proposal.
 fn cheap_answer<T: Into<Value>>(result: anyhow::Result<T>) -> Answer {
     match result {
         Ok(value) => Answer::ok(value.into()),
@@ -792,11 +802,12 @@ fn cheap_answer<T: Into<Value>>(result: anyhow::Result<T>) -> Answer {
     }
 }
 
-/// Overflow answers 413, because the client can shorten and retry; anything
-/// else about a card is a refusal it has to fix.
-fn card_answer(result: Result<(), WriteError>) -> Answer {
+/// Overflow answers 413, because the client can shorten and retry.
+/// A card that was written may carry labels in `warnings`.
+fn card_answer(result: Result<Vec<String>, WriteError>) -> Answer {
     match result {
-        Ok(()) => Answer::ok(json!({"ok": true})),
+        Ok(warnings) if warnings.is_empty() => Answer::ok(json!({"ok": true})),
+        Ok(warnings) => Answer::ok(json!({"ok": true, "warnings": warnings})),
         Err(WriteError::Overflow(o)) => Answer::err(413, o),
         Err(other) => Answer::err(400, other),
     }

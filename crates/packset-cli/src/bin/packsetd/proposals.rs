@@ -1,9 +1,8 @@
 //! Mining an archived day into proposals a person can accept.
 //!
-//! Nothing here writes an atom. A proposal is a suggestion with a verdict on
-//! it, and the only path from one to a stored claim runs through an explicit
-//! accept. That is the whole reason the pack cannot be talked into believing
-//! something: text that was merely read never becomes text that is remembered.
+//! Nothing here writes an atom.
+//! A proposal is a review label with a verdict on it.
+//! Accept hands the caller an atom to store, including when the verdict is not `SUPPORTED`: that verdict rides on the atom as a warning.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -171,8 +170,8 @@ pub fn is_fenced(claim: &str, wall: &BTreeSet<String>) -> bool {
 /// Whether the transcript actually carries the claim.
 ///
 /// Not evidence at all: it says the words were said, not that they were true.
-/// Anything without a transcript is `NEI`, and only `SUPPORTED` can be
-/// accepted, so a claim nobody can point at stays a suggestion.
+/// Anything without a transcript is `NEI`.
+/// Accept stores either verdict and labels one that is not `SUPPORTED`, so a claim nobody can point at still says so.
 #[must_use]
 pub fn fidelity_verdict(claim: &str, transcript: Option<&str>) -> &'static str {
     let n = norm_claim(claim);
@@ -221,7 +220,7 @@ pub struct Mining<'a> {
 ///
 /// # Errors
 ///
-/// [`CheapError`] when the job is not allowed at this point in the cycle.
+/// [`CheapError`] when the job or the point in the cycle is unknown.
 pub fn propose(
     home: &Home,
     mining: Mining<'_>,
@@ -235,13 +234,15 @@ pub fn propose(
         wall,
         transcript,
     } = mining;
-    let allowed = match (parse_job(job), parse_when(when)) {
-        (Some(j), Some(w)) => cheap::allowed(j, w),
-        _ => false,
+    // A known job off its point in the cycle still proposes.
+    // The line on the proposal is the label.
+    // An unknown job has no action to run.
+    let off_cycle = match (parse_job(job), parse_when(when)) {
+        (Some(j), Some(w)) => !cheap::allowed(j, w),
+        _ => {
+            return Err(CheapError(format!("{job} is not allowed on {when}")));
+        }
     };
-    if !allowed {
-        return Err(CheapError(format!("{job} is not allowed on {when}")));
-    }
     let blob = text.trim();
     if blob.is_empty() || extract::is_tool_dump(blob) {
         return Ok(None);
@@ -253,7 +254,7 @@ pub fn propose(
     if is_fenced(&claim, wall) {
         return Ok(None);
     }
-    let rec = json!({
+    let mut rec = json!({
         "schema": SCHEMA,
         "id": new_id(),
         "workspace": workspace,
@@ -266,6 +267,12 @@ pub fn propose(
         "verdict": fidelity_verdict(&claim, transcript),
         "transcript": transcript.unwrap_or(""),
     });
+    if off_cycle {
+        rec.as_object_mut().unwrap().insert(
+            "warning".into(),
+            json!(format!("{job} is not allowed on {when}")),
+        );
+    }
     append(home, workspace, &rec).map_err(|e| CheapError(e.to_string()))?;
     Ok(Some(rec))
 }
@@ -420,7 +427,8 @@ pub fn hold(
 ///
 /// # Errors
 ///
-/// [`CheapError`] when the id is not open, or its verdict is not `SUPPORTED`.
+/// [`CheapError`] when the id is not open.
+/// A verdict other than `SUPPORTED` is a warning on the atom, and the atom is still returned.
 pub fn accept(
     home: &Home,
     workspace: &str,
@@ -432,10 +440,9 @@ pub fn accept(
         .find(|p| p.get("id").and_then(Value::as_str) == Some(proposal_id))
         .ok_or_else(|| CheapError(format!("no open proposal {proposal_id}")))?;
     let verdict = rec.get("verdict").and_then(Value::as_str).unwrap_or("NEI");
-    if verdict != "SUPPORTED" {
-        return Err(CheapError(format!("extractAccept rejected: {verdict}")));
-    }
-    // An admission hold carries the atom that was refused. Accept stores
+    let flagged = verdict != "SUPPORTED";
+    // An admission hold carries the atom that was stored.
+    // Accept raises
     // that atom. The origin rises, which is the record that the person
     // accepted it. Kind, level, entities, source and text stay. The hook
     // flag comes off, or the store would hold the write again.
@@ -445,6 +452,9 @@ pub fn accept(
         atom.remove("hook");
         atom.remove("embedding");
         atom.insert("workspace".into(), json!(workspace));
+        if flagged {
+            packset_core::record::push_warning(&mut atom, format!("extractAccept: {verdict}"));
+        }
         return Ok((atom, rec));
     }
     let text = rec.get("text").and_then(Value::as_str).unwrap_or("");
@@ -471,6 +481,9 @@ pub fn accept(
     atom.insert("embedding".into(), Value::Null);
     atom.insert("trust".into(), json!(1.0));
     atom.insert("tombstone".into(), json!(false));
+    if flagged {
+        packset_core::record::push_warning(&mut atom, format!("extractAccept: {verdict}"));
+    }
     Ok((atom, rec))
 }
 
@@ -518,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn extraction_is_forbidden_off_compaction() {
+    fn extraction_off_compaction_is_proposed_with_a_warning() {
         let (_dir, home) = home();
         let wall = BTreeSet::new();
         let mining = Mining {
@@ -526,17 +539,21 @@ mod tests {
             job: "extract",
             when: "onDemand",
             wall: &wall,
-            transcript: None,
+            transcript: Some("A claim worth keeping."),
         };
-        let err = propose(&home, mining, "A claim worth keeping.", || "p".into()).unwrap_err();
-        assert_eq!(err.0, "extract is not allowed on onDemand");
-        // And an unknown job is refused rather than waved through.
+        let rec = propose(&home, mining, "A claim worth keeping.", || "p".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec["warning"], json!("extract is not allowed on onDemand"));
+        assert_eq!(rec["status"], json!("open"));
+        // An unknown job has no action to run.
         let unknown = Mining {
             job: "whatever",
             when: "compaction",
             ..mining
         };
-        assert!(propose(&home, unknown, "A claim.", || "p".into()).is_err());
+        let err = propose(&home, unknown, "A claim.", || "p".into()).unwrap_err();
+        assert_eq!(err.0, "whatever is not allowed on compaction");
     }
 
     #[test]
@@ -643,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_supported_proposal_can_be_accepted() {
+    fn a_proposal_is_accepted_and_an_unsupported_verdict_is_labeled() {
         let (_dir, home) = home();
         let mut next = ids();
         let wall = BTreeSet::new();
@@ -658,8 +675,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(nei["verdict"], json!("NEI"));
-        let err = accept(&home, "w", nei["id"].as_str().unwrap()).unwrap_err();
-        assert_eq!(err.0, "extractAccept rejected: NEI");
+        let (atom, _) = accept(&home, "w", nei["id"].as_str().unwrap()).unwrap();
+        assert_eq!(atom["text"], json!("A claim with no transcript"));
+        assert!(
+            atom["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|line| line.as_str().unwrap_or("").contains("NEI")),
+            "{atom:?}"
+        );
 
         // The same claim with somebody able to point at it is acceptable.
         let witnessed = Mining {

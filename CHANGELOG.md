@@ -2,6 +2,25 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A claim is stored when its text is credential-shaped, hides characters, or instructs the reader.
+  Those lines are `warnings` on the atom.
+  A card is written, and the answer carries `warnings`.
+  Before, the writer answered 400 and stored nothing.
+- A prose miss is `prose.warning` on every origin.
+  A lesson with origin `agent-derived`, or a hook write, was refused at the sentence cap and at the grade ceiling.
+  It is stored, and the warning is the sentence the check used to return.
+- An update or a post over a live id may raise `origin` or `source.basis`.
+  The record is stored as written.
+  `provenance_floor` keeps the lowest each part has held, and `warnings` names the rise.
+  Accept still raises with no such label.
+- `PACKSET_HOLD_AGENT_WRITES=1` files the review proposal and stores the atom, with `warnings` naming the proposal.
+  The atom is searchable at once.
+  Accept raises the stored record's origin.
+- A cheap-model job off its point in the cycle is proposed, and the proposal carries `warning`.
+  A proposal whose verdict is not `SUPPORTED` is accepted, and the atom carries `warnings` naming the verdict.
+
 ## 0.17.3 (2026-11-01)
 
 - The writer gives free heap back after a write, at most once every 50

@@ -129,6 +129,16 @@ fn atom_validation_matches_the_corpus() {
                     assert_eq!(atom.get(key), want.get(key), "{key} for {shown}");
                 }
                 assert!(atom.contains_key("prose"), "prose report for {shown}");
+                assert_eq!(
+                    atom.get("prose").and_then(|prose| prose.get("warning")),
+                    want.get("prose").and_then(|prose| prose.get("warning")),
+                    "prose.warning for {shown}"
+                );
+                assert_eq!(
+                    atom.get("warnings"),
+                    want.get("warnings"),
+                    "warnings for {shown}"
+                );
             }
         }
     }

@@ -125,9 +125,9 @@ pub struct Service {
     /// that crossed it, so a herd of seats writing into one pack cannot
     /// grow it without bound.
     live_cap: usize,
-    /// Whether agent and hook writes wait as proposals for an accept. Off
-    /// unless `PACKSET_HOLD_AGENT_WRITES` is set: an agent's memory is
-    /// live when written and reviewed afterwards.
+    /// Whether an `agent-derived` write and a hook write are also filed as review proposals.
+    /// Off unless `PACKSET_HOLD_AGENT_WRITES` is set.
+    /// The atom is stored either way.
     hold_agent_writes: bool,
     /// The day each workspace was last swept for neglect, so a write sweeps
     /// at most once a day.
@@ -890,7 +890,7 @@ impl Service {
             .collect()
     }
 
-    /// The same service, holding agent and hook writes as proposals or not.
+    /// The same service, filing review proposals or not.
     #[must_use]
     pub fn with_hold_agent_writes(mut self, hold: bool) -> Self {
         self.hold_agent_writes = hold;
@@ -1117,11 +1117,11 @@ impl Service {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            // The proposal is the review label.
+            // The atom is stored below.
             let rec = crate::proposals::hold(&self.home, &workspace, &atom, why, new_id)?;
             let id = rec.get("id").and_then(Value::as_str).unwrap_or("");
-            return Err(anyhow::Error::new(AtomError(format!(
-                "held as proposal {id}: {why}"
-            ))));
+            record::push_warning(&mut atom, format!("review {why} {id}"));
         }
         let workspace = atom
             .get("workspace")
@@ -1177,11 +1177,32 @@ impl Service {
                 .find(|existing| same_claim(existing, &atom))
         };
         if let Some(existing) = same_text {
+            if accepted {
+                let mut raised = existing.clone();
+                if let Some(origin) = atom.get("origin").cloned() {
+                    raised.insert("origin".into(), origin);
+                }
+                raised.remove("hook");
+                if let Some(Value::Array(items)) = atom.get("warnings") {
+                    for item in items {
+                        if let Some(text) = item.as_str() {
+                            record::push_warning(&mut raised, text.to_string());
+                        }
+                    }
+                }
+                let saved = self
+                    .store
+                    .upsert_many(std::slice::from_ref(&raised))?
+                    .into_iter()
+                    .next()
+                    .unwrap_or(raised);
+                self.project_atoms(std::slice::from_ref(&saved));
+                return Ok(saved);
+            }
             return Ok(existing.clone());
         }
         if let Some(stored) = over.as_ref().filter(|_| !accepted) {
-            record::hold_provenance(stored, &mut atom, "a post over an existing id")
-                .map_err(anyhow::Error::new)?;
+            record::hold_provenance(stored, &mut atom, "a post over an existing id");
         }
 
         trace.mark("dedup");
@@ -1368,16 +1389,6 @@ impl Service {
             .iter()
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
             .ok_or_else(|| anyhow::Error::new(AtomError(format!("no current atom {id}"))))?;
-        // Null and "" are what validate defaults to user-declared, which
-        // is a rise from any other origin.
-        if fields
-            .get("origin")
-            .is_some_and(|raw| origin_is_blank(Some(raw)))
-        {
-            return Err(anyhow::Error::new(AtomError(
-                "unknown atom origin: None".into(),
-            )));
-        }
         // An update that does not name origin must not gain the default.
         // Validate writes user-declared for a missing field, which is right
         // for a new post and wrong for a record that never had one.
@@ -1414,7 +1425,7 @@ impl Service {
                 }
             }
         }
-        record::hold_provenance(stored, &mut updated, "an update").map_err(anyhow::Error::new)?;
+        record::hold_provenance(stored, &mut updated, "an update");
 
         let now = clock::utcnow();
         let mut batch = Vec::new();
@@ -1645,13 +1656,15 @@ impl Service {
     /// # Errors
     ///
     /// [`AtomError`] for a bad set name, else the write's.
+    /// The strings are labels from the cards that were written.
     pub fn write_set(
         &self,
         workspace: &str,
         name: &str,
         body: &Map<String, Value>,
-    ) -> Result<String, cards::WriteError> {
+    ) -> Result<(String, Vec<String>), cards::WriteError> {
         let stored = packset_core::set_name::check(name).map_err(AtomError)?;
+        let mut warnings = Vec::new();
         for (key, path) in [
             ("user", self.home.set_user_path(workspace, &stored)),
             ("memory", self.home.set_memory_path(workspace, &stored)),
@@ -1667,9 +1680,9 @@ impl Service {
             } else {
                 USER_CAP
             };
-            cards::write_capped(&path, text, cap)?;
+            warnings.extend(cards::write_capped(&path, text, cap)?);
         }
-        Ok(stored)
+        Ok((stored, warnings))
     }
 
     /// Write the seat card, archiving and refusing on overflow.
@@ -1677,19 +1690,19 @@ impl Service {
     /// # Errors
     ///
     /// The write's, with overflow distinguishable so the caller can answer 413.
-    pub fn set_user(&self, text: &str) -> Result<(), cards::WriteError> {
+    pub fn set_user(&self, text: &str) -> Result<Vec<String>, cards::WriteError> {
         match cards::write_capped(&self.home.user_path(), text, USER_CAP) {
             Err(cards::WriteError::Overflow(o)) => {
-                // Archived first, so refused text is not lost; an archive
+                // Archived first, so text past the cap is not lost; an archive
                 // failure is reported over the overflow.
                 self.archive("global", text)?;
                 Err(cards::WriteError::Overflow(o))
             }
-            Ok(()) => {
+            Ok(warnings) => {
                 self.project_cards(None);
-                Ok(())
+                Ok(warnings)
             }
-            other => other,
+            Err(other) => Err(other),
         }
     }
 
@@ -1698,17 +1711,21 @@ impl Service {
     /// # Errors
     ///
     /// As [`Service::set_user`].
-    pub fn set_memory(&self, workspace: &str, text: &str) -> Result<(), cards::WriteError> {
+    pub fn set_memory(
+        &self,
+        workspace: &str,
+        text: &str,
+    ) -> Result<Vec<String>, cards::WriteError> {
         match cards::write_capped(&self.home.memory_path(workspace), text, MEMORY_CAP) {
             Err(cards::WriteError::Overflow(o)) => {
                 self.archive(workspace, text)?;
                 Err(cards::WriteError::Overflow(o))
             }
-            Ok(()) => {
+            Ok(warnings) => {
                 self.project_cards(Some(workspace));
-                Ok(())
+                Ok(warnings)
             }
-            other => other,
+            Err(other) => Err(other),
         }
     }
 
@@ -1720,7 +1737,7 @@ impl Service {
     pub fn archive(&self, workspace: &str, text: &str) -> Result<(), cards::WriteError> {
         let day = clock::utcnow()[..10].to_string();
         let path = self.home.archive_path(workspace, &day);
-        cards::add_entry(&path, text, 1_000_000)
+        cards::add_entry(&path, text, 1_000_000).map(|_| ())
     }
 
     /// Hold one body for a workspace, capped. Expired slots go first. A
@@ -2173,7 +2190,16 @@ impl Service {
             }
         }
         let (atom, rec) = crate::proposals::accept(&self.home, workspace, proposal_id)?;
-        let stored = self.add_prepared(self.prepare(atom)?)?;
+        let carried = atom.get("warnings").cloned();
+        let mut prepared = self.prepare(atom)?;
+        if let Some(Value::Array(items)) = carried {
+            for item in items {
+                if let Some(text) = item.as_str() {
+                    record::push_warning(&mut prepared, text.to_string());
+                }
+            }
+        }
+        let stored = self.add_prepared(prepared)?;
         let atom_id = stored.get("id").and_then(Value::as_str).unwrap_or("");
         crate::proposals::mark_accepted(&self.home, workspace, &rec, atom_id)?;
         Ok(stored)
@@ -2809,13 +2835,17 @@ mod tests {
         assert!(crate::proposals::list_open(&svc.home, "w").is_empty());
     }
 
-    fn held_id(err: &anyhow::Error) -> String {
-        let text = err.to_string();
-        text.split_whitespace()
-            .map(|word| word.trim_matches(|c: char| !c.is_ascii_hexdigit()))
-            .find(|word| word.len() == 32 && word.chars().all(|c| c.is_ascii_hexdigit()))
-            .unwrap_or_else(|| panic!("no proposal id in {text}"))
-            .to_string()
+    fn warning_lines(atom: &Record) -> String {
+        atom.get("warnings")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
     }
 
     fn atom(text: &str) -> Record {
@@ -3486,18 +3516,23 @@ mod tests {
         assert_eq!(record::origin_of(&got), "unknown");
     }
 
+    /// A holding writer stores the lesson and files the review proposal.
+    /// An update that raises the origin is stored; the floor keeps the lower origin and `warnings` names the rise.
     #[test]
-    fn an_agent_derived_lesson_cannot_reach_user_declared_without_accept() {
+    fn a_held_lesson_is_stored_and_a_rise_is_labeled() {
         let (_dir, svc) = holding_service();
         let mut lesson = atom("The fuse is CombMNZ.");
         lesson.insert("kind".into(), json!("lesson"));
         lesson.insert("origin".into(), json!("agent-derived"));
-        let err = svc.add(lesson).unwrap_err();
-        assert!(err.to_string().contains("proposal"), "{err}");
-        assert!(svc.store.live("w").unwrap().is_empty());
+        let stored = svc.add(lesson).unwrap();
+        let lines = warning_lines(&stored);
+        assert!(lines.contains("review agent-derived"), "{lines}");
+        assert_eq!(stored["origin"], json!("agent-derived"));
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
         let open = crate::proposals::list_open(&svc.home, "w");
         assert_eq!(open.len(), 1);
         assert_eq!(open[0]["origin"], json!("agent-derived"));
+        assert!(lines.contains(open[0]["id"].as_str().unwrap()), "{lines}");
 
         let id = "b".repeat(32);
         let mut raw = atom("The fuse is CombMNZ again.");
@@ -3508,26 +3543,27 @@ mod tests {
         svc.store.upsert(&raw).unwrap();
         let mut fields = serde_json::Map::new();
         fields.insert("origin".into(), json!("user-declared"));
-        let refused = svc.update("w", &id, &fields).unwrap_err();
-        assert!(refused.to_string().contains("accept"), "{refused}");
-        let still = svc.store.get("w", &id).unwrap().unwrap();
-        assert_eq!(still["origin"], json!("agent-derived"));
+        let raised = svc.update("w", &id, &fields).unwrap();
+        assert_eq!(raised["origin"], json!("user-declared"));
+        assert!(
+            warning_lines(&raised).contains("raised origin"),
+            "{raised:?}"
+        );
+        assert_eq!(
+            raised[record::PROVENANCE_FLOOR]["origin"],
+            json!("agent-derived")
+        );
 
-        let stored = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
-        assert_eq!(stored["origin"], json!("user-declared"));
-        assert!(svc
-            .store
-            .live("w")
-            .unwrap()
-            .iter()
-            .any(|a| a.get("id") == stored.get("id")));
+        let accepted = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(accepted["origin"], json!("user-declared"));
+        assert_eq!(accepted["id"], stored["id"]);
     }
 
-    /// Null, `""` and a non-string are the origin validate would default.
-    /// That default is user-declared, which an agent lesson reaches only
-    /// through accept. The stored origin and basis stay where they were.
+    /// Null and `""` are the origin validate defaults to user-declared.
+    /// The update is stored, the floor keeps the lower origin, and `warnings` names the rise.
+    /// A non-string origin is still unknown.
     #[test]
-    fn a_blank_origin_cannot_launder_an_agent_lesson() {
+    fn a_blank_origin_is_stored_as_the_default_and_labeled() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid0000000000000000000002";
@@ -3538,27 +3574,52 @@ mod tests {
         lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
         svc.add(lesson).unwrap();
 
-        for origin in [
-            Value::Null,
-            json!(""),
-            json!(1),
-            json!(false),
-            json!({"to": "user-declared"}),
-        ] {
+        for origin in [Value::Null, json!("")] {
+            let mut back = Map::new();
+            back.insert("origin".into(), json!("agent-derived"));
+            back.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+            svc.update("w", id, &back).unwrap();
             let mut fields = Map::new();
             fields.insert("origin".into(), origin);
             fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
+            let stored = svc.update("w", id, &fields).unwrap();
+            assert_eq!(stored["origin"], json!("user-declared"), "{stored:?}");
+            assert_eq!(stored["source"]["basis"], json!("person"));
+            let lines = warning_lines(&stored);
+            assert!(lines.contains("raised origin"), "{lines}");
+            assert!(lines.contains("raised source.basis"), "{lines}");
+            assert_eq!(
+                stored[record::PROVENANCE_FLOOR]["origin"],
+                json!("agent-derived")
+            );
+            assert_eq!(stored[record::PROVENANCE_FLOOR]["basis"], json!("agent"));
+        }
+
+        for origin in [json!(1), json!(false), json!({"to": "user-declared"})] {
+            let mut back = Map::new();
+            back.insert("origin".into(), json!("agent-derived"));
+            back.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+            svc.update("w", id, &back).unwrap();
+            let mut fields = Map::new();
+            fields.insert("origin".into(), origin);
             let err = svc.update("w", id, &fields).unwrap_err();
             assert!(err.to_string().contains("unknown atom origin"), "{err}");
             let got = svc.store.get("w", id).unwrap().unwrap();
             assert_eq!(got["origin"], json!("agent-derived"), "{got:?}");
-            assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
         }
 
         let mut fields = Map::new();
         fields.insert("origin".into(), json!("user-declared"));
-        let err = svc.update("w", id, &fields).unwrap_err();
-        assert!(err.to_string().contains("accept"), "{err}");
+        let raised = svc.update("w", id, &fields).unwrap();
+        assert_eq!(raised["origin"], json!("user-declared"));
+        assert!(
+            warning_lines(&raised).contains("raised origin"),
+            "{raised:?}"
+        );
+        assert_eq!(
+            raised[record::PROVENANCE_FLOOR]["origin"],
+            json!("agent-derived")
+        );
 
         let mut fields = Map::new();
         fields.insert("origin".into(), json!("tool-echo"));
@@ -3566,20 +3627,20 @@ mod tests {
         assert_eq!(stored["origin"], json!("tool-echo"));
         let mut fields = Map::new();
         fields.insert("origin".into(), Value::Null);
-        let err = svc.update("w", id, &fields).unwrap_err();
-        assert!(err.to_string().contains("unknown atom origin"), "{err}");
+        let again = svc.update("w", id, &fields).unwrap();
+        assert_eq!(again["origin"], json!("user-declared"));
+        assert!(warning_lines(&again).contains("raised origin"), "{again:?}");
         assert_eq!(
-            svc.store.get("w", id).unwrap().unwrap()["origin"],
-            json!("tool-echo")
+            again[record::PROVENANCE_FLOOR]["origin"],
+            json!("agent-derived")
         );
     }
 
-    /// Basis `person` on top of `agent` is the same rise as the origin.
-    /// A missing basis is not a person's either, so a record that never
-    /// had one is not stamped by an update. A basis that stays below
-    /// person may change.
+    /// Basis `person` on top of `agent` is stored.
+    /// The floor keeps the lower basis and `warnings` names the rise.
+    /// A missing basis is not a person's, and a basis that stays below person may change.
     #[test]
-    fn an_update_cannot_raise_basis_to_person() {
+    fn an_update_that_raises_basis_is_stored_and_labeled() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid000000000000000000000003";
@@ -3594,12 +3655,15 @@ mod tests {
         let mut fields = Map::new();
         fields.insert("source".into(), json!({"basis": " Person ", "via": "ljos"}));
         fields.insert("text".into(), json!("The fuse is CombMNZ on this seat."));
-        let err = svc.update("w", id, &fields).unwrap_err();
-        assert!(err.to_string().contains("basis"), "{err}");
-        let got = svc.store.get("w", id).unwrap().unwrap();
-        assert_eq!(got["source"]["basis"], json!("agent"), "{got:?}");
-        assert_eq!(got["text"], json!(text));
+        let got = svc.update("w", id, &fields).unwrap();
+        assert_eq!(got["source"]["basis"], json!(" Person "));
+        assert_eq!(got["text"], json!("The fuse is CombMNZ on this seat."));
         assert_eq!(got["origin"], json!("user-declared"));
+        assert!(
+            warning_lines(&got).contains("raised source.basis"),
+            "{got:?}"
+        );
+        assert_eq!(got[record::PROVENANCE_FLOOR]["basis"], json!("agent"));
 
         let mut legacy = atom("Prefer ripgrep when the tree is large.");
         legacy.insert("kind".into(), json!("preference"));
@@ -3621,11 +3685,14 @@ mod tests {
                 "basis": "person"
             }),
         );
-        let err = svc.update("w", legacy_id, &fields).unwrap_err();
-        assert!(err.to_string().contains("basis"), "{err}");
-        let kept = svc.store.get("w", legacy_id).unwrap().unwrap();
-        assert!(kept["source"].get("basis").is_none(), "{kept:?}");
+        let kept = svc.update("w", legacy_id, &fields).unwrap();
+        assert_eq!(kept["source"]["basis"], json!("person"), "{kept:?}");
         assert_eq!(kept["origin"], json!("user-declared"));
+        assert!(
+            warning_lines(&kept).contains("raised source.basis"),
+            "{kept:?}"
+        );
+        assert!(kept[record::PROVENANCE_FLOOR]["basis"].is_null());
 
         let mut down = Map::new();
         down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
@@ -3634,10 +3701,10 @@ mod tests {
     }
 
     /// The order, not a list of pairs: user-declared sits above every
-    /// other origin. A lesson moved sideways to another origin cannot
-    /// climb from there.
+    /// other origin.
+    /// A lesson moved up from another origin is stored, and the floor keeps the lower one.
     #[test]
-    fn an_origin_cannot_climb_through_another_origin() {
+    fn an_origin_climb_is_stored_and_the_floor_stays() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid000000000000000000000004";
@@ -3654,18 +3721,24 @@ mod tests {
             assert_eq!(moved["origin"], json!(step));
             let mut fields = Map::new();
             fields.insert("origin".into(), json!("user-declared"));
-            let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains("accept"), "{err}");
-            let got = svc.store.get("w", id).unwrap().unwrap();
-            assert_eq!(got["origin"], json!(step), "{got:?}");
+            let raised = svc.update("w", id, &fields).unwrap();
+            assert_eq!(raised["origin"], json!("user-declared"));
+            assert!(
+                warning_lines(&raised).contains("raised origin"),
+                "{step}: {raised:?}"
+            );
+            assert_ne!(
+                raised[record::PROVENANCE_FLOOR]["origin"],
+                json!("user-declared")
+            );
         }
     }
 
     /// A `source` that hides the basis under another key, or replaces the
-    /// object whole, leaves no person basis, and the next update cannot
-    /// stamp one back.
+    /// object whole, leaves no person basis.
+    /// The next update may stamp one, and the floor keeps the lower basis.
     #[test]
-    fn a_basis_cannot_climb_back_through_a_nested_or_missing_one() {
+    fn a_basis_climb_back_is_stored_and_the_floor_stays() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid000000000000000000000005";
@@ -3687,10 +3760,13 @@ mod tests {
             svc.update("w", id, &fields).unwrap();
             let mut fields = Map::new();
             fields.insert("source".into(), json!({"basis": "person", "via": "ljos"}));
-            let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains("basis"), "{err}");
-            let got = svc.store.get("w", id).unwrap().unwrap();
-            assert_eq!(got["source"], hidden, "{got:?}");
+            let raised = svc.update("w", id, &fields).unwrap();
+            assert_eq!(raised["source"]["basis"], json!("person"), "{hidden}");
+            assert!(
+                warning_lines(&raised).contains("raised source.basis"),
+                "{hidden}: {raised:?}"
+            );
+            assert_ne!(raised[record::PROVENANCE_FLOOR]["basis"], json!("person"));
         }
     }
 
@@ -3730,8 +3806,19 @@ mod tests {
                 record::PROVENANCE_FLOOR.into(),
                 json!({"origin": "user-declared", "basis": "person"}),
             );
-            let err = svc.update("w", id, &fields).unwrap_err();
-            assert!(err.to_string().contains(key), "{err}");
+            let raised = svc.update("w", id, &fields).unwrap();
+            assert!(warning_lines(&raised).contains(key), "{key}: {raised:?}");
+            assert_eq!(
+                raised[record::PROVENANCE_FLOOR],
+                floor,
+                "a forged floor does not stick"
+            );
+            let mut down = Map::new();
+            down.insert("origin".into(), json!("agent-derived"));
+            down.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
+            let restored = svc.update("w", id, &down).unwrap();
+            assert_eq!(restored["origin"], json!("agent-derived"));
+            assert_eq!(restored[record::PROVENANCE_FLOOR], floor);
         }
         let mut clear = Map::new();
         clear.insert(record::PROVENANCE_FLOOR.into(), Value::Null);
@@ -3744,10 +3831,10 @@ mod tests {
         assert_eq!(graded[record::PROVENANCE_FLOOR], floor);
     }
 
-    /// A post that names a live id writes over that record, so it takes
-    /// the update's rule: down or sideways, never up, and the floor stays.
+    /// A post that names a live id writes over that record.
+    /// A rise is stored, `warnings` names it, and the floor stays the lowest.
     #[test]
-    fn a_post_over_a_live_id_cannot_raise_its_provenance() {
+    fn a_post_over_a_live_id_labels_a_rise_and_keeps_the_floor() {
         let (_dir, svc) = service();
         let svc = svc.with_hold_agent_writes(false);
         let id = "lessonid000000000000000000000006";
@@ -3782,29 +3869,40 @@ mod tests {
             ("user-declared", "agent", "origin"),
             ("agent-derived", "person", "basis"),
         ] {
-            let err = post("Reviews open with a check.", origin, basis).unwrap_err();
-            assert!(err.to_string().contains(key), "{err}");
-            let got = svc.store.get("w", id).unwrap().unwrap();
-            assert_eq!(got["text"], json!("The fuse is CombMNZ for this seat."));
+            let raised = post("Reviews open with a check.", origin, basis).unwrap();
+            assert_eq!(raised["text"], json!("Reviews open with a check."));
+            assert!(warning_lines(&raised).contains(key), "{raised:?}");
+            assert_eq!(raised[record::PROVENANCE_FLOOR], floor);
+            let back = post(
+                "The fuse is CombMNZ for this seat.",
+                "agent-derived",
+                "agent",
+            )
+            .unwrap();
+            assert_eq!(back[record::PROVENANCE_FLOOR], floor);
         }
         let aside = post("Deploys wait for the green build.", "tool-echo", "agent").unwrap();
         assert_eq!(aside["origin"], json!("tool-echo"));
         assert_eq!(aside[record::PROVENANCE_FLOOR], floor);
     }
 
-    /// ljos's agent write on a holding writer: the post is held, accept
-    /// stores it as user-declared, and the client puts the origin back to
-    /// agent-derived. That update goes down, and the next cannot rise.
+    /// A holding writer stores the lesson and files the proposal.
+    /// Accept raises that record.
+    /// Putting the origin back down sticks, and the next rise is stored with a label.
+    /// The floor keeps the lower origin.
     #[test]
-    fn an_accepted_lesson_put_back_to_agent_derived_stays_there() {
+    fn an_accepted_lesson_put_back_down_labels_the_next_rise() {
         let (_dir, svc) = holding_service();
         let mut lesson = atom("The fuse is CombMNZ for this seat.");
         lesson.insert("kind".into(), json!("lesson"));
         lesson.insert("origin".into(), json!("agent-derived"));
         lesson.insert("source".into(), json!({"basis": "agent", "via": "ljos"}));
-        let err = svc.add(lesson).unwrap_err();
-        let accepted = svc.accept("w", &held_id(&err)).unwrap();
+        let stored = svc.add(lesson).unwrap();
+        let open = crate::proposals::list_open(&svc.home, "w");
+        assert_eq!(open.len(), 1);
+        let accepted = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
         assert_eq!(accepted["origin"], json!("user-declared"));
+        assert_eq!(accepted["id"], stored["id"]);
         let id = accepted["id"].as_str().unwrap();
 
         let mut back = Map::new();
@@ -3813,8 +3911,16 @@ mod tests {
         assert_eq!(relabelled["origin"], json!("agent-derived"));
         let mut up = Map::new();
         up.insert("origin".into(), json!("user-declared"));
-        let err = svc.update("w", id, &up).unwrap_err();
-        assert!(err.to_string().contains("accept"), "{err}");
+        let raised = svc.update("w", id, &up).unwrap();
+        assert_eq!(raised["origin"], json!("user-declared"));
+        assert!(
+            warning_lines(&raised).contains("raised origin"),
+            "{raised:?}"
+        );
+        assert_ne!(
+            raised[record::PROVENANCE_FLOOR]["origin"],
+            json!("user-declared")
+        );
     }
 
     /// A record written before origin existed stays without the field.
@@ -3838,41 +3944,16 @@ mod tests {
 
         let mut fields = Map::new();
         fields.insert("origin".into(), Value::Null);
-        let err = svc.update("w", &id, &fields).unwrap_err();
-        assert!(err.to_string().contains("unknown atom origin"), "{err}");
-        assert!(svc
-            .store
-            .get("w", &id)
-            .unwrap()
-            .unwrap()
-            .get("origin")
-            .is_none());
-        let mut fields = Map::new();
-        fields.insert("origin".into(), json!(""));
-        let err = svc.update("w", &id, &fields).unwrap_err();
-        assert!(err.to_string().contains("unknown atom origin"), "{err}");
-        assert!(svc
-            .store
-            .get("w", &id)
-            .unwrap()
-            .unwrap()
-            .get("origin")
-            .is_none());
+        let blank = svc.update("w", &id, &fields).unwrap();
+        assert_eq!(blank["origin"], json!("user-declared"));
+        assert!(warning_lines(&blank).contains("raised origin"), "{blank:?}");
+        assert_eq!(blank[record::PROVENANCE_FLOOR]["origin"], json!("unknown"));
 
-        // No origin is the bottom of the order. Naming one is a rise.
-        for named in ["user-declared", "agent-derived"] {
-            let mut fields = Map::new();
-            fields.insert("origin".into(), json!(named));
-            let err = svc.update("w", &id, &fields).unwrap_err();
-            assert!(err.to_string().contains("origin"), "{err}");
-            assert!(svc
-                .store
-                .get("w", &id)
-                .unwrap()
-                .unwrap()
-                .get("origin")
-                .is_none());
-        }
+        let mut fields = Map::new();
+        fields.insert("origin".into(), json!("agent-derived"));
+        let named = svc.update("w", &id, &fields).unwrap();
+        assert_eq!(named["origin"], json!("agent-derived"));
+        assert_eq!(named[record::PROVENANCE_FLOOR]["origin"], json!("unknown"));
     }
 
     #[test]
@@ -3887,15 +3968,23 @@ mod tests {
             json!(["seat:inky", "issue:demo-amz9", "horizon:transient"]),
         );
         lesson.insert("source".into(), json!({"via": "ljos", "harness": "inky"}));
-        let err = svc.add(lesson.clone()).unwrap_err();
-        let again = svc.add(lesson).unwrap_err();
-        let id = held_id(&err);
+        let stored_first = svc.add(lesson.clone()).unwrap();
+        let again = svc.add(lesson).unwrap();
+        assert_eq!(again["id"], stored_first["id"]);
+        let open = crate::proposals::list_open(&svc.home, "w");
+        assert_eq!(open.len(), 1);
+        let id = open[0]["id"].as_str().unwrap();
         assert!(
-            again.to_string().contains(&id),
-            "a retry is the same proposal: {again}"
+            warning_lines(&stored_first).contains(id),
+            "the review label names the proposal: {}",
+            warning_lines(&stored_first)
         );
-        assert_eq!(crate::proposals::list_open(&svc.home, "w").len(), 1);
-        let stored = svc.accept("w", &id).unwrap();
+        assert!(
+            warning_lines(&again).contains(id),
+            "{}",
+            warning_lines(&again)
+        );
+        let stored = svc.accept("w", id).unwrap();
         assert_eq!(stored["kind"], json!("lesson"));
         assert_eq!(stored["level"], json!("explicit"));
         assert_eq!(stored["origin"], json!("user-declared"));
@@ -3908,7 +3997,7 @@ mod tests {
             .collect();
         assert!(tags.contains(&"issue:demo-amz9"), "{tags:?}");
         assert!(crate::proposals::list_open(&svc.home, "w").is_empty());
-        let retry = svc.accept("w", &id).unwrap();
+        let retry = svc.accept("w", id).unwrap();
         assert_eq!(retry["id"], stored["id"]);
         let live = svc.store.live("w").unwrap();
         assert_eq!(live.len(), 1, "{live:?}");
@@ -3923,15 +4012,17 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_write_becomes_live_only_through_accept() {
+    fn a_hook_write_is_stored_and_accept_raises_it() {
         let (_dir, svc) = holding_service();
         let mut caught = atom("A correction the hook caught in the cue.");
         caught.insert("kind".into(), json!("preference"));
         caught.insert("hook".into(), json!(true));
-        let err = svc.add(caught).unwrap_err();
-        assert!(err.to_string().contains("hook"), "{err}");
-        let id = held_id(&err);
-        let stored = svc.accept("w", &id).unwrap();
+        let held = svc.add(caught).unwrap();
+        assert!(warning_lines(&held).contains("review hook"), "{held:?}");
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+        let open = crate::proposals::list_open(&svc.home, "w");
+        assert_eq!(open.len(), 1);
+        let stored = svc.accept("w", open[0]["id"].as_str().unwrap()).unwrap();
         assert_eq!(stored["kind"], json!("preference"));
         assert_eq!(stored["origin"], json!("user-declared"));
         assert_ne!(stored.get("hook"), Some(&json!(true)));
@@ -3940,13 +4031,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_write_is_held_and_an_echo_promotes_at_its_origin() {
+    fn a_hook_write_is_labeled_and_an_echo_promotes_at_its_origin() {
         let (_dir, svc) = holding_service();
         let mut caught = atom("A correction the hook caught in the cue.");
         caught.insert("hook".into(), json!(true));
-        let err = svc.add(caught).unwrap_err();
-        assert!(err.to_string().contains("hook"), "{err}");
-        assert!(svc.store.live("w").unwrap().is_empty());
+        let held = svc.add(caught).unwrap();
+        assert!(warning_lines(&held).contains("review hook"), "{held:?}");
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
 
         let mut echo = atom("A lesson stored before anyone reviewed it.");
         echo.insert("origin".into(), json!("tool-echo"));
@@ -4126,6 +4217,21 @@ mod tests {
         let again = svc.add(again).unwrap();
         assert!(ids.contains(&again["id"]), "{again:?}");
         assert_eq!(svc.store().current("w", None).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_credential_shaped_claim_is_stored_and_labeled() {
+        let (_dir, svc) = service();
+        let text = "api_key=abcd1234efgh";
+        let stored = svc.add(atom(text)).unwrap();
+        assert_eq!(stored["text"], json!(text));
+        assert!(
+            warning_lines(&stored).contains("credential-shaped"),
+            "{stored:?}"
+        );
+        let live = svc.store().current("w", None).unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0]["text"], json!(text));
     }
 
     #[test]
