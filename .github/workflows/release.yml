@@ -21,17 +21,73 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  # ci.yml runs on a push to main or develop.
+  # A tag does not start it.
+  # A tag pushed with its commit can list no run for a moment.
+  # Ten looks, two seconds apart, cover that gap.
+  # After that the commit never started CI and the release stops.
+  CI_LOOKS: "10"
+  CI_LOOK_SECONDS: "2"
 
 jobs:
+  ci-green:
+    name: CI on this sha is green
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    steps:
+      - name: The tag names a release
+        run: |
+          set -eu
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: CI succeeded on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sha=$(git rev-parse HEAD)
+          # The newest run is the one that counts.
+          # An older success does not cover a later failure.
+          run_id=
+          i=0
+          while [ "$i" -lt "$CI_LOOKS" ]; do
+            run_id=$(gh run list --commit "$sha" --workflow ci.yml --limit 1 \
+              --json databaseId,status,conclusion --jq '.[0].databaseId // empty')
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            i=$((i + 1))
+            sleep "$CI_LOOK_SECONDS"
+          done
+          if [ -z "$run_id" ]; then
+            echo "no CI run for $sha" >&2
+            exit 1
+          fi
+          echo "CI run $run_id for $sha"
+          gh run watch "$run_id" --exit-status
+
   build:
+    needs: ci-green
     strategy:
       fail-fast: false
       matrix:
+        # These are the hosts cargo binstall fetches.
+        # The archive name is packset-$TAG-$target.
+        # That name is the binstall pkg-url.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - name: The tag names a release
@@ -60,10 +116,19 @@ jobs:
           path: .release
           sparse-checkout: crates/packset-embed/build-onnxruntime.sh
           sparse-checkout-cone-mode: false
+      - name: The runtime version the build script pins
+        id: ortver
+        run: |
+          set -eu
+          ver=$(sed -n 's/^version=//p' .release/crates/packset-embed/build-onnxruntime.sh)
+          test -n "$ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
+      - name: The target is installed for the pin
+        run: rustup target list --installed | grep -qx '${{ matrix.target }}'
       - name: Build tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
@@ -76,13 +141,21 @@ jobs:
         id: ort
         with:
           path: ${{ runner.temp }}/onnxruntime-static
-          key: onnxruntime-1.28.0-cpu-static-${{ matrix.target }}-${{ hashFiles('.release/crates/packset-embed/build-onnxruntime.sh') }}
-      - name: Build ONNX Runtime 1.28.0 from source
+          key: onnxruntime-${{ steps.ortver.outputs.version }}-cpu-static-${{ matrix.target }}-${{ hashFiles('.release/crates/packset-embed/build-onnxruntime.sh') }}
+      - name: Build ONNX Runtime from source
         if: steps.ort.outputs.cache-hit != 'true'
         env:
           ORT_SRC: ${{ runner.temp }}/onnxruntime-src
         run: |
           set -eu
+          # ONNX Runtime calls the aarch64 macOS slice arm64.
+          # The arm64 runner builds that slice by default.
+          # An x86_64 macOS target has to name its slice.
+          # Otherwise the static archives are the host machine.
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin) export ORT_OSX_ARCH=x86_64 ;;
+            aarch64-apple-darwin) export ORT_OSX_ARCH=arm64 ;;
+          esac
           bash .release/crates/packset-embed/build-onnxruntime.sh "${{ runner.temp }}/onnxruntime"
           case "$RUNNER_OS" in
             macOS) build="$ORT_SRC/build/MacOS/Release" ;;
@@ -123,11 +196,40 @@ jobs:
           # The encoder must not name a shared ONNX Runtime.
           if [ "$RUNNER_OS" = macOS ]; then
             otool -L "$out/packset-embed"
-            ! otool -L "$out/packset-embed" | grep -q onnxruntime
+            if otool -L "$out/packset-embed" | grep -q onnxruntime; then
+              echo "packset-embed links a shared ONNX Runtime" >&2
+              exit 1
+            fi
           else
             ldd "$out/packset-embed"
-            ! readelf -d "$out/packset-embed" | grep -q onnxruntime
+            if readelf -d "$out/packset-embed" | grep -q onnxruntime; then
+              echo "packset-embed links a shared ONNX Runtime" >&2
+              exit 1
+            fi
           fi
+          # The binaries are the matrix target.
+          # That includes a macOS cross build.
+          case "$RUNNER_OS" in
+            macOS)
+              case "${{ matrix.target }}" in
+                x86_64-*) want=x86_64 ;;
+                aarch64-*) want=arm64 ;;
+              esac
+              for b in packset packsetd packset-mcp packset-embed; do
+                got=$(lipo -archs "$out/$b")
+                test "$got" = "$want"
+              done
+              ;;
+            *)
+              case "${{ matrix.target }}" in
+                x86_64-*) want=X86-64 ;;
+                aarch64-*) want=AArch64 ;;
+              esac
+              for b in packset packsetd packset-mcp packset-embed; do
+                readelf -h "$out/$b" | grep -q "$want"
+              done
+              ;;
+          esac
           "$out/packset-embed" --help >/dev/null
           "$out/packset" --version
           cp README.md CHANGELOG.md LICENSE* "$out/" 2>/dev/null || true
@@ -138,7 +240,7 @@ jobs:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz*
   release:
-    needs: build
+    needs: [ci-green, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

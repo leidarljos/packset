@@ -50,6 +50,13 @@ set -- \
 if [ "$(id -u)" -eq 0 ]; then
   set -- "$@" --allow_running_as_root
 fi
+# ORT_OSX_ARCH is the macOS slice, arm64 or x86_64.
+# Set it when the release target is not the runner.
+# Unset builds the host, which is what CI does.
+# ONNX Runtime names the aarch64 slice arm64.
+if [ "$(uname -s)" = Darwin ] && [ -n "${ORT_OSX_ARCH:-}" ]; then
+  set -- "$@" --osx_arch "$ORT_OSX_ARCH"
+fi
 ./build.sh "$@"
 
 cmake --install "$build" --prefix "$prefix"
