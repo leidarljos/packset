@@ -28,6 +28,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A `.sha256` file sits beside it.
 - `cargo binstall packset` downloads that archive.
 - The release publishes the tag only after CI succeeded on that commit.
+- The release actions are pinned to the commits of specific v4.x release tags.
+- Only the release job can write the tag or its attestations.
+- The CI wait stops after 60 minutes.
 
 ## 0.17.3 (2026-11-01)
 
