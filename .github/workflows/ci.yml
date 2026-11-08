@@ -26,6 +26,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Rust formatting
         run: cargo fmt --all --check
+      # The comparator the release uses on the shipped Linux binaries.
+      # The binaries themselves are scanned in release.yml, where they are
+      # built on Ubuntu 22.04. A debug build on this runner is not shipped.
+      - name: Symbol version floor
+        run: sh scripts/check-glibc-floor.sh --self-test
       # The two projections are excluded for the same reason they are separate
       # crates: each carries a native dependency with a download behind it, and
       # neither is needed to build or run the writer.

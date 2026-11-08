@@ -5,10 +5,11 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -111,49 +112,86 @@ fn is_executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
+/// Lines of a child's stderr copied into the log when it exits before
+/// answering. The dynamic linker writes one line per missing symbol.
+/// Eight covers that report. Anything further is drained and dropped.
+const ENCODER_STDERR_LINES: usize = 8;
+
+/// Bytes of that stderr copied into the log. The loader's lines are short.
+/// The cap stops one endless line from growing the note.
+const ENCODER_STDERR_BYTES: usize = 1024;
+
 /// A running encoder: one child, one line in, one line out.
 struct Encoder {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    /// First lines of stderr, joined once the child has exited.
+    /// `None` for a child this process did not spawn, or after the join.
+    stderr_thread: Option<JoinHandle<String>>,
+}
+
+/// First lines of `pipe`, then read the rest so a chatty child cannot fill
+/// the pipe and block. Returns when the child closes stderr.
+fn collect_stderr(pipe: ChildStderr) -> String {
+    let mut reader = BufReader::new(pipe);
+    let mut out = String::new();
+    let mut kept_lines = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let keep = kept_lines < ENCODER_STDERR_LINES
+                    && out.len().saturating_add(n) <= ENCODER_STDERR_BYTES;
+                if keep {
+                    out.push_str(&line);
+                    kept_lines += 1;
+                } else {
+                    kept_lines = ENCODER_STDERR_LINES;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn spawn(binary: &Path, args: &[&str]) -> Option<Encoder> {
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let mut running = Encoder::from_child_io(child, stdin, stdout);
+    running.stderr_thread = Some(std::thread::spawn(move || collect_stderr(stderr)));
+    Some(running)
 }
 
 impl Encoder {
+    fn from_child_io(child: Child, stdin: ChildStdin, stdout: std::process::ChildStdout) -> Self {
+        Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            stderr_thread: None,
+        }
+    }
+
     fn start(binary: &Path, query: bool) -> Option<Self> {
         // One child encodes both sides. `--query` is still accepted by the
         // binary for old callers; this writer sends `query` per line instead.
         let _ = query;
-        let mut command = Command::new(binary);
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        Some(Self {
-            child,
-            stdin,
-            stdout,
-        })
+        spawn(binary, &[])
     }
 
     fn start_rerank(binary: &Path) -> Option<Self> {
-        let mut child = Command::new(binary)
-            .arg("--rerank")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        Some(Self {
-            child,
-            stdin,
-            stdout,
-        })
+        spawn(binary, &["--rerank"])
     }
 
     /// One question against many candidates in one line, one score each; the
@@ -174,20 +212,7 @@ impl Encoder {
     }
 
     fn start_sparse(binary: &Path) -> Option<Self> {
-        let mut child = Command::new(binary)
-            .arg("--sparse")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        Some(Self {
-            child,
-            stdin,
-            stdout,
-        })
+        spawn(binary, &["--sparse"])
     }
 
     /// One line in, the learned term weights out.
@@ -212,20 +237,7 @@ impl Encoder {
     }
 
     fn start_late(binary: &Path) -> Option<Self> {
-        let mut child = Command::new(binary)
-            .arg("--late")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        Some(Self {
-            child,
-            stdin,
-            stdout,
-        })
+        spawn(binary, &["--late"])
     }
 
     /// One line in, one line carrying all three forms out.
@@ -341,12 +353,31 @@ impl Encoder {
     fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// Stderr captured so far, once the child has exited.
+    /// A live child returns empty: joining the reader would wait until it dies.
+    fn exited_stderr(&mut self) -> String {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            return String::new();
+        }
+        self.stderr_thread
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
 }
 
 impl Drop for Encoder {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // The reader ends when the child closes stderr. Join it so a test
+        // that drops the encoder does not leave the thread running.
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -613,33 +644,66 @@ pub fn last_dense() -> Option<bool> {
     }
 }
 
+/// The line packsetd prints when the encoder exits before it answers.
+/// Empty stderr keeps the hint to run the binary by hand. A loader that
+/// wrote why (a missing symbol, a missing library) is quoted instead.
+fn encoder_failure_line(binary: &Path, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!(
+            "packsetd: the encoder {} did not answer; search is lexical until it does (run it by hand to see why)",
+            binary.display()
+        )
+    } else {
+        format!(
+            "packsetd: the encoder {} did not answer; search is lexical until it does\n{stderr}",
+            binary.display()
+        )
+    }
+}
+
 fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     let binary = binary()?;
     let mut held = lock_dense()?;
+    let mut noted = String::new();
     for _ in 0..2 {
         if held.as_mut().is_none_or(|running| !running.alive()) {
             *held = Encoder::start(&binary, query);
         }
-        let Some(running) = held.as_mut() else {
-            break;
+        let note = {
+            let Some(running) = held.as_mut() else {
+                break;
+            };
+            if let Some(vectors) = running.encode_batch(texts, query) {
+                LAST_DENSE.store(1, Ordering::Relaxed);
+                return Some(vectors);
+            }
+            // Take the child's own words before Drop kills a process that
+            // has already exited. The loader writes them and then stops.
+            running.exited_stderr()
         };
-        if let Some(vectors) = running.encode_batch(texts, query) {
-            LAST_DENSE.store(1, Ordering::Relaxed);
-            return Some(vectors);
+        if !note.is_empty() {
+            noted = note;
         }
         *held = None;
     }
-    // The child's stderr goes nowhere, so a runtime it cannot load would
-    // otherwise leave every search lexical with nothing in the log. Say it
-    // once per outage; the next encode that answers ends the outage.
+    // Say it once per outage. The next encode that answers ends the outage.
     if LAST_DENSE.swap(2, Ordering::Relaxed) != 2 {
-        eprintln!(
-            "packsetd: the encoder {} did not answer; search is lexical until it does (run it by hand to see why)",
-            binary.display()
-        );
+        let line = encoder_failure_line(&binary, &noted);
+        eprintln!("{line}");
+        #[cfg(test)]
+        {
+            *LAST_ENCODER_FAILURE
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = line;
+        }
     }
     None
 }
+
+/// The last encoder-failure line printed. Tests read it; the seat reads stderr.
+#[cfg(test)]
+static LAST_ENCODER_FAILURE: Mutex<String> = Mutex::new(String::new());
 
 pub fn encode(text: &str, query: bool) -> Option<Vec<f32>> {
     if text.trim().is_empty() {
@@ -1195,6 +1259,79 @@ for line in sys.stdin:
         }
     }
 
+    /// A child that writes its reason and exits is quoted in the log.
+    /// The dynamic linker does this for a missing symbol, and that text
+    /// used to be thrown away with the child's stderr.
+    #[test]
+    fn an_encoder_that_exits_at_once_logs_its_stderr() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::var_os("PACKSET_EMBED");
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("packset-embed");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+echo 'version GLIBC_2.43 not found (required by packset-embed)' >&2\n\
+echo 'version GLIBCXX_3.4.34 not found (required by packset-embed)' >&2\n\
+i=0\n\
+while [ \"$i\" -lt 8 ]; do\n\
+  i=$((i + 1))\n\
+  echo \"encoder-stderr-extra-$i\" >&2\n\
+done\n\
+echo 'encoder-stderr-dropped' >&2\n\
+exit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        // SAFETY: EMBED is held, so no other test reads this variable.
+        unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
+        *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+        LAST_DENSE.store(0, Ordering::Relaxed);
+        *LAST_ENCODER_FAILURE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = String::new();
+        assert!(encode_now(&["a text".to_string()], false).is_none());
+        let line = LAST_ENCODER_FAILURE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+        unsafe {
+            match before {
+                Some(v) => std::env::set_var("PACKSET_EMBED", v),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+        }
+        assert!(
+            line.contains("did not answer"),
+            "the outage line was dropped: {line}"
+        );
+        assert!(
+            line.contains("GLIBC_2.43"),
+            "the loader line was not logged: {line}"
+        );
+        assert!(
+            line.contains("GLIBCXX_3.4.34"),
+            "the second loader line was not logged: {line}"
+        );
+        assert!(
+            line.contains("encoder-stderr-extra-6"),
+            "a line inside the cap was dropped: {line}"
+        );
+        assert!(
+            !line.contains("encoder-stderr-extra-7"),
+            "a line past the cap was logged: {line}"
+        );
+        assert!(
+            !line.contains("encoder-stderr-dropped"),
+            "the tail was logged: {line}"
+        );
+        assert_eq!(last_dense(), Some(false));
+    }
+
     #[test]
     fn a_path_that_is_not_a_program_is_not_an_encoder() {
         assert!(!is_executable(&PathBuf::from("/nonexistent/packset-embed")));
@@ -1233,11 +1370,7 @@ for line in sys.stdin:
         // `cat` echoes what it is given, so the reply carries the request's
         // own fields and no `s` at all: a well-formed line that is not an
         // answer.
-        let mut echoing = Encoder {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-        };
+        let mut echoing = Encoder::from_child_io(child, stdin, stdout);
         let candidates = vec!["one".to_string(), "two".to_string()];
         assert!(echoing.rerank("a question", &candidates).is_none());
     }
@@ -1351,11 +1484,7 @@ for line in sys.stdin:
             let _ = std::fs::remove_file(&script);
             return;
         };
-        let mut enc = Encoder {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-        };
+        let mut enc = Encoder::from_child_io(child, stdin, stdout);
         let candidates = vec!["first".into(), "second".into()];
         let scores = enc.rerank("a question", &candidates);
         drop(enc);

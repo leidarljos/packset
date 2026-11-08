@@ -30,6 +30,7 @@ $ packset ensure
 Hosts are aarch64-apple-darwin and x86_64-apple-darwin.
 Linux hosts are aarch64-unknown-linux-gnu and x86_64-unknown-linux-gnu.
 The archive holds packset, packsetd, packset-mcp and packset-embed.
+The Linux archive is built on Ubuntu 22.04 and runs on glibc 2.35 or newer.
 A .sha256 file is published beside the archive.
 `--locked` builds from source when the target has no archive.
 That source build uses Cargo.lock.

@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The Linux release is built on Ubuntu 22.04, so a shipped binary needs at most glibc 2.35 and the libstdc++ that release ships (`GLIBCXX_3.4.30`, `CXXABI_1.3.13`).
+  `ubuntu-latest` had moved to glibc 2.43 and a GCC that emits `GLIBCXX_3.4.34`.
+  `packset-embed` links `libstdc++` and `libm` from the image it is built on, and on Debian 13 (glibc 2.41) it exited before `main`.
+  The release fails if any Linux binary needs a symbol version above that floor.
+- When the encoder child exits before it answers, packsetd logs the first lines of the child's stderr.
+  A missing symbol used to be only `the encoder ... did not answer`.
 - A claim is stored when its text is credential-shaped, hides characters, or instructs the reader.
   Those lines are `warnings` on the atom.
   A card is written, and the answer carries `warnings`.

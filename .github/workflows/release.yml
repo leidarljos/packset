@@ -77,14 +77,25 @@ jobs:
         # These are the hosts cargo binstall fetches.
         # The archive name is packset-$TAG-$target.
         # That name is the binstall pkg-url.
+        # Linux is Ubuntu 22.04, not ubuntu-latest.
+        # ubuntu-latest moves, and a current image has glibc 2.43 and a
+        # GCC that emits GLIBCXX_3.4.34. packset-embed links libstdc++ and
+        # libm from the image it was built on, so that binary does not
+        # start on Debian 13 (glibc 2.41).
+        # Ubuntu 22.04 is glibc 2.35. GCC 12 there stops at GLIBCXX_3.4.30,
+        # which is the libstdc++ that release ships.
+        # Linking libstdc++ statically would hide GLIBCXX and still import
+        # GLIBC_2.43 from objects compiled against the new headers.
+        # A musl target would drop glibc. ONNX Runtime and the native TLS
+        # client are not built that way.
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -112,7 +123,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: .release
-          sparse-checkout: crates/packset-embed/build-onnxruntime.sh
+          sparse-checkout: |
+            crates/packset-embed/build-onnxruntime.sh
+            scripts/check-glibc-floor.sh
           sparse-checkout-cone-mode: false
       - name: The runtime version the build script pins
         id: ortver
@@ -141,9 +154,20 @@ jobs:
           components: rustfmt, clippy
       - name: The target is installed for the pin
         run: rustup target list --installed | grep -qx '${{ matrix.target }}'
+      # GCC 12 is the newest compiler whose libstdc++ symbols Ubuntu 22.04
+      # provides. A newer g++ on the image would record a GLIBCXX the floor
+      # check rejects. ONNX Runtime 1.28 requires CMake 3.28; jammy ships 3.22.
       - name: Build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-12 g++-12 python3 python3-pip pkg-config libssl-dev
+          python3 -m pip install --user 'cmake>=3.28,<4'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "CC=gcc-12" >> "$GITHUB_ENV"
+          echo "CXX=g++-12" >> "$GITHUB_ENV"
       # packset-embed links ONNX Runtime and does not download one. The
       # release links it statically, so the encoder needs no library beside
       # it and an install that copies only the binaries still starts. The
@@ -240,6 +264,10 @@ jobs:
               for b in packset packsetd packset-mcp packset-embed; do
                 readelf -h "$out/$b" | grep -q "$want"
               done
+              # The floor script is the workflow's copy, so a rebuilt tag
+              # is held to the current floor.
+              sh .release/scripts/check-glibc-floor.sh \
+                "$out/packset" "$out/packsetd" "$out/packset-mcp" "$out/packset-embed"
               ;;
           esac
           "$out/packset-embed" --help >/dev/null

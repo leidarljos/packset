@@ -187,7 +187,10 @@ on the lexical ballots.
    $ packset status seat | jq .embedder
 
 The published binary remains ``cargo binstall packset-embed`` for a seat
-that does not compile the runtime.
+that does not compile the runtime. That Linux binary is built on Ubuntu
+22.04 and runs where glibc is 2.35 or newer. A newer image links
+``GLIBCXX`` and ``GLIBC`` versions Debian 13 does not have, and the
+encoder exits before ``main``.
 
 Rank by the words, not the age
 ===============================
