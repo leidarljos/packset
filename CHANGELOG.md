@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.17.4 (2026-11-09)
 
 - The Linux release is built on Ubuntu 22.04, so a shipped binary needs at most glibc 2.35 and the libstdc++ that release ships (`GLIBCXX_3.4.30`, `CXXABI_1.3.13`).
   `ubuntu-latest` had moved to glibc 2.43 and a GCC that emits `GLIBCXX_3.4.34`.
