@@ -108,11 +108,14 @@ jobs:
           ref: refs/tags/${{ env.TAG }}
       # The tag's v prefix is not part of the crate version. One runner reads
       # the manifest; the matrix builds that same tag.
+      # Ubuntu 22.04 has Python 3.10, which has no tomllib.
+      # sed reads the version line of [workspace.package].
       - name: The tag matches the crate version
         if: runner.os == 'Linux'
         run: |
           set -eu
-          ver=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          ver=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$ver"
           tag="${TAG#v}"
           if [ "$tag" != "$ver" ]; then
             echo "tag $TAG does not match crate version $ver" >&2
