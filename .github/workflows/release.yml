@@ -18,7 +18,7 @@ permissions:
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
   # rustc 1.89 overflows its stack in LLVM on aarch64-linux at opt-level 3.
-  RUST_MIN_STACK: "16777216"
+  RUST_MIN_STACK: "67108864"
   # ci.yml runs on a push to main or develop.
   # A tag does not start it.
   # A tag pushed with its commit can list no run for a moment.
