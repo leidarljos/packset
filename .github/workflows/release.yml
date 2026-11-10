@@ -208,6 +208,15 @@ jobs:
             cp "$build/$a" "$dest/$a"
           done
           test -f "$dest/libonnxruntime_common.a"
+      # rustc 1.89 still crashed in LLVM on packset-core for aarch64-linux
+      # with a 64 MiB stack. That one crate builds at opt-level 1 there.
+      - name: Lower opt-level for packset-core on aarch64-linux
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -eu
+          cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          mkdir -p "$(dirname "$cfg")"
+          printf '\n[profile.release.package.packset-core]\nopt-level = 1\n' >> "$cfg"
       - name: Build the writer
         run: cargo build --locked --release --target ${{ matrix.target }} -p packset
       # ort-sys links the archives it knows by name. ONNX Runtime 1.28 adds
