@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::error::Error as StdError;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How long one request may take: `PACKSET_TIMEOUT_MS`, else thirty seconds.
 /// A write that waits behind thirty others on a busy seat is late, not failed.
@@ -28,8 +28,27 @@ const BUSY_GROWTH: u32 = 3;
 const BUSY_WAIT_CAP: Duration = Duration::from_secs(5);
 
 /// Whether another ask still ends inside `budget`.
-fn ask_again(elapsed: Duration, wait: Duration, budget: Duration) -> bool {
-    elapsed.saturating_add(wait) < budget
+///
+/// `waited` is the sum of the waits already taken, not the clock. A round
+/// trip that is slow on one host does not spend the next wait, so every
+/// host asks the same number of times for one budget.
+fn ask_again(waited: Duration, wait: Duration, budget: Duration) -> bool {
+    waited.saturating_add(wait) < budget
+}
+
+/// How many times [`send`] asks inside `budget`. The first ask costs no
+/// wait. Each later ask costs the next backoff, and a wait that would pass
+/// the budget is not taken.
+fn attempts_in(budget: Duration) -> u32 {
+    let mut waited = Duration::ZERO;
+    let mut wait = BUSY_WAIT;
+    let mut attempts = 1u32;
+    while ask_again(waited, wait, budget) {
+        waited = waited.saturating_add(wait);
+        wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
+        attempts = attempts.saturating_add(1);
+    }
+    attempts
 }
 
 /// What [`send`] could not turn into a response.
@@ -41,23 +60,25 @@ enum Attempt {
 }
 
 /// Send `req`, with `body` when there is one, inside `budget`. A connection
-/// refused, a 429, or a 503 is asked again until the budget runs out. The
-/// writer answers 503 only when its queue or its lane is full, before any
-/// of the request runs, so a write sent again is not stored twice. The first
-/// refusal of a loopback writer starts the local daemon once, when this seat
-/// has a home and a `packsetd` binary.
+/// refused, a 429, or a 503 is asked again for every wait that fits in the
+/// budget. The waits are what the budget spends. A slow round trip does not
+/// drop an ask. The writer answers 503 only when its queue or its lane is
+/// full, before any of the request runs, so a write sent again is not stored
+/// twice. The first refusal of a loopback writer starts the local daemon
+/// once, when this seat has a home and a `packsetd` binary.
 fn send(
     req: ureq::Request,
     body: Option<&serde_json::Value>,
     budget: Duration,
 ) -> Result<ureq::Response, Attempt> {
-    let started = Instant::now();
+    let attempts = attempts_in(budget);
+    let mut waited = Duration::ZERO;
     let mut wait = BUSY_WAIT;
+    let mut asked = 0u32;
     let mut started_daemon = false;
     loop {
-        let left = budget
-            .saturating_sub(started.elapsed())
-            .max(Duration::from_millis(1));
+        asked = asked.saturating_add(1);
+        let left = budget.saturating_sub(waited).max(Duration::from_millis(1));
         let mut attempt = req.clone().timeout(left);
         if started_daemon {
             if let Some(token) = token() {
@@ -68,21 +89,22 @@ fn send(
             Some(json) => attempt.send_json(json),
             None => attempt.call(),
         };
+        let again = asked < attempts;
         match answered {
-            Err(ureq::Error::Status(code, _))
-                if (code == 503 || code == 429) && ask_again(started.elapsed(), wait, budget) =>
-            {
+            Err(ureq::Error::Status(code, _)) if (code == 503 || code == 429) && again => {
                 std::thread::sleep(wait);
+                waited = waited.saturating_add(wait);
                 wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
             }
             Err(ureq::Error::Status(code, response)) if code == 503 || code == 429 => {
                 return Err(Attempt::Plain(busy_line(response)));
             }
-            Err(err) if connect_refused(&err) && ask_again(started.elapsed(), wait, budget) => {
+            Err(err) if connect_refused(&err) && again => {
                 if !started_daemon {
                     started_daemon = autostart(req.url());
                 }
                 std::thread::sleep(wait);
+                waited = waited.saturating_add(wait);
                 wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
             }
             Err(err) if connect_refused(&err) => {
@@ -1180,7 +1202,7 @@ mod tests {
 
     #[test]
     fn resolved_workspace_reads_ljos_env_not_default() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("packset-ljos-env-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/ljos")).unwrap();
         std::fs::write(
@@ -1210,7 +1232,7 @@ mod tests {
 
     #[test]
     fn resolved_workspace_without_env_is_seat_not_default() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("packset-no-ljos-env-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let old_home = env::var("HOME").ok();
@@ -1281,7 +1303,7 @@ mod tests {
     #[test]
     fn a_busy_writer_is_asked_again_for_a_read_and_a_write() {
         use std::sync::atomic::Ordering;
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (client, seen) = busy_for(2);
         assert_eq!(client.status(None).unwrap()["ok"], true);
         assert_eq!(seen.load(Ordering::SeqCst), 3);
@@ -1300,7 +1322,7 @@ mod tests {
     #[test]
     fn a_writer_that_stays_busy_fails_in_one_sentence() {
         use std::sync::atomic::Ordering;
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = env::var_os("PACKSET_TIMEOUT_MS");
         unsafe { env::set_var("PACKSET_TIMEOUT_MS", "700") };
         let (client, seen) = busy_for(usize::MAX);
@@ -1316,13 +1338,19 @@ mod tests {
             !err.contains("os error") && !err.contains("status code"),
             "{err}"
         );
-        // 50 ms, then 150, then 450, and the next wait does not fit in 700 ms.
-        assert_eq!(seen.load(Ordering::SeqCst), 4, "{err}");
+        // The count is the waits that fit in 700 ms, not how long this host
+        // took to read each 503.
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            usize::try_from(attempts_in(Duration::from_millis(700))).unwrap(),
+            "{err}"
+        );
     }
 
     #[test]
     fn a_refused_connection_is_retried_and_then_one_sentence() {
-        let _env = ENV_LOCK.lock().unwrap();
+        use std::time::Instant;
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("packset-down-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let saved = save_env(&[
@@ -1357,7 +1385,7 @@ mod tests {
 
     #[test]
     fn a_down_local_writer_is_started_once() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "packset-autostart-{}-{}",
             std::process::id(),
@@ -1462,12 +1490,11 @@ mod tests {
     /// and 50 + 150 ms does not.
     const BUDGET: Duration = Duration::from_millis(100);
 
-    /// A 100 ms budget leaves no room for the 150 ms wait. The decision is
-    /// handed the elapsed time, so how long a round trip takes on the
-    /// machine running the test does not move it.
+    /// A 100 ms budget leaves no room for the 150 ms wait. The time handed
+    /// in is the waits already taken. A round trip does not move it.
     #[test]
     fn the_retries_stop_where_the_budget_does() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = env::var_os("PACKSET_TIMEOUT_MS");
         unsafe { env::set_var("PACKSET_TIMEOUT_MS", BUDGET.as_millis().to_string()) };
         let budget = timeout();
@@ -1488,5 +1515,16 @@ mod tests {
             !ask_again(budget - BUSY_WAIT, BUSY_WAIT, budget),
             "a first round trip that spent the room was followed by a wait"
         );
+    }
+
+    /// 50 ms fits in 51 and not in 50. 50 + 150 + 450 fits in 700, and the
+    /// next wait, 1350 ms, does not. The same numbers on every host.
+    #[test]
+    fn the_attempt_count_is_the_waits_that_fit_the_budget() {
+        assert_eq!(attempts_in(Duration::from_millis(50)), 1);
+        assert_eq!(attempts_in(Duration::from_millis(51)), 2);
+        assert_eq!(attempts_in(Duration::from_millis(100)), 2);
+        assert_eq!(attempts_in(Duration::from_millis(700)), 4);
+        assert_eq!(attempts_in(Duration::from_secs(30)), 10);
     }
 }
