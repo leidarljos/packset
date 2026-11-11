@@ -37,8 +37,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: sudo bash .github/scripts/apt-mirror.sh
       - run: |
-          sudo apt-get update
           echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get install -y --no-install-recommends pandoc ttf-mscorefonts-installer
       - run: bash docs/scripts/export_org_to_rst.sh

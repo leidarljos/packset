@@ -107,6 +107,7 @@ jobs:
             crates/packset-embed/build-onnxruntime.sh
             scripts/workspace_version.py
             scripts/glibc-floor.sh
+            .github/scripts/apt-mirror.sh
           sparse-checkout-cone-mode: false
       # The tag's v prefix is not part of the crate version. One runner reads
       # the manifest; the matrix builds that same tag.
@@ -133,9 +134,14 @@ jobs:
           targets: ${{ matrix.target }}
       - name: The target is installed for the pin
         run: rustup target list --installed | grep -qx '${{ matrix.target }}'
+      # The mirror script comes from the workflow's commit, so a dark
+      # archive.ubuntu.com on the runner does not fail an older tag rebuild.
+      - name: Ubuntu apt mirror if the archive is dark
+        if: runner.os == 'Linux'
+        run: sudo bash .release/.github/scripts/apt-mirror.sh
       - name: Build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
+        run: sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
       # ONNX Runtime 1.28 stops when CMake is older than 3.28, and Ubuntu
       # 22.04's package is 3.22. The CMake 3.28.6 Linux binary needs glibc
       # 2.17, so it runs on this runner. It is a build tool and is not
