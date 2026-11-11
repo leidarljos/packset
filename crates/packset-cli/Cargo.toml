@@ -48,7 +48,7 @@ packset-core.workspace = true
 heed = { version = "0.20", default-features = false }
 indexmap = "2"
 # The MCP surface's.
-rmcp = { version = "3.2", features = ["server", "transport-io", "transport-async-rw", "macros"] }
+rmcp = { version = "3.9", features = ["server", "transport-io", "transport-async-rw", "macros"] }
 schemars = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 

@@ -342,9 +342,8 @@ pub fn authorize(request: ureq::Request) -> ureq::Request {
 
 /// The port of a loopback `url`, `None` for any other host.
 ///
-/// Only the Linux check below calls this. Off Linux the listener is never
-/// treated as foreign, so the port is not read.
-#[cfg(target_os = "linux")]
+/// The foreign-listener check is Linux only. Starting a local writer uses
+/// the same parse on every host.
 fn loopback_port(url: &str) -> Option<u16> {
     let rest = url
         .strip_prefix("http://")
@@ -1141,7 +1140,6 @@ mod tests {
     // the suite fails one run in five on a polluted read.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn only_a_loopback_url_has_a_port_to_check() {
         assert_eq!(loopback_port("http://127.0.0.1:8761/health"), Some(8761));
