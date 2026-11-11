@@ -332,7 +332,10 @@ impl Store {
             }
         };
         if stamped > 0 {
-            // After the last commit, as in `forget_workspace`.
+            // After the last commit, as in `forget_workspace`. The publish
+            // lock keeps a rebuild from sampling the old generation and then
+            // reading the bumped one.
+            let _publish = self.publish.write().unwrap_or_else(|e| e.into_inner());
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
         release_heap();
@@ -485,6 +488,11 @@ pub struct Store {
     _lock: HomeLock,
     /// Bumped by every write, so a reader can tell a stale snapshot.
     generation: AtomicU64,
+    /// Held by a writer across the commit and the generation bump, and by
+    /// a reader that rebuilds a snapshot. The rebuild cannot see a commit
+    /// the generation does not include yet, and the generation cannot move
+    /// while that read is in the database.
+    publish: RwLock<()>,
     /// Unix millis of the last [`Self::release_after_write`].
     last_release: AtomicU64,
     /// One parsed live set per workspace, shared by concurrent readers.
@@ -590,6 +598,7 @@ impl Store {
             map_gate: RwLock::new(()),
             _lock: lock,
             generation: AtomicU64::new(0),
+            publish: RwLock::new(()),
             last_release: AtomicU64::new(0),
             live: RwLock::new(HashMap::new()),
             terms: RwLock::new(HashMap::new()),
@@ -842,6 +851,10 @@ impl Store {
     /// The clock is an argument so a test can place two writes in one
     /// millisecond. The index follows the text either way.
     fn upsert_many_at(&self, atoms: &[Record], now: &str) -> anyhow::Result<Vec<Record>> {
+        // Held until the snapshot is published. A rebuild takes the shared
+        // side, so it cannot observe this commit under the previous
+        // generation and then be followed by a read of that older snapshot.
+        let _publish = self.publish.write().unwrap_or_else(|e| e.into_inner());
         let written = self.write(|wtxn| {
             let mut written = Vec::with_capacity(atoms.len());
             for atom in atoms {
@@ -1196,17 +1209,18 @@ impl Store {
         // file stays resident.
         #[cfg(target_os = "linux")]
         {
-            // The map gate is held to the end, so the ranges read below
-            // are still the database's when they are advised. A resize in
-            // between would unmap them, and the addresses could be reused.
-            let _gate = self.gate();
+            // Held alone, so no transaction of this store is in the map.
+            // Advising it while a reader is mid-page faults that page back
+            // from the file, which can be a newer or older version than the
+            // snapshot the reader started, and the scan then drops a record.
+            // A resize in between would unmap the range, and the addresses
+            // could be reused.
+            let _gate = self.map_gate.write().unwrap_or_else(|e| e.into_inner());
             // Open a write transaction and drop it at once, so a commit
-            // already in progress finishes before pages leave the map.
-            // The lock is not held across the advice, and it does not
-            // need to be. The map is a read-only shared view: LMDB writes
-            // with `write`, not `WRITEMAP`. Advising that view reloads
-            // the file. Advising the file descriptor does not; the pages
-            // stay mapped.
+            // that does not take the gate finishes before pages leave the
+            // map. The map is a read-only shared view: LMDB writes with
+            // `write`, not `WRITEMAP`. Advising that view reloads the file.
+            // Advising the file descriptor does not; the pages stay mapped.
             if self.env.write_txn().is_err() {
                 return;
             }
@@ -1331,6 +1345,27 @@ impl Store {
         (*seen == generation).then(|| found.clone())
     }
 
+    /// The cached snapshot when it is the generation a writer has published.
+    ///
+    /// The generation is read while the cache lock is held. A publish bumps
+    /// the generation and then updates the snapshot under that lock, so the
+    /// two cannot be observed apart.
+    fn cached_live(&self, workspace: &str) -> Option<LiveSnapshot> {
+        let cache = self.live.read().unwrap_or_else(|e| e.into_inner());
+        let generation = self.generation.load(Ordering::Acquire);
+        let found = cache.get(workspace)?;
+        if found.generation != generation {
+            return None;
+        }
+        self.note_cached(workspace);
+        Some(LiveSnapshot {
+            atoms: Arc::clone(&found.shown),
+            vectors: Arc::clone(&found.vectors),
+            originals: Arc::clone(&found.originals),
+            generation,
+        })
+    }
+
     /// [`Self::live`] with the generation the set belongs to, and the
     /// vectors lifted out of that same set.
     ///
@@ -1343,8 +1378,61 @@ impl Store {
     ///
     /// Fails when the scan does.
     pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
-        let generation = self.generation.load(Ordering::Acquire);
-        if let Ok(cache) = self.live.read() {
+        if let Some(found) = self.cached_live(workspace) {
+            return Ok(found);
+        }
+        self.rebuild_live(workspace)
+    }
+
+    /// Scan the workspace and publish that snapshot, unless a writer has
+    /// one waiting that is already current.
+    ///
+    /// The publish lock is held for the whole rebuild. The writer holds it
+    /// across the commit and the generation bump, so this scan sees exactly
+    /// the commits that generation includes. Returning the scan after the
+    /// lock was released used to hand a reader one record from a commit
+    /// that was not published yet, and the next read then served the
+    /// shorter published snapshot.
+    fn rebuild_live(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
+        let snap = {
+            let _publish = self.publish.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(found) = self.cached_live(workspace) {
+                return Ok(found);
+            }
+            let generation = self.generation.load(Ordering::Acquire);
+            // The vector is lifted out of the record here, once. The cached
+            // copies omit the key, and the original numbers are kept beside
+            // the floats for answers.
+            let now = packset_core::clock::utcnow();
+            let scanned: Vec<Record> = self
+                .scan_past_tombstones(workspace)?
+                .into_iter()
+                .filter(|atom| shown_at(atom, &now))
+                .collect();
+            let mut vectors = HashMap::with_capacity(scanned.len());
+            let mut originals = HashMap::with_capacity(scanned.len());
+            let mut stored = Vec::with_capacity(scanned.len());
+            for record in scanned {
+                let parked = park(&record);
+                if let Some(id) = parked.lean.get("id").and_then(Value::as_str) {
+                    if let Some(vector) = parked.vector {
+                        vectors.insert(id.to_string(), vector);
+                    }
+                    if let Some(original) = parked.original {
+                        originals.insert(id.to_string(), original);
+                    }
+                }
+                stored.push(parked.lean);
+            }
+            let (shown, dangling) = shown_from(&stored);
+            let shared = Arc::new(shown);
+            let vectors = Arc::new(vectors);
+            let originals = Arc::new(originals);
+            let mut cache = self.live.write().unwrap_or_else(|e| e.into_inner());
+            // Another rebuild may have published this generation while we
+            // waited for the cache lock. Keep that snapshot: replacing it
+            // with this scan would drop a record the other read already
+            // handed out.
             if let Some(found) = cache.get(workspace) {
                 if found.generation == generation {
                     self.note_cached(workspace);
@@ -1356,56 +1444,26 @@ impl Store {
                     });
                 }
             }
-        }
-        // Built outside the write lock, so a slow parse does not hold up a
-        // reader whose own workspace is current. The vector is lifted out
-        // of the record here, once. The cached copies omit the key, and the
-        // original numbers are kept beside the floats for answers.
-        let now = packset_core::clock::utcnow();
-        let scanned: Vec<Record> = self
-            .scan_past_tombstones(workspace)?
-            .into_iter()
-            .filter(|atom| shown_at(atom, &now))
-            .collect();
-        let mut vectors = HashMap::with_capacity(scanned.len());
-        let mut originals = HashMap::with_capacity(scanned.len());
-        let mut stored = Vec::with_capacity(scanned.len());
-        for record in scanned {
-            let parked = park(&record);
-            if let Some(id) = parked.lean.get("id").and_then(Value::as_str) {
-                if let Some(vector) = parked.vector {
-                    vectors.insert(id.to_string(), vector);
-                }
-                if let Some(original) = parked.original {
-                    originals.insert(id.to_string(), original);
-                }
+            cache.insert(
+                workspace.to_string(),
+                Snapshot {
+                    generation,
+                    stored,
+                    shown: Arc::clone(&shared),
+                    dangling,
+                    vectors: Arc::clone(&vectors),
+                    originals: Arc::clone(&originals),
+                },
+            );
+            self.note_cached(workspace);
+            self.evict_cached(&mut cache, workspace);
+            LiveSnapshot {
+                atoms: shared,
+                vectors,
+                originals,
+                generation,
             }
-            stored.push(parked.lean);
-        }
-        let (shown, dangling) = shown_from(&stored);
-        let shared = Arc::new(shown);
-        let vectors = Arc::new(vectors);
-        let originals = Arc::new(originals);
-        // Cached only if nothing committed while the scan ran. The caller
-        // still receives the vectors this scan lifted: they are not a
-        // second read of a cache that may not hold them.
-        if self.generation.load(Ordering::Acquire) == generation {
-            if let Ok(mut cache) = self.live.write() {
-                cache.insert(
-                    workspace.to_string(),
-                    Snapshot {
-                        generation,
-                        stored,
-                        shown: Arc::clone(&shared),
-                        dangling,
-                        vectors: Arc::clone(&vectors),
-                        originals: Arc::clone(&originals),
-                    },
-                );
-                self.note_cached(workspace);
-                self.evict_cached(&mut cache, workspace);
-            }
-        }
+        };
         // The parse of the log peaked well above what stays live, and glibc
         // keeps that peak in its arenas. The log holds every rewrite, so the
         // peak grew with each one and the writer's size followed the log,
@@ -1416,12 +1474,7 @@ impl Store {
         // the whole file, and those pages would sit beside the set until
         // the idle release. Drop them now; a later miss faults what it reads.
         self.release_pages();
-        Ok(LiveSnapshot {
-            atoms: shared,
-            vectors,
-            originals,
-            generation,
-        })
+        Ok(snap)
     }
 
     /// The vectors cached for `workspace`, one shared copy each. Empty when
@@ -1674,6 +1727,10 @@ impl Store {
             }
             keys
         };
+        // The delete, the generation, and the cache drop publish together.
+        // A rebuild that saw the delete and then the snapshot from before
+        // it would hand a reader a set that grew back.
+        let _publish = self.publish.write().unwrap_or_else(|e| e.into_inner());
         if !keys.is_empty() {
             self.write(|wtxn| {
                 for key in &keys {
@@ -4347,10 +4404,26 @@ mod snapshot_tests {
         assert_matches_a_fresh_scan(&store, "w");
     }
 
+    /// A reader that has seen a live set never then sees one that skipped
+    /// a write.
+    ///
+    /// `PACKSET_SNAPSHOT_STRESS`, set to a number, repeats the race that
+    /// many times in this process so it can be run in a loop.
     #[test]
     fn readers_racing_a_writer_never_see_a_snapshot_that_skips_a_write() {
-        // Generation read before the scan, bumped before the write: a snapshot
-        // built across a write is stale, never mislabelled.
+        let rounds = std::env::var("PACKSET_SNAPSHOT_STRESS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|rounds| *rounds > 0)
+            .unwrap_or(1);
+        for _ in 0..rounds {
+            race_one_writer_against_readers();
+        }
+    }
+
+    fn race_one_writer_against_readers() {
+        const READERS: usize = 8;
+        const WRITES: usize = 400;
         let (dir, store) = store();
         let store = Arc::new(store);
         let _ = dir;
@@ -4360,7 +4433,7 @@ mod snapshot_tests {
             let store = Arc::clone(&store);
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                for i in 0..200 {
+                for i in 0..WRITES {
                     store
                         .upsert(&record(json!({
                             "id": format!("a{i}"), "workspace": "w", "text": "x"
@@ -4371,7 +4444,7 @@ mod snapshot_tests {
             })
         };
 
-        let readers: Vec<_> = (0..4)
+        let readers: Vec<_> = (0..READERS)
             .map(|_| {
                 let store = Arc::clone(&store);
                 let stop = Arc::clone(&stop);
@@ -4382,6 +4455,9 @@ mod snapshot_tests {
                         assert!(seen >= high, "went backwards: {seen} after {high}");
                         high = seen;
                     }
+                    // The writer has stopped, so this read is the published set.
+                    let seen = store.live("w").unwrap().len();
+                    assert!(seen >= high, "went backwards: {seen} after {high}");
                 })
             })
             .collect();
@@ -4390,6 +4466,6 @@ mod snapshot_tests {
         for reader in readers {
             reader.join().unwrap();
         }
-        assert_eq!(store.live("w").unwrap().len(), 200, "every write landed");
+        assert_eq!(store.live("w").unwrap().len(), WRITES, "every write landed");
     }
 }
