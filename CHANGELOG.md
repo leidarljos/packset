@@ -4,6 +4,27 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.17.5 (2026-11-11)
+
+- A workspace count walks one record at a time. The atom listing writes one
+  atom at a time. Both give the freed pages back.
+  A pack of 3000 live atoms with 384-d vectors used 260036 KiB of resident
+  memory after a search, a full listing and a workspace count. After the
+  change it used 111476 KiB.
+  The listing peak fell from 316484 KiB to 135324 KiB.
+  Supervised packsetd starts the writer again when it is killed or it exits
+  with an error. A stop signal ends the loop.
+  On a refused connection, or a 503 or 429, the client retries until its
+  request budget runs out. It starts the local writer once when PACKSET_HOME
+  is set. The error is one sentence.
+- rmcp is 3.9.0. 3.3.0 is RUSTSEC-2026-0457, RUSTSEC-2026-0461 and
+  RUSTSEC-2026-0462.
+  The server advertises itself with `ServerConfig`. `loopback_port` is
+  compiled on every host, so a macOS build can start a local writer.
+- A busy or refused writer is asked once for every backoff that fits in the
+  request budget. The time a round trip takes is not part of that sum, so a
+  slow host asks as many times as a fast one.
+
 ## 0.17.3 (2026-11-01)
 
 - The writer gives free heap back after a write, at most once every 50
