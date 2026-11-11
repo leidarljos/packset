@@ -78,13 +78,15 @@ jobs:
         # The archive name is packset-$TAG-$target.
         # That name is the binstall pkg-url.
         include:
-          - os: ubuntu-latest
+          # Ubuntu 22.04 is glibc 2.35. ubuntu-latest is newer, and a
+          # binary built there does not run on a 22.04 machine.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -95,25 +97,29 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: refs/tags/${{ env.TAG }}
+      # The build script, the version reader and the glibc check come from
+      # the workflow's commit, so a fix to them applies when an older tag
+      # is rebuilt. Ubuntu 22.04's python3 is 3.10 and has no tomllib.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: .release
+          sparse-checkout: |
+            crates/packset-embed/build-onnxruntime.sh
+            scripts/workspace_version.py
+            scripts/glibc-floor.sh
+          sparse-checkout-cone-mode: false
       # The tag's v prefix is not part of the crate version. One runner reads
       # the manifest; the matrix builds that same tag.
       - name: The tag matches the crate version
         if: runner.os == 'Linux'
         run: |
           set -eu
-          ver=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          ver=$(python3 .release/scripts/workspace_version.py Cargo.toml)
           tag="${TAG#v}"
           if [ "$tag" != "$ver" ]; then
             echo "tag $TAG does not match crate version $ver" >&2
             exit 1
           fi
-      # The build script comes from the workflow's commit, so a fix to it
-      # applies when an older tag is rebuilt.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          path: .release
-          sparse-checkout: crates/packset-embed/build-onnxruntime.sh
-          sparse-checkout-cone-mode: false
       - name: The runtime version the build script pins
         id: ortver
         run: |
@@ -130,6 +136,50 @@ jobs:
       - name: Build tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
+      # ONNX Runtime 1.28 stops when CMake is older than 3.28, and Ubuntu
+      # 22.04's package is 3.22. The CMake 3.28.6 Linux binary needs glibc
+      # 2.17, so it runs on this runner. It is a build tool and is not
+      # linked into the archives. The runtime also wants the GNU Compiler
+      # Collection at 11.1 or newer, which 22.04 has. Building the runtime
+      # on this glibc is what holds packset-embed to GLIBC_2.35. On a newer
+      # runner the C++ library takes newer symbols, which is how the encoder
+      # came to need GLIBC_2.43.
+      - name: CMake 3.28 or newer
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          have=0
+          if command -v cmake >/dev/null 2>&1; then
+            have=$(cmake --version | awk 'NR==1 { print $3 }')
+          fi
+          lowest=$(printf '%s\n%s\n' "$have" 3.28 | sort -V | head -n 1)
+          if [ "$lowest" = 3.28 ]; then
+            cmake --version
+            exit 0
+          fi
+          case "$(uname -m)" in
+            x86_64)
+              arch=x86_64
+              sum=00fa84587f57da55a6ef110db341272080b764eff4fc1275847e35ad236c0ae1
+              ;;
+            aarch64)
+              arch=aarch64
+              sum=f91e8a6f3eec289b7f19e27a62fadcc33d8a7c8eff1dc1a99391485af4c03b75
+              ;;
+            *)
+              echo "no CMake binary for $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/cmake.sh" \
+            "https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-linux-${arch}.sh"
+          echo "$sum  $RUNNER_TEMP/cmake.sh" | sha256sum -c -
+          sudo bash "$RUNNER_TEMP/cmake.sh" --skip-license --prefix=/usr/local
+          echo /usr/local/bin >> "$GITHUB_PATH"
+          export PATH="/usr/local/bin:$PATH"
+          hash -r
+          command -v cmake
+          cmake --version
       # packset-embed links ONNX Runtime and does not download one. The
       # release links it statically, so the encoder needs no library beside
       # it and an install that copies only the binaries still starts. The
@@ -183,6 +233,19 @@ jobs:
             export RUSTFLAGS="-C link-arg=$extra"
           fi
           cargo build --locked --release --target ${{ matrix.target }} -p packset-embed
+      # The floor is the glibc on the 22.04 runner. A newer GLIBC_ symbol
+      # means the archive will not start on that release. packset-embed is
+      # included: the Open Neural Network Exchange (ONNX) Runtime is built
+      # from source on this runner, so it does not raise the floor.
+      - name: glibc symbols stay at 2.35
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          bash .release/scripts/glibc-floor.sh 2.35 \
+            "target/${{ matrix.target }}/release/packset" \
+            "target/${{ matrix.target }}/release/packsetd" \
+            "target/${{ matrix.target }}/release/packset-mcp" \
+            "target/${{ matrix.target }}/release/packset-embed"
       - name: Package
         run: |
           set -eu

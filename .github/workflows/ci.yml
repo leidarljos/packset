@@ -197,5 +197,5 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -q 'towncrier==26.9.0'
-          ver=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          ver=$(python scripts/workspace_version.py)
           python -m towncrier build --draft --version "$ver"

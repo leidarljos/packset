@@ -22,7 +22,7 @@ jobs:
         if: github.ref_type == 'tag'
         run: |
           set -euo pipefail
-          ver=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          ver=$(python3 scripts/workspace_version.py)
           tag="${GITHUB_REF_NAME#v}"
           if [ "$tag" != "$ver" ]; then
             echo "tag ${GITHUB_REF_NAME} does not match crate version ${ver}" >&2

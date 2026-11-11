@@ -11,6 +11,34 @@
 # and ORT_LIB_PATH is unset.
 set -eu
 version=1.28.0
+
+# ONNX Runtime 1.28 stops when CMake is older than 3.28. Ubuntu 22.04's
+# package is 3.22. The CMake 3.28.6 Linux binary needs glibc 2.17, so it
+# runs on that release, and it is a build tool: it is not linked into
+# packset-embed. The runtime also wants the GNU Compiler Collection at
+# 11.1 or newer, which Ubuntu 22.04 has. Compiling this tree on 22.04 is
+# what keeps the encoder at GLIBC_2.35. On a newer glibc the C++ library
+# takes newer symbols, which is how packset-embed came to need GLIBC_2.43.
+if ! command -v cmake >/dev/null 2>&1; then
+  echo "cmake is not on PATH" >&2
+  exit 1
+fi
+cmake_ver=$(cmake --version | awk 'NR==1 { print $3 }')
+python3 - "$cmake_ver" <<'PY'
+import sys
+parts = []
+for piece in sys.argv[1].split("."):
+    if not piece.isdigit():
+        break
+    parts.append(int(piece))
+if tuple(parts) < (3, 28):
+    sys.stderr.write(
+        "ONNX Runtime 1.28 needs CMake 3.28 or newer; this cmake is %s.\n"
+        "Ubuntu 22.04's package is 3.22. The CMake 3.28.6 Linux binary runs on glibc 2.35.\n"
+        % sys.argv[1]
+    )
+    raise SystemExit(1)
+PY
 prefix=${1:-"$HOME/onnxruntime"}
 src=${ORT_SRC:-"$prefix/src"}
 mkdir -p "$prefix" "$(dirname "$src")"

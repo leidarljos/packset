@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import tomllib
+import sys
 from pathlib import Path
 
 from docutils import nodes
@@ -10,13 +10,15 @@ from sphinx.writers.html5 import HTML5Translator
 
 _DOCS = Path(__file__).resolve().parent
 _ROOT = _DOCS.parent.parent
+sys.path.insert(0, str(_ROOT / "scripts"))
+
+from workspace_version import workspace_version
 
 
 def _crate_release() -> str:
     # The version is written in the workspace manifest and read here.
-    with (_ROOT / "Cargo.toml").open("rb") as handle:
-        manifest = tomllib.load(handle)
-    return manifest["workspace"]["package"]["version"]
+    # The reader works on Python 3.10, which has no tomllib.
+    return workspace_version(_ROOT / "Cargo.toml")
 
 
 project = "packset"
