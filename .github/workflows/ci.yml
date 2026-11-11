@@ -129,7 +129,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Ubuntu apt mirror if the archive is dark
-        run: sudo bash .github/scripts/apt-mirror.sh
+        run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
       - name: Build tools
         run: sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830

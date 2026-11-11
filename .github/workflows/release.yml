@@ -138,7 +138,7 @@ jobs:
       # archive.ubuntu.com on the runner does not fail an older tag rebuild.
       - name: Ubuntu apt mirror if the archive is dark
         if: runner.os == 'Linux'
-        run: sudo bash .release/.github/scripts/apt-mirror.sh
+        run: sudo timeout -k 5 90 bash .release/.github/scripts/apt-mirror.sh
       - name: Build tools
         if: runner.os == 'Linux'
         run: sudo apt-get install -y --no-install-recommends build-essential cmake python3 pkg-config libssl-dev

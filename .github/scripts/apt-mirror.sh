@@ -11,8 +11,9 @@ MIRRORS=(
 
 APT_FAST=(
   -o Acquire::Retries=0
-  -o Acquire::http::Timeout=10
-  -o Acquire::https::Timeout=10
+  -o Acquire::ForceIPv4=true
+  -o Acquire::http::Timeout=8
+  -o Acquire::https::Timeout=8
 )
 
 ports_of() {
@@ -23,11 +24,7 @@ ports_of() {
 }
 
 answers() {
-  curl -fsI -o /dev/null -L --connect-timeout 5 --max-time 10 "$1/" 2>/dev/null
-}
-
-host_answers() {
-  timeout -k 2 5 getent ahosts "$1" >/dev/null 2>&1
+  curl -fsI -o /dev/null -L --connect-timeout 5 --max-time 8 "$1/" 2>/dev/null
 }
 
 rewrite_sources() {
@@ -50,10 +47,14 @@ rewrite_sources() {
     "${files[@]}"
 }
 
+apt_update() {
+  timeout --foreground -k 5 20 apt-get "${APT_FAST[@]}" update
+}
+
 update_with_retries() {
   local n=1
-  while [ "$n" -le 5 ]; do
-    if timeout -k 5 45 apt-get "${APT_FAST[@]}" update; then
+  while [ "$n" -le 3 ]; do
+    if apt_update; then
       return 0
     fi
     sleep $((n * 2))
@@ -62,13 +63,8 @@ update_with_retries() {
   return 1
 }
 
-official_named=0
-if host_answers archive.ubuntu.com || host_answers security.ubuntu.com || host_answers azure.archive.ubuntu.com; then
-  official_named=1
-fi
-
-if [ "$official_named" -eq 1 ]; then
-  if timeout -k 5 25 apt-get "${APT_FAST[@]}" update; then
+if answers http://archive.ubuntu.com/ubuntu || answers http://azure.archive.ubuntu.com/ubuntu; then
+  if apt_update; then
     exit 0
   fi
 fi
