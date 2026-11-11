@@ -33,7 +33,7 @@ rewrite_sources() {
   ports="$(ports_of "$archive")"
   local files=()
   local f
-  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+  for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
     if [ -f "$f" ]; then
       files+=("$f")
     fi
