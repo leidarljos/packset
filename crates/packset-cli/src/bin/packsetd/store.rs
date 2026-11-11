@@ -1412,6 +1412,10 @@ impl Store {
         // not the corpus: 1.8 MiB a window of 256 rewrites, measured. The
         // peak goes back now rather than at the idle release a minute on.
         release_heap();
+        // The parsed set is what a reader uses from here. The scan faulted
+        // the whole file, and those pages would sit beside the set until
+        // the idle release. Drop them now; a later miss faults what it reads.
+        self.release_pages();
         Ok(LiveSnapshot {
             atoms: shared,
             vectors,
@@ -1582,18 +1586,24 @@ impl Store {
         let now = packset_core::clock::utcnow();
         let mut counts: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        for atom in self.scan(None)? {
+        // One record at a time. `scan` kept every JSON value, embeddings
+        // included, for the whole pack, and a status line calls this often.
+        self.for_each(None, |atom| {
             let Some(name) = atom.get("workspace").and_then(Value::as_str) else {
-                continue;
+                return;
             };
             if name.is_empty() {
-                continue;
+                return;
             }
             let slot = counts.entry(name.to_string()).or_insert(0);
-            if record::is_live(&atom, &now) {
+            if record::is_live(atom, &now) {
                 *slot += 1;
             }
-        }
+        })?;
+        // The walk parsed every record. Return what that freed, and drop
+        // the file pages the walk faulted.
+        release_heap();
+        self.release_pages();
         counts.entry("global".into()).or_insert(0);
         Ok(counts.into_iter().collect())
     }
@@ -2151,13 +2161,13 @@ fn unix_millis() -> u64 {
 /// `malloc_trim` is not linked elsewhere: windows-gnu shares
 /// `target_env = "gnu"` and does not provide this symbol.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn release_heap() {
+pub(crate) fn release_heap() {
     // SAFETY: trim does not move live allocations.
     let _ = unsafe { malloc_trim(0) };
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn release_heap() {}
+pub(crate) fn release_heap() {}
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 extern "C" {

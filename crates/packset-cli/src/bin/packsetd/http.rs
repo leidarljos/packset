@@ -140,17 +140,46 @@ fn positive_env(name: &str) -> Option<usize> {
 struct Answer {
     code: u16,
     body: Value,
+    /// JSON already written. The listing of a pack is this, so the atoms
+    /// are not also a tree of values. `body` is filled from these bytes
+    /// in tests; a release build leaves it null.
+    raw: Option<Vec<u8>>,
 }
 
 impl Answer {
     fn ok(body: Value) -> Self {
-        Self { code: 200, body }
+        Self {
+            code: 200,
+            body,
+            raw: None,
+        }
     }
 
     fn err(code: u16, message: impl std::fmt::Display) -> Self {
         Self {
             code,
             body: json!({ "error": message.to_string() }),
+            raw: None,
+        }
+    }
+
+    /// An answer whose bytes are already JSON. Tests read [`Self::body`]
+    /// back from those bytes; the process that serves does not build the tree.
+    fn json_bytes(raw: Vec<u8>) -> Self {
+        let body = if cfg!(test) {
+            serde_json::from_slice(&raw).unwrap_or_else(|err| {
+                panic!(
+                    "the atom list is not JSON: {err}: {}",
+                    String::from_utf8_lossy(&raw)
+                )
+            })
+        } else {
+            Value::Null
+        };
+        Self {
+            code: 200,
+            body,
+            raw: Some(raw),
         }
     }
 }
@@ -233,13 +262,13 @@ fn handle(
     let body = if matches!(request.method, Method::Post | Method::Put) {
         match read_json(&request.body) {
             Ok(map) => map,
-            Err(message) => return encode(&Answer::err(400, message)),
+            Err(message) => return encode(Answer::err(400, message)),
         }
     } else {
         Map::new()
     };
     let answer = route(service, panel, &request.method, path, &query, &body);
-    encode(&answer)
+    encode(answer)
 }
 
 /// A 401 for a request without the writer's token; `None` lets it through.
@@ -248,7 +277,7 @@ fn refuse_unauthorized(token: Option<&str>, request: &wire::Request) -> Option<w
     if crate::auth::admits(request.authorization.as_deref(), token) {
         return None;
     }
-    Some(encode(&Answer::err(
+    Some(encode(Answer::err(
         401,
         "packsetd answers its owner only: send the token in the pack home's `token` file as `Authorization: Bearer TOKEN`",
     )))
@@ -325,31 +354,15 @@ fn route(
                         // puts the JSON array back, which is what a client
                         // already reads. The records and the vectors are one
                         // snapshot: a second cache read can miss the workspace.
+                        // One atom is written and dropped before the next, so
+                        // a pack of thousands does not become a second copy
+                        // of every embedding while the bytes are built.
                         Ok(snap) => {
                             let kind = query
                                 .get("kind")
                                 .map(String::as_str)
                                 .filter(|k| !k.is_empty());
-                            if kind.is_none() && !omit {
-                                Answer::ok(json!({
-                                    "atoms": snap
-                                        .atoms
-                                        .iter()
-                                        .map(|atom| listed(atom, &snap.originals, false))
-                                        .collect::<Vec<_>>()
-                                }))
-                            } else {
-                                Answer::ok(json!({
-                                    "atoms": snap
-                                        .atoms
-                                        .iter()
-                                        .filter(|a| kind.is_none_or(|k| {
-                                            a.get("kind").and_then(Value::as_str) == Some(k)
-                                        }))
-                                        .map(|atom| listed(atom, &snap.originals, omit))
-                                        .collect::<Vec<_>>()
-                                }))
-                            }
+                            atoms_answer(&snap.atoms, &snap.originals, omit, kind)
                         }
                         Err(e) => Answer::err(400, e),
                     },
@@ -1002,9 +1015,43 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn encode(answer: &Answer) -> wire::Response {
+fn encode(answer: Answer) -> wire::Response {
+    if let Some(body) = answer.raw {
+        return wire::Response {
+            code: answer.code,
+            content_type: "application/json",
+            body,
+        };
+    }
     let body = serde_json::to_string(&answer.body).unwrap_or_else(|_| "{}".into());
     wire::Response::json(answer.code, body)
+}
+
+/// The live listing as JSON bytes, one atom in hand at a time.
+fn atoms_answer(
+    atoms: &[std::sync::Arc<crate::store::Record>],
+    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
+    omit: bool,
+    kind: Option<&str>,
+) -> Answer {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(br#"{"atoms":["#);
+    let mut first = true;
+    for atom in atoms {
+        if kind.is_some_and(|k| atom.get("kind").and_then(Value::as_str) != Some(k)) {
+            continue;
+        }
+        if !first {
+            raw.push(b',');
+        }
+        first = false;
+        let one = listed(atom, originals, omit);
+        if serde_json::to_writer(&mut raw, &one).is_err() {
+            return Answer::err(500, "could not write the atom list");
+        }
+    }
+    raw.extend_from_slice(b"]}");
+    Answer::json_bytes(raw)
 }
 
 #[cfg(test)]

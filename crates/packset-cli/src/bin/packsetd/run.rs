@@ -26,6 +26,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut diversify = None;
     let mut decay = None;
     let mut owned = false;
+    let mut supervise = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -41,6 +42,7 @@ pub fn run() -> anyhow::Result<()> {
             "--diversify" => diversify = Some(next("--diversify")?),
             "--decay" => decay = Some(next("--decay")?),
             "--owned" => owned = true,
+            "--supervise" => supervise = true,
             // `embed::enabled` reads this argument. The arm is what keeps
             // the writer from refusing the flag as unknown.
             "--no-embed" => {}
@@ -59,6 +61,13 @@ pub fn run() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown argument: {other}\n\n{}", packsetd_usage()),
         }
     }
+
+    // The parent stays small and starts the writer again when the child is
+    // killed. It does not open the store: that is what the child is for.
+    if supervise {
+        return respawn();
+    }
+    bound_allocator();
 
     // Arm the parent-death signal before any thread exists, so workers
     // inherit the blocked mask and the default action cannot fire first.
@@ -124,6 +133,7 @@ fn packsetd_usage() -> String {
              --diversify <name>  host diversify voter, or PACKSET_DIVERSIFY\n\
              --decay <name>      host decay voter, or PACKSET_DECAY\n\
              --owned             exit when stdin closes; Linux also signals this process when its parent dies\n\
+             --supervise         restart this process when it dies; a stop signal ends the loop\n\
              --no-embed          leave the encoder unstarted; INSIDE_EMBED=off\n\
          \n\
          Every request but GET /health carries the token in <home>/token as\n\
@@ -132,6 +142,110 @@ fn packsetd_usage() -> String {
         http::DEFAULT_PORT
     )
 }
+
+/// How a child ended, for [`respawn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildStop {
+    /// Exit 0: help, version, or a clean stop.
+    Clean,
+    /// SIGINT or SIGTERM: someone asked it to stop. `packset stop` sends
+    /// SIGTERM to the process on the port.
+    Stopped,
+    /// A crash, or SIGKILL. The OOM killer sends SIGKILL.
+    Died,
+}
+
+/// Whether [`respawn`] should start the child again.
+fn restart_after(stop: ChildStop) -> bool {
+    matches!(stop, ChildStop::Died)
+}
+
+/// Classify a child status. A signalled stop is not a crash.
+fn classify_status(status: std::process::ExitStatus) -> ChildStop {
+    if status.success() {
+        return ChildStop::Clean;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        match status.signal() {
+            Some(2 | 15) => return ChildStop::Stopped,
+            Some(_) => return ChildStop::Died,
+            None => {}
+        }
+    }
+    ChildStop::Died
+}
+
+/// Run the child until it stops cleanly or is asked to stop. A death starts
+/// another child after `wait`. The pause starts at 200 ms and doubles, up to
+/// 5 s, and a child that ran for 30 s starts the pause over.
+fn supervise_loop(
+    mut run_child: impl FnMut() -> ChildStop,
+    mut wait: impl FnMut(std::time::Duration),
+) {
+    let mut pause = std::time::Duration::from_millis(200);
+    loop {
+        let started = std::time::Instant::now();
+        let stop = run_child();
+        if !restart_after(stop) {
+            return;
+        }
+        if started.elapsed() >= std::time::Duration::from_secs(30) {
+            pause = std::time::Duration::from_millis(200);
+        }
+        wait(pause);
+        pause = (pause * 2).min(std::time::Duration::from_secs(5));
+    }
+}
+
+/// Start this binary again, without `--supervise`, until it is stopped.
+fn respawn() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let child_args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| arg != "--supervise")
+        .collect();
+    eprintln!("packsetd: supervising; the writer restarts if it is killed");
+    supervise_loop(
+        || {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args(&child_args);
+            match cmd.status() {
+                Ok(status) => {
+                    let stop = classify_status(status);
+                    if restart_after(stop) {
+                        eprintln!("packsetd: exited {status}");
+                    }
+                    stop
+                }
+                Err(err) => {
+                    eprintln!("packsetd: could not start: {err}");
+                    ChildStop::Died
+                }
+            }
+        },
+        |pause| {
+            eprintln!("packsetd: starting again in {} ms", pause.as_millis());
+            std::thread::sleep(pause);
+        },
+    );
+    Ok(())
+}
+
+/// Cap glibc's arenas and hand large freed buffers back. Each worker would
+/// otherwise keep its own 64 MiB arena after a listing.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn bound_allocator() {
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 128 * 1024);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn bound_allocator() {}
 
 /// Read stdin until it closes, then flush and exit.
 ///
@@ -327,5 +441,43 @@ mod tests {
             usage.contains("0 prints and writes the assigned port"),
             "{usage}"
         );
+        assert!(usage.contains("--supervise"), "{usage}");
+    }
+
+    #[test]
+    fn a_crash_is_started_again_and_a_stop_is_not() {
+        assert!(restart_after(ChildStop::Died));
+        assert!(!restart_after(ChildStop::Stopped));
+        assert!(!restart_after(ChildStop::Clean));
+        let mut starts = 0;
+        let mut waits = Vec::new();
+        supervise_loop(
+            || {
+                starts += 1;
+                if starts < 3 {
+                    ChildStop::Died
+                } else {
+                    ChildStop::Clean
+                }
+            },
+            |pause| waits.push(pause),
+        );
+        assert_eq!(starts, 3);
+        assert_eq!(
+            waits,
+            vec![
+                std::time::Duration::from_millis(200),
+                std::time::Duration::from_millis(400),
+            ]
+        );
+        let mut starts = 0;
+        supervise_loop(
+            || {
+                starts += 1;
+                ChildStop::Stopped
+            },
+            |_| panic!("a stop signal must not wait to restart"),
+        );
+        assert_eq!(starts, 1);
     }
 }

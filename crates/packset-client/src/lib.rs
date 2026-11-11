@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::error::Error as StdError;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -18,51 +19,121 @@ fn timeout() -> Duration {
         .map_or(Duration::from_secs(30), Duration::from_millis)
 }
 
-/// The wait before a busy writer is asked again, tripled each time.
+/// The wait before a down or busy writer is asked again, tripled each time,
+/// and never longer than five seconds. The first waits are 50, 150 and 450 ms.
 const BUSY_WAIT: Duration = Duration::from_millis(50);
-/// Each wait is this many times the last; the reference promises 50, 150
-/// and 450 ms.
+/// Each wait is this many times the last.
 const BUSY_GROWTH: u32 = 3;
-/// How many times to ask again.
-const BUSY_RETRIES: u32 = 3;
+/// The longest pause between asks.
+const BUSY_WAIT_CAP: Duration = Duration::from_secs(5);
 
-/// Whether a busy writer is asked again: a retry is left, and waiting
-/// `wait` from `elapsed` still ends inside `budget`.
-fn ask_again(retries: u32, elapsed: Duration, wait: Duration, budget: Duration) -> bool {
-    retries < BUSY_RETRIES && elapsed + wait < budget
+/// Whether another ask still ends inside `budget`.
+fn ask_again(elapsed: Duration, wait: Duration, budget: Duration) -> bool {
+    elapsed.saturating_add(wait) < budget
 }
 
-/// Send `req`, with `body` when there is one, inside `budget`, and send it
-/// again when the writer answers busy. The writer answers 503 only when its
-/// queue or its lane is full, before any of the request runs, so a write
-/// sent again is not stored twice.
+/// What [`send`] could not turn into a response.
+enum Attempt {
+    /// The writer is down or still busy after the budget. One sentence.
+    Plain(String),
+    /// Any other failure, for the caller to read.
+    Ureq(Box<ureq::Error>),
+}
+
+/// Send `req`, with `body` when there is one, inside `budget`. A connection
+/// refused, a 429, or a 503 is asked again until the budget runs out. The
+/// writer answers 503 only when its queue or its lane is full, before any
+/// of the request runs, so a write sent again is not stored twice. The first
+/// refusal of a loopback writer starts the local daemon once, when this seat
+/// has a home and a `packsetd` binary.
 fn send(
     req: ureq::Request,
     body: Option<&serde_json::Value>,
     budget: Duration,
-) -> Result<ureq::Response, Box<ureq::Error>> {
+) -> Result<ureq::Response, Attempt> {
     let started = Instant::now();
     let mut wait = BUSY_WAIT;
-    let mut retries = 0;
+    let mut started_daemon = false;
     loop {
         let left = budget
             .saturating_sub(started.elapsed())
             .max(Duration::from_millis(1));
-        let attempt = req.clone().timeout(left);
+        let mut attempt = req.clone().timeout(left);
+        if started_daemon {
+            if let Some(token) = token() {
+                attempt = attempt.set("Authorization", &format!("Bearer {token}"));
+            }
+        }
         let answered = match body {
             Some(json) => attempt.send_json(json),
             None => attempt.call(),
         };
         match answered {
-            Err(ureq::Error::Status(503, _))
-                if ask_again(retries, started.elapsed(), wait, budget) =>
+            Err(ureq::Error::Status(code, _))
+                if (code == 503 || code == 429) && ask_again(started.elapsed(), wait, budget) =>
             {
                 std::thread::sleep(wait);
-                wait *= BUSY_GROWTH;
-                retries += 1;
+                wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
             }
-            other => return other.map_err(Box::new),
+            Err(ureq::Error::Status(code, response)) if code == 503 || code == 429 => {
+                return Err(Attempt::Plain(busy_line(response)));
+            }
+            Err(err) if connect_refused(&err) && ask_again(started.elapsed(), wait, budget) => {
+                if !started_daemon {
+                    started_daemon = autostart(req.url());
+                }
+                std::thread::sleep(wait);
+                wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
+            }
+            Err(err) if connect_refused(&err) => {
+                return Err(Attempt::Plain("packsetd is not running.".to_string()));
+            }
+            other => return other.map_err(|err| Attempt::Ureq(Box::new(err))),
         }
+    }
+}
+
+/// The writer's own reason, as one sentence.
+fn busy_line(response: ureq::Response) -> String {
+    let text = response.into_string().unwrap_or_default();
+    let reason = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|reason| reason.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or(text);
+    let reason = reason.trim();
+    if reason.is_empty() || reason.eq_ignore_ascii_case("busy") {
+        "packsetd is busy.".to_string()
+    } else if reason.ends_with('.') {
+        format!("packsetd is busy: {reason}")
+    } else {
+        format!("packsetd is busy: {reason}.")
+    }
+}
+
+/// Whether `err` is a TCP refusal. A reset or a timeout is a different failure.
+fn connect_refused(err: &ureq::Error) -> bool {
+    let ureq::Error::Transport(transport) = err else {
+        return false;
+    };
+    if transport
+        .source()
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    {
+        return true;
+    }
+    err.to_string().contains("Connection refused")
+}
+
+fn into_error(url: &str, err: Attempt) -> Error {
+    match err {
+        Attempt::Plain(text) => Error::Unavailable(text),
+        Attempt::Ureq(err) => refused(url, err),
     }
 }
 
@@ -165,6 +236,94 @@ pub fn token() -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
+/// Start the local writer once. `true` when a process was spawned.
+///
+/// A home has to be named (`PACKSET_HOME` or an older alias). The binary is
+/// `PACKSET_BIN`, else `packsetd` beside this program, else on `PATH`.
+fn autostart(url: &str) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.load(Ordering::Acquire) {
+        return false;
+    }
+    let Some(port) = loopback_port(url) else {
+        return false;
+    };
+    load_seat_env();
+    let Some(home) = packset_core::home::named_home() else {
+        return false;
+    };
+    let Some(bin) = daemon_binary() else {
+        return false;
+    };
+    if STARTED.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    spawn_daemon(&bin, &home, port)
+}
+
+/// `packsetd`, if this seat has one.
+fn daemon_binary() -> Option<PathBuf> {
+    if let Some(named) = env::var_os("PACKSET_BIN").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(named);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(beside) = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("packsetd")))
+        .filter(|path| path.is_file())
+    {
+        return Some(beside);
+    }
+    let paths = env::var_os("PATH")?;
+    env::split_paths(&paths)
+        .map(|dir| dir.join("packsetd"))
+        .find(|path| path.is_file())
+}
+
+/// Spawn `bin` on `port` for `home`. The child leaves the caller's session
+/// on Unix so the client's exit does not take the writer with it.
+fn spawn_daemon(bin: &std::path::Path, home: &std::path::Path, port: u16) -> bool {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(bin);
+    cmd.arg("--home")
+        .arg(home)
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null());
+    if let Ok(log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.join("packsetd.log"))
+    {
+        if let Ok(errs) = log.try_clone() {
+            cmd.stdout(Stdio::from(log)).stderr(Stdio::from(errs));
+        }
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `pre_exec` runs in the forked child before exec. `setsid`
+        // there detaches the writer from this client's session.
+        unsafe {
+            cmd.pre_exec(|| {
+                extern "C" {
+                    fn setsid() -> i32;
+                }
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    cmd.spawn().is_ok()
+}
+
 /// `request` with this seat's token as a bearer header. A caller that speaks
 /// to the writer outside [`PacksetClient`] wraps its request in this.
 ///
@@ -260,6 +419,9 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("bad response: {0}")]
     Bad(String),
+    /// The writer was down or busy for the whole budget. One sentence.
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -416,7 +578,7 @@ impl PacksetClient {
     pub fn health(&self) -> Result<String, Error> {
         let url = format!("{}/health", self.base);
         let body = send(authorize(ureq::get(&url)), None, timeout())
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_string()?;
         Ok(body)
     }
@@ -430,10 +592,10 @@ impl PacksetClient {
             timeout(),
         ) {
             Ok(resp) => resp,
-            Err(e) if matches!(*e, ureq::Error::Status(404, _)) => {
+            Err(Attempt::Ureq(e)) if matches!(*e, ureq::Error::Status(404, _)) => {
                 return Err(Error::Bad(format!("no atom {id}")));
             }
-            Err(e) => return Err(Error::Http(e)),
+            Err(e) => return Err(into_error(&url, e)),
         };
         Ok(resp.into_json()?)
     }
@@ -458,7 +620,7 @@ impl PacksetClient {
             req = req.query("as_of", at);
         }
         let mut body: serde_json::Value = send(req, None, timeout())
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_json()?;
         let atoms = body
             .get_mut("atoms")
@@ -487,7 +649,7 @@ impl PacksetClient {
             req = req.query("as_of", at);
         }
         let mut body: serde_json::Value = send(req, None, timeout())
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_json()?;
         let atoms = body
             .get_mut("atoms")
@@ -574,7 +736,7 @@ impl PacksetClient {
             req = req.query("rank", rank);
         }
         let body: serde_json::Value = send(req, None, budget)
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_json()?;
         let hits = body
             .get("hits")
@@ -595,7 +757,7 @@ impl PacksetClient {
             req = req.query("workspace", workspace);
         }
         Ok(send(req, None, timeout())
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_json()?)
     }
 
@@ -611,7 +773,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?)
     }
 
@@ -627,7 +789,7 @@ impl PacksetClient {
             Some(&serde_json::json!({ "workspace": workspace, "name": name })),
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?)
     }
 
@@ -646,7 +808,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         let found = body
             .get("accessions")
@@ -685,7 +847,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body
             .get("atoms")
@@ -712,7 +874,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         let found = body
             .get("atoms")
@@ -751,10 +913,10 @@ impl PacksetClient {
         }
         let resp = match send(authorize(ureq::post(&url)), Some(&body), timeout()) {
             Ok(resp) => resp,
-            Err(e) if matches!(*e, ureq::Error::Status(404, _)) => {
+            Err(Attempt::Ureq(e)) if matches!(*e, ureq::Error::Status(404, _)) => {
                 return Err(Error::Bad(format!("no atom {id}")));
             }
-            Err(e) => return Err(refused(&url, e)),
+            Err(e) => return Err(into_error(&url, e)),
         };
         Ok(resp.into_json()?)
     }
@@ -776,7 +938,7 @@ impl PacksetClient {
             })),
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -792,7 +954,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -804,7 +966,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -834,7 +996,7 @@ impl PacksetClient {
             ),
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -849,7 +1011,7 @@ impl PacksetClient {
             Some(&serde_json::json!({"workspace": workspace, "apply": apply})),
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -867,7 +1029,7 @@ impl PacksetClient {
             Some(&serde_json::json!({"workspace": workspace})),
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -886,7 +1048,7 @@ impl PacksetClient {
             Some(&serde_json::json!({"workspace": workspace})),
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body)
     }
@@ -927,7 +1089,7 @@ impl PacksetClient {
             req = req.query("as", name);
         }
         let body: serde_json::Value = send(req, None, timeout())
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_json()?;
         Ok(body)
     }
@@ -951,7 +1113,7 @@ impl PacksetClient {
             None,
             timeout(),
         )
-        .map_err(|e| refused(&url, e))?
+        .map_err(|e| into_error(&url, e))?
         .into_json()?;
         Ok(body
             .get("atoms")
@@ -963,7 +1125,7 @@ impl PacksetClient {
     pub fn post_atom(&self, atom: &serde_json::Value) -> Result<serde_json::Value, Error> {
         let url = format!("{}/v1/atoms", self.base);
         let body: serde_json::Value = send(authorize(ureq::post(&url)), Some(atom), timeout())
-            .map_err(|e| refused(&url, e))?
+            .map_err(|e| into_error(&url, e))?
             .into_json()?;
         Ok(body)
     }
@@ -1138,13 +1300,164 @@ mod tests {
     }
 
     #[test]
-    fn a_writer_busy_past_three_retries_is_a_refusal() {
+    fn a_writer_that_stays_busy_fails_in_one_sentence() {
         use std::sync::atomic::Ordering;
         let _env = ENV_LOCK.lock().unwrap();
+        let old = env::var_os("PACKSET_TIMEOUT_MS");
+        unsafe { env::set_var("PACKSET_TIMEOUT_MS", "700") };
         let (client, seen) = busy_for(usize::MAX);
         let err = client.status(None).unwrap_err().to_string();
-        assert!(err.contains("503") && err.contains("busy"), "{err}");
-        assert_eq!(seen.load(Ordering::SeqCst), 4);
+        unsafe {
+            match old {
+                Some(value) => env::set_var("PACKSET_TIMEOUT_MS", value),
+                None => env::remove_var("PACKSET_TIMEOUT_MS"),
+            }
+        }
+        assert_eq!(err, "packsetd is busy.", "{err}");
+        assert!(
+            !err.contains("os error") && !err.contains("status code"),
+            "{err}"
+        );
+        // 50 ms, then 150, then 450, and the next wait does not fit in 700 ms.
+        assert_eq!(seen.load(Ordering::SeqCst), 4, "{err}");
+    }
+
+    #[test]
+    fn a_refused_connection_is_retried_and_then_one_sentence() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("packset-down-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_env(&[
+            "HOME",
+            "PACKSET_HOME",
+            "LJOS_HOME",
+            "LJOS_INSIDE_MEMORY_HOME",
+            "PACKSET_BIN",
+            "PACKSET_TIMEOUT_MS",
+        ]);
+        unsafe {
+            env::set_var("HOME", &dir);
+            env::remove_var("PACKSET_HOME");
+            env::remove_var("LJOS_HOME");
+            env::remove_var("LJOS_INSIDE_MEMORY_HOME");
+            env::remove_var("PACKSET_BIN");
+            env::set_var("PACKSET_TIMEOUT_MS", "250");
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
+        let started = Instant::now();
+        let err = client.status(None).unwrap_err().to_string();
+        let took = started.elapsed();
+        restore_env(saved);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(err, "packsetd is not running.", "{err}");
+        assert!(took >= Duration::from_millis(40), "no backoff: {took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn a_down_local_writer_is_started_once() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "packset-autostart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let log = dir.join("starts");
+        let stub = dir.join("packsetd-stub");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\necho start >> \"{}\"\necho pid $$ >> \"{}\"\nexec python3 - \"$@\" << 'PY'\nimport sys\nargs = sys.argv[1:]\nport = int(args[args.index('--port') + 1])\nhome = args[args.index('--home') + 1]\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = b'{{\"ok\":true}}'\n        self.send_response(200)\n        self.send_header('Content-Type', 'application/json')\n        self.send_header('Content-Length', str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n    def log_message(self, *args):\n        pass\nHTTPServer(('127.0.0.1', port), Handler).serve_forever()\nPY\n",
+                log.display(),
+                log.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = std::fs::metadata(&stub).unwrap().permissions();
+            mode.set_mode(0o755);
+            std::fs::set_permissions(&stub, mode).unwrap();
+        }
+        let saved = save_env(&[
+            "HOME",
+            "PACKSET_HOME",
+            "LJOS_HOME",
+            "LJOS_INSIDE_MEMORY_HOME",
+            "PACKSET_BIN",
+            "PACKSET_TIMEOUT_MS",
+            "PACKSET_TOKEN",
+        ]);
+        unsafe {
+            env::set_var("HOME", &dir);
+            env::set_var("PACKSET_HOME", &home);
+            env::remove_var("LJOS_HOME");
+            env::remove_var("LJOS_INSIDE_MEMORY_HOME");
+            env::remove_var("PACKSET_TOKEN");
+            env::set_var("PACKSET_BIN", &stub);
+            env::set_var("PACKSET_TIMEOUT_MS", "5000");
+        }
+        let reap = Reap(log.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
+        let body = client.status(None).expect("the stub should answer");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        drop(reap);
+        restore_env(saved);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(
+            text.lines().filter(|line| *line == "start").count(),
+            1,
+            "{text}"
+        );
+    }
+
+    fn save_env(keys: &[&str]) -> Vec<(String, Option<std::ffi::OsString>)> {
+        keys.iter()
+            .map(|key| ((*key).to_string(), env::var_os(key)))
+            .collect()
+    }
+
+    fn restore_env(saved: Vec<(String, Option<std::ffi::OsString>)>) {
+        for (key, value) in saved {
+            unsafe {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Kills every pid the autostart stub wrote, including when the test fails.
+    struct Reap(std::path::PathBuf);
+
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let Ok(text) = std::fs::read_to_string(&self.0) else {
+                return;
+            };
+            for line in text.lines() {
+                let Some(pid) = line.strip_prefix("pid ") else {
+                    continue;
+                };
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", pid.trim()])
+                    .status();
+            }
+        }
     }
 
     /// Room for the first wait and not the second: 50 ms fits in 100 ms,
@@ -1169,15 +1482,12 @@ mod tests {
         assert_eq!(budget, BUDGET);
         let second = BUSY_WAIT * BUSY_GROWTH;
         assert!(
-            ask_again(0, Duration::ZERO, BUSY_WAIT, budget),
+            ask_again(Duration::ZERO, BUSY_WAIT, budget),
             "the first wait did not fit"
         );
+        assert!(!ask_again(BUSY_WAIT, second, budget), "the second wait fit");
         assert!(
-            !ask_again(1, BUSY_WAIT, second, budget),
-            "the second wait fit"
-        );
-        assert!(
-            !ask_again(0, budget - BUSY_WAIT, BUSY_WAIT, budget),
+            !ask_again(budget - BUSY_WAIT, BUSY_WAIT, budget),
             "a first round trip that spent the room was followed by a wait"
         );
     }

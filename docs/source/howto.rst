@@ -243,8 +243,18 @@ at a time so two identical claims arriving together are stored once. A burst
 waits in a queue of ``PACKSET_QUEUE`` connections (default 128) rather than
 becoming threads. Past that a request is answered 503 with ``Retry-After: 1``.
 Searches and writes that a worker has read but cannot yet run are bounded
-the same way. ``packset-client`` asks a busy writer again after 50, 150 and
-450 ms. Health, status, the workspace list and the listing without vectors
+the same way. ``packset-client`` asks again, after 50 ms and tripling each
+time up to five seconds, until its request budget runs out (thirty seconds,
+or ``PACKSET_TIMEOUT_MS``). A refused connection is asked the same way. When
+``PACKSET_HOME`` names the pack and ``packsetd`` is on ``PATH`` or
+``PACKSET_BIN``, the client starts that writer once. The error after the
+budget is one sentence.
+
+``packsetd --supervise`` starts the writer and starts it again when the
+process is killed or exits with an error. A stop signal ends the loop. The
+parent does not open the pack, so it stays small, and it needs no root.
+
+Health, status, the workspace list and the listing without vectors
 that a status line reads keep one worker, so a search does not hold the last
 one. ``/health`` still answers. Reads share one parsed snapshot per write. The
 encoder runs before the write lock and is warmed at start.

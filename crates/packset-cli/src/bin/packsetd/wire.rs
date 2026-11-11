@@ -395,7 +395,14 @@ where
         return;
     }
     let response = run(request, accepted, handle);
+    // A listing is the bytes of every atom. Give that buffer back once it
+    // has been written, or the worker's arena keeps the high-water mark.
+    let heavy = response.body.len() >= 64 * 1024;
     reply(stream, &response);
+    drop(response);
+    if heavy {
+        crate::store::release_heap();
+    }
 }
 
 fn reply(stream: &TcpStream, response: &Response) {

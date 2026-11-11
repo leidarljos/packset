@@ -223,8 +223,9 @@ Variable                                                   Read by              
 ``PACKSET_URL``                                            clients                   the writer; ``INSIDE_MEMORY_URL`` is an alias
 ``PACKSET_PORT``                                           ``packset``, ``packsetd`` the port; default 8761
 ``PACKSET_HOME``                                           ``packsetd``              the pack home; default ``$XDG_DATA_HOME/packset`` (``~/.local/share/packset``), or the previous default while only that holds the pack (``packset migrate-home`` moves it); two writers on one host want two homes and two ports
+``PACKSET_BIN``                                            clients                   ``packsetd`` to start when ``PACKSET_HOME`` is set and the connection is refused; else beside the program, else on ``PATH``
 ``PACKSET_WORKSPACE``                                      clients                   the workspace when none is given
-``PACKSET_TIMEOUT_MS``                                     clients                   how long one request may take, default thirty seconds; a busy writer is asked again after 50, 150 and 450 ms inside it
+``PACKSET_TIMEOUT_MS``                                     clients                   how long one request may take, default thirty seconds; a writer that is down or answers 503 or 429 is asked again inside that budget, after 50 ms and tripling each time, up to five seconds
 ``PACKSET_WORKERS``                                        ``packsetd``              requests answered at once, default 4, at most 8; with two or more, searches and writes hold all but one
 ``PACKSET_QUEUE``                                          ``packsetd``              connections that may wait to be read, default 128, at most 4096; searches and writes that a worker has read but cannot yet run are bounded the same way; past either a request is answered 503; ``/health`` still answers
 ``PACKSET_FUSE``, ``PACKSET_DIVERSIFY``, ``PACKSET_DECAY`` writer                    the panel
