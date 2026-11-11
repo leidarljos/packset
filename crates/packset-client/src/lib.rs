@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// How long one request may take: `PACKSET_TIMEOUT_MS`, else thirty seconds.
-/// A write that waits behind thirty others on a busy seat is late, not failed.
+/// A write that waits behind others on a busy seat is late, not failed. The
+/// same budget is sent as `X-Packset-Deadline`, and the writer drops a
+/// request that is still waiting when it passes.
 fn timeout() -> Duration {
     std::env::var("PACKSET_TIMEOUT_MS")
         .ok()
@@ -36,9 +38,10 @@ fn ask_again(waited: Duration, wait: Duration, budget: Duration) -> bool {
     waited.saturating_add(wait) < budget
 }
 
-/// How many times [`send`] asks inside `budget`. The first ask costs no
-/// wait. Each later ask costs the next backoff, and a wait that would pass
-/// the budget is not taken.
+/// How many times [`send`] asks inside `budget` when the writer sends no
+/// `Retry-After`. The first ask costs no wait. Each later ask costs the
+/// next backoff, and a wait that would pass the budget is not taken.
+#[cfg(test)]
 fn attempts_in(budget: Duration) -> u32 {
     let mut waited = Duration::ZERO;
     let mut wait = BUSY_WAIT;
@@ -59,19 +62,86 @@ enum Attempt {
     Ureq(Box<ureq::Error>),
 }
 
+/// How long to sleep, and how much of the budget that wait spends. The
+/// charge is the full wait, so every host stops at the same attempt. The
+/// sleep is half of that plus a fraction of the rest, so a herd does not
+/// wake together. `Retry-After` raises the wait when it is longer.
+struct Pause {
+    sleep: Duration,
+    charge: Duration,
+}
+
+fn planned_wait(backoff: Duration, retry_after: Option<Duration>) -> Duration {
+    match retry_after {
+        Some(after) if after > backoff => after,
+        _ => backoff,
+    }
+}
+
+/// Half of `wait`, plus up to the other half. `salt` picks the fraction.
+fn jittered(wait: Duration, salt: u64) -> Duration {
+    let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX).max(1);
+    let half = ms / 2;
+    let extra = if half == 0 { 0 } else { salt % (half + 1) };
+    Duration::from_millis(half + extra)
+}
+
+/// The next wait, when it still ends inside `budget`.
+fn pause_for(
+    backoff: Duration,
+    retry_after: Option<Duration>,
+    waited: Duration,
+    budget: Duration,
+    salt: u64,
+) -> Option<Pause> {
+    let charge = planned_wait(backoff, retry_after);
+    if !ask_again(waited, charge, budget) {
+        return None;
+    }
+    let room = budget.saturating_sub(waited).max(Duration::from_millis(1));
+    Some(Pause {
+        sleep: jittered(charge, salt)
+            .min(room)
+            .max(Duration::from_millis(1)),
+        charge,
+    })
+}
+
+fn retry_after_of(header: Option<&str>) -> Option<Duration> {
+    let raw = header?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    raw.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+fn jitter_salt(asked: u32) -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
+        .unwrap_or(0);
+    nanos ^ u64::from(asked)
+}
+
 /// Send `req`, with `body` when there is one, inside `budget`. A connection
 /// refused, a 429, or a 503 is asked again for every wait that fits in the
-/// budget. The waits are what the budget spends. A slow round trip does not
-/// drop an ask. The writer answers 503 only when its queue or its lane is
-/// full, before any of the request runs, so a write sent again is not stored
-/// twice. The first refusal of a loopback writer starts the local daemon
-/// once, when this seat has a home and a `packsetd` binary.
+/// budget. A 503 or 429 that carries `Retry-After` waits at least that long.
+/// The waits that are charged are what the budget spends. A slow round trip
+/// does not drop an ask. The writer answers 503 before any of the request
+/// runs, so a write sent again is not stored twice. Each ask carries
+/// `X-Packset-Deadline` at the end of this budget. The first refusal of a
+/// loopback writer starts the local daemon once, when this seat has a home
+/// and a `packsetd` binary.
 fn send(
     req: ureq::Request,
     body: Option<&serde_json::Value>,
     budget: Duration,
 ) -> Result<ureq::Response, Attempt> {
-    let attempts = attempts_in(budget);
+    let deadline = std::time::SystemTime::now() + budget;
+    let deadline_ms = deadline
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().to_string())
+        .unwrap_or_default();
     let mut waited = Duration::ZERO;
     let mut wait = BUSY_WAIT;
     let mut asked = 0u32;
@@ -80,6 +150,9 @@ fn send(
         asked = asked.saturating_add(1);
         let left = budget.saturating_sub(waited).max(Duration::from_millis(1));
         let mut attempt = req.clone().timeout(left);
+        if !deadline_ms.is_empty() {
+            attempt = attempt.set("X-Packset-Deadline", &deadline_ms);
+        }
         if started_daemon {
             if let Some(token) = token() {
                 attempt = attempt.set("Authorization", &format!("Bearer {token}"));
@@ -89,26 +162,32 @@ fn send(
             Some(json) => attempt.send_json(json),
             None => attempt.call(),
         };
-        let again = asked < attempts;
         match answered {
-            Err(ureq::Error::Status(code, _)) if (code == 503 || code == 429) && again => {
-                std::thread::sleep(wait);
-                waited = waited.saturating_add(wait);
-                wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
-            }
             Err(ureq::Error::Status(code, response)) if code == 503 || code == 429 => {
-                return Err(Attempt::Plain(busy_line(response)));
-            }
-            Err(err) if connect_refused(&err) && again => {
-                if !started_daemon {
-                    started_daemon = autostart(req.url());
+                let after = retry_after_of(response.header("Retry-After"));
+                match pause_for(wait, after, waited, budget, jitter_salt(asked)) {
+                    Some(pause) => {
+                        std::thread::sleep(pause.sleep);
+                        waited = waited.saturating_add(pause.charge);
+                        wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
+                    }
+                    None => return Err(Attempt::Plain(busy_line(response))),
                 }
-                std::thread::sleep(wait);
-                waited = waited.saturating_add(wait);
-                wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
             }
             Err(err) if connect_refused(&err) => {
-                return Err(Attempt::Plain("packsetd is not running.".to_string()));
+                match pause_for(wait, None, waited, budget, jitter_salt(asked)) {
+                    Some(pause) => {
+                        if !started_daemon {
+                            started_daemon = autostart(req.url());
+                        }
+                        std::thread::sleep(pause.sleep);
+                        waited = waited.saturating_add(pause.charge);
+                        wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
+                    }
+                    None => {
+                        return Err(Attempt::Plain("packsetd is not running.".to_string()));
+                    }
+                }
             }
             other => return other.map_err(|err| Attempt::Ureq(Box::new(err))),
         }
@@ -601,6 +680,20 @@ impl PacksetClient {
         let body = send(authorize(ureq::get(&url)), None, timeout())
             .map_err(|e| into_error(&url, e))?
             .into_string()?;
+        Ok(body)
+    }
+
+    /// Queue depth, shed counts and the current limits. `line` is `ok`, or
+    /// `busy, retrying` when work is waiting.
+    ///
+    /// # Errors
+    ///
+    /// The request's, or a body that is not JSON.
+    pub fn stats(&self) -> Result<serde_json::Value, Error> {
+        let url = format!("{}/stats", self.base);
+        let body: serde_json::Value = send(authorize(ureq::get(&url)), None, timeout())
+            .map_err(|e| into_error(&url, e))?
+            .into_json()?;
         Ok(body)
     }
 
@@ -1257,9 +1350,11 @@ mod tests {
     }
 
     /// A writer that answers busy to its first `busy` requests and counts every
-    /// request.
+    /// request. `retry_after` is the `Retry-After` value, in seconds, when
+    /// the writer sends one.
     fn busy_for(
         busy: usize,
+        retry_after: Option<u64>,
     ) -> (
         PacksetClient,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1288,9 +1383,12 @@ mod tests {
                 } else {
                     ("200 OK", r#"{"ok":true}"#)
                 };
+                let retry = retry_after
+                    .map(|secs| format!("Retry-After: {secs}\r\n"))
+                    .unwrap_or_default();
                 let _ = (&stream).write_all(
                     format!(
-                        "HTTP/1.1 {status}\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        "HTTP/1.1 {status}\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
                         text.len()
                     )
                     .as_bytes(),
@@ -1304,10 +1402,10 @@ mod tests {
     fn a_busy_writer_is_asked_again_for_a_read_and_a_write() {
         use std::sync::atomic::Ordering;
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (client, seen) = busy_for(2);
+        let (client, seen) = busy_for(2, None);
         assert_eq!(client.status(None).unwrap()["ok"], true);
         assert_eq!(seen.load(Ordering::SeqCst), 3);
-        let (client, seen) = busy_for(1);
+        let (client, seen) = busy_for(1, None);
         let stored = client
             .post_atom(&serde_json::json!({"text": "one write", "workspace": "w"}))
             .unwrap();
@@ -1325,7 +1423,7 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = env::var_os("PACKSET_TIMEOUT_MS");
         unsafe { env::set_var("PACKSET_TIMEOUT_MS", "700") };
-        let (client, seen) = busy_for(usize::MAX);
+        let (client, seen) = busy_for(usize::MAX, None);
         let err = client.status(None).unwrap_err().to_string();
         unsafe {
             match old {
@@ -1526,5 +1624,104 @@ mod tests {
         assert_eq!(attempts_in(Duration::from_millis(100)), 2);
         assert_eq!(attempts_in(Duration::from_millis(700)), 4);
         assert_eq!(attempts_in(Duration::from_secs(30)), 10);
+    }
+
+    /// `Retry-After` longer than the budget is not waited. The shorter
+    /// backoff is not used in its place.
+    #[test]
+    fn a_retry_after_past_the_budget_is_not_waited() {
+        let budget = Duration::from_millis(700);
+        assert!(pause_for(
+            BUSY_WAIT,
+            Some(Duration::from_secs(1)),
+            Duration::ZERO,
+            budget,
+            0
+        )
+        .is_none());
+        let inside = pause_for(BUSY_WAIT, None, Duration::ZERO, budget, 0).unwrap();
+        assert_eq!(inside.charge, BUSY_WAIT);
+        assert!(inside.sleep >= BUSY_WAIT / 2 && inside.sleep <= BUSY_WAIT);
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = env::var_os("PACKSET_TIMEOUT_MS");
+        unsafe { env::set_var("PACKSET_TIMEOUT_MS", "700") };
+        let (client, seen) = busy_for(usize::MAX, Some(1));
+        let err = client.status(None).unwrap_err().to_string();
+        unsafe {
+            match old {
+                Some(value) => env::set_var("PACKSET_TIMEOUT_MS", value),
+                None => env::remove_var("PACKSET_TIMEOUT_MS"),
+            }
+        }
+        assert_eq!(err, "packsetd is busy.", "{err}");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1, "{err}");
+    }
+
+    /// One second fits in a three-second budget, so the second ask waits
+    /// for it. Jitter keeps the wait under that second and over half of it.
+    #[test]
+    fn a_retry_after_inside_the_budget_is_waited() {
+        use std::time::Instant;
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = env::var_os("PACKSET_TIMEOUT_MS");
+        unsafe { env::set_var("PACKSET_TIMEOUT_MS", "3000") };
+        let (client, seen) = busy_for(1, Some(1));
+        let started = Instant::now();
+        let body = client.status(None).unwrap();
+        let took = started.elapsed();
+        unsafe {
+            match old {
+                Some(value) => env::set_var("PACKSET_TIMEOUT_MS", value),
+                None => env::remove_var("PACKSET_TIMEOUT_MS"),
+            }
+        }
+        assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            took >= Duration::from_millis(400),
+            "Retry-After was not waited: {took:?}"
+        );
+        assert!(took < Duration::from_secs(3), "{took:?}");
+    }
+
+    #[test]
+    fn a_request_carries_the_end_of_its_budget() {
+        use std::io::{BufRead, BufReader, Write};
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = PacksetClient::new(format!("http://{}", listener.local_addr().unwrap()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut deadline = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                let lower = line.to_ascii_lowercase();
+                if let Some(value) = lower.strip_prefix("x-packset-deadline:") {
+                    deadline = value.trim().to_string();
+                }
+                line.clear();
+            }
+            let _ = tx.send(deadline);
+            let text = r#"{"ok":true}"#;
+            let _ = (&stream).write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                )
+                .as_bytes(),
+            );
+        });
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let body = client.status(None).unwrap();
+        let header = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let stamp: u128 = header.parse().unwrap();
+        assert_eq!(body["ok"], true, "{body}");
+        assert!(stamp > before, "{stamp} <= {before}");
+        assert!(stamp < before + 60_000, "{stamp} is not this budget");
     }
 }

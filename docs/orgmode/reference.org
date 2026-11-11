@@ -55,7 +55,8 @@ carry the port the kernel assigned.
 
 | Request | Does |
 |---+---|
-| =GET /health= | =packsetd= |
+| =GET /health= | =packsetd ok=, or =packsetd ok, busy= when work is waiting. No token |
+| =GET /stats= | queue depth, shed counts and the current limits, as JSON. =line= is =ok=, or =busy, retrying= when work is waiting or writes are being turned away. No token |
 | =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave), and =search.ranks= (the top-k cuts this writer honours; an older writer omits =search=) |
 | =GET /v1/workspaces= | names with live counts |
 | =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate; a post that names a live id writes over it and, like an update, cannot raise its =origin= or =source.basis=. A post that names an id a tombstone still holds is stored under a fresh id, with one =warning= naming the retired id; the tombstone keeps that id |
@@ -164,9 +165,9 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 | =PACKSET_PORT= | =packset=, =packsetd= | the port; default 8761; =0= (or =packsetd --port 0=) asks the kernel for one, which the writer prints and writes to =port= in the pack home |
 | =PACKSET_HOME= | =packsetd= | the pack home; default =$XDG_DATA_HOME/packset= (=~/.local/share/packset=), or the previous default while only that holds the pack (=packset migrate-home= moves it); two writers on one host want two homes and two ports |
 | =PACKSET_WORKSPACE= | clients | the workspace when none is given |
-| =PACKSET_TIMEOUT_MS= | clients | how long one request may take, default thirty seconds; a busy writer is asked again after 50, 150 and 450 ms inside it |
-| =PACKSET_WORKERS= | =packsetd= | requests answered at once, default 4, at most 8; with two or more, searches and writes hold all but one |
-| =PACKSET_QUEUE= | =packsetd= | connections that may wait to be read, default 128, at most 4096; searches and writes that a worker has read but cannot yet run are bounded the same way; past either a request is answered 503; =/health= still answers |
+| =PACKSET_TIMEOUT_MS= | clients | how long one request may take, default thirty seconds; the client sends that instant as =X-Packset-Deadline=. A writer that is down or answers 503 or 429 is asked again inside the budget. The wait is 50 ms, tripling up to five seconds, and at least =Retry-After= when the writer sends one, with jitter |
+| =PACKSET_WORKERS= | =packsetd= | requests answered at once, default 4, at most 8; with two or more, one worker stays on health and status. Reads and writes may use the rest. A queued read is served before a queued write. The number shrinks when a backlog is slowing down, and grows back one at a time; a short queue leaves it at the ceiling |
+| =PACKSET_QUEUE= | =packsetd= | connections that may wait to be read, default 128, at most 4096. The read queue is the same depth. The write queue is a quarter of it, and the maintenance queue an eighth, each at least one. Past a queue, or under Linux memory pressure, a request is answered 503 with =Retry-After= and does not run. Writes are turned away before reads. =/health= and =/stats= still answer |
 | =PACKSET_FUSE=, =PACKSET_DIVERSIFY=, =PACKSET_DECAY= | writer | the panel |
 | =PACKSET_LIVE_CAP= | writer | live claims a workspace keeps before the write that crosses it forgets the least retrievable forgettable ones; default twenty thousand, =off= for none; a write that forgot says =forgot: N= |
 | =PACKSET_WORKSPACE_CACHE= | writer | parsed workspaces kept at once, with the inverted index and the status counts; default 8, =off= for every workspace a read has touched; one that falls out is read from the database again |

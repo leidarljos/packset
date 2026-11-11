@@ -239,13 +239,30 @@ Serve many agents
 
 One writer serves every client on the seat. The worker pool is the balance:
 ``PACKSET_WORKERS`` sets it (default 4, at most 8), and one logical write runs
-at a time so two identical claims arriving together are stored once. A burst
-waits in a queue of ``PACKSET_QUEUE`` connections (default 128) rather than
-becoming threads. Past that a request is answered 503 with ``Retry-After: 1``.
-Searches and writes that a worker has read but cannot yet run are bounded
-the same way. ``packset-client`` asks again, after 50 ms and tripling each
-time up to five seconds, until its request budget runs out (thirty seconds,
-or ``PACKSET_TIMEOUT_MS``). A refused connection is asked the same way. When
+at a time so two identical claims arriving together are stored once. One
+worker stays free for health, status and the workspace list when the pool
+has more than one. Reads, writes and maintenance (compaction, consolidate,
+sweep) each wait in their own queue. A read is served before a write, and
+maintenance runs only when both of those queues are empty. Workspaces take
+turns inside a queue, so one seat cannot fill it and leave the others
+waiting. The number running at once shrinks when a backlog is waiting and the
+requests that just finished took more than twice as long as the ones that
+ran with nothing waiting, and it grows back one at a time. On a quiet seat
+the limits stay at the ceiling and a request does not wait.
+
+A full queue answers 503 with ``Retry-After`` and does not run the request.
+On Linux, memory pressure does the same to maintenance first and then to
+writes; reads are turned away only when the machine is stalled. Other
+systems have no pressure files, and then only a full queue sheds. ``/health``
+still answers. ``GET /stats`` needs no token, like ``/health``, and reports each
+queue's depth, the shed counts and the limits. Its ``line`` is ``ok``, or
+``busy, retrying`` when work is waiting or writes are being turned away.
+
+The client sends ``X-Packset-Deadline``, the end of its budget. A request
+still waiting after that is not run. ``packset-client`` asks again after 503
+or 429. It waits at least ``Retry-After`` when the writer sends one, and
+otherwise 50 ms tripling up to five seconds, with jitter, for as long as
+the budget allows. A refused connection is asked the same way. When
 ``PACKSET_HOME`` names the pack and ``packsetd`` is on ``PATH`` or
 ``PACKSET_BIN``, the client starts that writer once. The error after the
 budget is one sentence.
@@ -256,8 +273,8 @@ parent does not open the pack, so it stays small, and it needs no root.
 
 Health, status, the workspace list and the listing without vectors
 that a status line reads keep one worker, so a search does not hold the last
-one. ``/health`` still answers. Reads share one parsed snapshot per write. The
-encoder runs before the write lock and is warmed at start.
+one. Reads share one parsed snapshot per write. The encoder runs before the
+write lock and is warmed at start.
 
 .. code:: console
 

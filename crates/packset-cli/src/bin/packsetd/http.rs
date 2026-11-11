@@ -212,8 +212,9 @@ pub fn serve(
         .port();
     let workers = worker_count();
     let queue = queue_depth();
+    let slots = wire::dear_limit(workers);
     eprintln!(
-        "packsetd: listening on http://{host}:{port} with {workers} workers and room for {queue} waiting"
+        "packsetd: listening on http://{host}:{port} with {workers} workers, {slots} at once, and room for {queue} waiting"
     );
     // Replaced whole, so a reader never sees a partial port. The name is
     // `port` because that is the word a seat already uses for this number.
@@ -221,8 +222,23 @@ pub fn serve(
     write_port_file(&port_path, port)?;
     let busy = Arc::new(AtomicU64::new(unix_millis()));
     start_idle_release(Arc::clone(&service), Arc::clone(&busy), idle_trim_after());
-    wire::serve(&listener, workers, queue, move |request| {
+    let gate = wire::Gate::new(workers, queue);
+    wire::serve_with(&listener, gate.clone(), move |request| {
         note_busy(&busy, &request.method, &request.target);
+        if request.method == Method::Get {
+            let path = request.target.split('?').next().unwrap_or(&request.target);
+            if path == "/health" {
+                let text = if gate.busy() {
+                    "packsetd ok, busy"
+                } else {
+                    "packsetd ok"
+                };
+                return wire::Response::text(200, text);
+            }
+            if path == "/stats" {
+                return wire::Response::json(200, gate.stats_body());
+            }
+        }
         handle(&service, &panel, token.as_deref(), request)
     });
     Ok(())
@@ -1102,6 +1118,56 @@ mod tests {
     }
 
     #[test]
+    fn stats_reports_the_queues_while_the_seat_is_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let svc = Arc::new(Service::open(crate::home::Home::new(&home)).unwrap());
+        let panel = packset_core::Panel::default();
+        let port_path = home.join("port");
+        std::thread::spawn(move || {
+            if let Err(err) = serve(svc, panel, LOOPBACK, 0, None) {
+                panic!("serve: {err}");
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let port = loop {
+            if let Ok(text) = std::fs::read_to_string(&port_path) {
+                if let Ok(port) = text.trim().parse::<u16>() {
+                    if port != 0 {
+                        break port;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer did not write the port it was given"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let health = ureq::get(&format!("http://{LOOPBACK}:{port}/health"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert_eq!(health, "packsetd ok");
+        let stats: serde_json::Value = ureq::get(&format!("http://{LOOPBACK}:{port}/stats"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        let caps = crate::admit::ceilings(worker_count());
+        assert_eq!(stats["line"], json!("ok"));
+        assert_eq!(stats["busy"], json!(false));
+        assert_eq!(stats["queues"]["read"]["limit"], json!(caps[0]));
+        assert_eq!(stats["queues"]["write"]["limit"], json!(caps[1]));
+        assert_eq!(stats["queues"]["maintenance"]["limit"], json!(caps[2]));
+        assert_eq!(stats["limits"]["total"], json!(caps[3]));
+        assert_eq!(stats["queues"]["read"]["depth"], json!(0));
+        assert_eq!(stats["shed"]["write"], json!(0));
+        assert_eq!(stats["shed"]["deadline"], json!(0));
+    }
+
+    #[test]
     fn default_workers_is_four_not_core_count() {
         assert_eq!(DEFAULT_WORKERS, 4);
         assert_eq!(MAX_WORKERS, 8);
@@ -1129,6 +1195,7 @@ mod tests {
     #[test]
     fn health_status_and_workspaces_stay_off_the_search_lane() {
         assert!(wire::is_cheap(&Method::Get, "/health"));
+        assert!(wire::is_cheap(&Method::Get, "/stats"));
         assert!(wire::is_cheap(&Method::Get, "/v1/status?workspace=seat"));
         assert!(wire::is_cheap(&Method::Get, "/v1/workspaces"));
         assert!(wire::is_cheap(&Method::Get, "/__inside_memd/health"));

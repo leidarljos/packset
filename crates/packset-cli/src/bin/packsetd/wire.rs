@@ -1,26 +1,24 @@
 //! HTTP/1.1 on the loopback socket: one request a connection, a fixed pool
-//! of workers, and a bounded queue in front of them.
+//! of workers, and a queue in front of each class of work.
 //!
 //! A herd of seats is many short clients, and a status line gives up after
 //! 300 ms. Each connection costs one descriptor until it is answered. The
 //! accept loop never ends: with no descriptor left, it waits and accepts
-//! again.
+//! again. Reads run before writes. A full queue, or memory pressure, is
+//! answered 503 before the request runs.
 
-use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{sync_channel, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::admit::{self, Arrival, Class, Control, Decision, Next};
+
 /// The longest a request line and its headers may be.
 pub const MAX_HEAD: usize = 64 * 1024;
 /// The largest body a request may carry: a day's transcript fits.
 pub const MAX_BODY: usize = 64 * 1024 * 1024;
-/// Parked bodies together stay within one request. The queue can hold
-/// many connections, and each used to be allowed a full body, which set
-/// the allocator's high-water mark for the life of the process.
-const PARKED_BODY_CAP: usize = MAX_BODY;
 /// How long a connection may take to send its whole request, and how long
 /// it may stop reading the answer, before the worker drops it.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,6 +58,9 @@ pub struct Request {
     pub target: String,
     /// The `Authorization` header, when the client sent one.
     pub authorization: Option<String>,
+    /// When the client needs an answer, as unix milliseconds. Past this
+    /// the request is not run. Absent when the client did not say.
+    pub deadline_ms: Option<u64>,
     pub body: Vec<u8>,
 }
 
@@ -118,29 +119,26 @@ struct Held {
     request: Request,
 }
 
-/// How many searches or writes may run at once.
+/// How many searches or writes may run at once, together.
 ///
 /// One worker stays out of that work when the pool has more than one, so
 /// health, status and the workspace list still answer during a burst. A
 /// single worker cannot split.
 pub(crate) fn dear_limit(workers: usize) -> usize {
-    match workers {
-        0 | 1 => 1,
-        n => n - 1,
-    }
+    admit::slots(workers)
 }
 
-/// Health, status, the workspace list and the listing without vectors that
-/// a status line reads. Everything else can encode, scan or take the write
-/// lock, and waits on [`dear_limit`]. A listing as of a past time is not
-/// cheap: it scans the database.
+/// Health, status, stats, the workspace list and the listing without
+/// vectors that a status line reads. Everything else can encode, scan or
+/// take the write lock, and waits on [`dear_limit`]. A listing as of a past
+/// time is not cheap: it scans the database.
 pub(crate) fn is_cheap(method: &Method, target: &str) -> bool {
     if !matches!(method, Method::Get) {
         return false;
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match path {
-        "/health" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health" => true,
+        "/health" | "/stats" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health" => true,
         "/v1/atoms" => {
             query.split('&').any(|pair| pair == "embedding=omit")
                 && !query.split('&').any(|pair| pair.starts_with("as_of="))
@@ -149,100 +147,119 @@ pub(crate) fn is_cheap(method: &Method, target: &str) -> bool {
     }
 }
 
-/// Searches and writes in flight, and the ones waiting for a slot.
-struct Lane {
-    limit: usize,
-    /// How many may wait for a slot. While parked, a request keeps its
-    /// connection and its body, so the bound is on descriptors and memory,
-    /// not only on waiting.
-    room: usize,
-    in_flight: usize,
-    parked: VecDeque<Held>,
-    /// Bytes sitting in `parked`. A body is counted while it waits and
-    /// dropped when the job starts.
-    parked_bytes: usize,
+/// Which queue a request waits on. Maintenance is compaction and the
+/// sweeps that rebuild a workspace; a write is anything else with a body.
+fn classify(method: &Method, target: &str) -> Class {
+    let path = target.split('?').next().unwrap_or(target);
+    if matches!(method, Method::Post)
+        && matches!(path, "/v1/compact" | "/v1/consolidate" | "/v1/sweep")
+    {
+        return Class::Maintenance;
+    }
+    if matches!(method, Method::Post | Method::Put) {
+        return Class::Write;
+    }
+    Class::Read
 }
 
-/// What the lane did with a job.
-enum Begin {
-    Run(Held),
-    Parked,
-    Full(Held),
+/// The admission state the accept loop and the workers share.
+#[derive(Clone)]
+pub(crate) struct Gate {
+    inner: Arc<Mutex<Control<Held>>>,
+    workers: usize,
+    queue: usize,
 }
 
-impl Lane {
-    fn new(workers: usize, room: usize) -> Self {
+impl Gate {
+    pub(crate) fn new(workers: usize, queue: usize) -> Self {
         Self {
-            limit: dear_limit(workers),
-            room: room.max(1),
-            in_flight: 0,
-            parked: VecDeque::new(),
-            parked_bytes: 0,
+            inner: Arc::new(Mutex::new(Control::new(workers, queue))),
+            workers,
+            queue,
         }
     }
 
-    /// Run `job` now, park it, or hand it back when the lane is full.
-    fn begin(&mut self, job: Held) -> Begin {
-        if self.in_flight < self.limit {
-            self.in_flight += 1;
-            Begin::Run(job)
-        } else if park_body(
-            self.parked_bytes,
-            job.request.body.len(),
-            self.room,
-            self.parked.len(),
-        ) {
-            self.parked_bytes = self.parked_bytes.saturating_add(job.request.body.len());
-            self.parked.push_back(job);
-            Begin::Parked
-        } else {
-            Begin::Full(job)
-        }
+    /// Use this pressure reading and do not consult the host.
+    #[cfg(test)]
+    pub(crate) fn pin_pressure(&self, psi: admit::Psi) {
+        self.lock().pin_pressure(psi);
     }
 
-    /// The next parked job, which keeps this slot. `None` releases it.
-    fn end(&mut self) -> Option<Held> {
-        if let Some(next) = self.parked.pop_front() {
-            self.parked_bytes = self.parked_bytes.saturating_sub(next.request.body.len());
-            Some(next)
-        } else {
-            self.in_flight = self.in_flight.saturating_sub(1);
-            None
-        }
+    pub(crate) fn snapshot(&self) -> admit::Snapshot {
+        self.lock().snapshot()
     }
-}
 
-/// Whether a body of `body` bytes may wait. `queued` jobs already wait,
-/// out of `room`, holding `parked` bytes between them. An empty request
-/// still queues up to `room`. A body of [`MAX_BODY`] parks only when
-/// nothing else is already parked.
-pub(crate) fn park_body(parked: usize, body: usize, room: usize, queued: usize) -> bool {
-    queued < room && parked.saturating_add(body) <= PARKED_BODY_CAP
+    #[must_use]
+    pub(crate) fn busy(&self) -> bool {
+        self.snapshot().busy
+    }
+
+    #[must_use]
+    pub(crate) fn stats_body(&self) -> String {
+        self.snapshot().json().to_string()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Control<Held>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn arrive(&self, held: Held) -> Decision<Held> {
+        let class = classify(&held.request.method, &held.request.target);
+        let arrival = Arrival {
+            class,
+            seat: admit::workspace_of(&held.request.target, &held.request.body),
+            deadline_ms: held.request.deadline_ms,
+            bytes: held.request.body.len(),
+            body: held,
+        };
+        self.lock().arrive(arrival, admit::unix_ms())
+    }
+
+    fn finish(&self, class: Class, sample: Option<Duration>) {
+        self.lock().finish(class, sample);
+    }
+
+    fn take(&self) -> Next<Held> {
+        self.lock().take(admit::unix_ms())
+    }
+
+    fn note_accept_shed(&self) {
+        self.lock().note_accept_shed();
+    }
 }
 
 /// Serve `listener` until the process ends.
 ///
 /// `workers` threads answer; at most `queue` accepted connections wait for
 /// them, and a connection past that is answered busy by the accept loop
-/// itself. Searches and writes that find no dear slot wait in the lane, at
-/// most `queue` of them. `handle` runs once a request, and a panic inside
-/// it is that request's 500, not the worker's end.
+/// itself. Reads, writes and maintenance that find no slot wait in their
+/// own queues. `handle` runs once a request, and a panic inside it is that
+/// request's 500, not the worker's end.
 pub fn serve<H>(listener: &TcpListener, workers: usize, queue: usize, handle: H)
 where
     H: Fn(&Request) -> Response + Send + Sync + 'static,
 {
+    serve_with(listener, Gate::new(workers, queue), handle);
+}
+
+/// [`serve`] on a gate the caller can read. `/stats` is that reading.
+pub(crate) fn serve_with<H>(listener: &TcpListener, gate: Gate, handle: H)
+where
+    H: Fn(&Request) -> Response + Send + Sync + 'static,
+{
     let handle = Arc::new(handle);
-    let (tx, rx) = sync_channel::<Waiting>(queue.max(1));
+    let (tx, rx) = sync_channel::<Waiting>(gate.queue.max(1));
     let rx = Arc::new(Mutex::new(rx));
-    let slots = workers.max(1);
-    let lane = Arc::new(Mutex::new(Lane::new(slots, queue)));
+    let slots = gate.workers.max(1);
     for n in 0..slots {
         let rx = Arc::clone(&rx);
         let handle = Arc::clone(&handle);
-        let lane = Arc::clone(&lane);
+        let gate = gate.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("packsetd-worker-{n}"))
-            .spawn(move || work(&rx, &lane, handle.as_ref()));
+            .spawn(move || work(&rx, &gate, handle.as_ref()));
         if let Err(e) = spawned {
             eprintln!("packsetd: cannot start worker {n}: {e}");
         }
@@ -263,7 +280,10 @@ where
                 };
                 match tx.try_send(waiting) {
                     Ok(()) => {}
-                    Err(TrySendError::Full(waiting)) => shed(&waiting.stream),
+                    Err(TrySendError::Full(waiting)) => {
+                        gate.note_accept_shed();
+                        shed(&waiting.stream);
+                    }
                     Err(TrySendError::Disconnected(waiting)) => shed(&waiting.stream),
                 }
             }
@@ -316,11 +336,11 @@ mod libc_errno {
 
 /// One worker: take the oldest waiting connection, answer it, repeat.
 ///
-/// A cheap request runs on the worker that read it. A search or a write
-/// runs only while a dear slot is free; otherwise it waits on the lane and
-/// this worker goes back to the queue, so health is not stuck behind it. A
-/// full lane answers busy.
-fn work<H>(rx: &Mutex<Receiver<Waiting>>, lane: &Mutex<Lane>, handle: &H)
+/// A cheap request runs on the worker that read it. Anything else runs
+/// only while its class has a slot; otherwise it waits in that class's
+/// queue and this worker goes back for the next connection, so health is
+/// not stuck behind a search. A full queue answers busy.
+fn work<H>(rx: &Mutex<Receiver<Waiting>>, gate: &Gate, handle: &H)
 where
     H: Fn(&Request) -> Response,
 {
@@ -346,7 +366,7 @@ where
             Ok(request) => request,
         };
         if is_cheap(&request.method, &request.target) {
-            reply_ran(&waiting.stream, waiting.accepted, &request, handle);
+            let _ = reply_ran(&waiting.stream, waiting.accepted, &request, handle);
             continue;
         }
         let held = Held {
@@ -354,35 +374,63 @@ where
             accepted: waiting.accepted,
             request,
         };
-        let admitted = {
-            let mut lane = lane.lock().unwrap_or_else(|poison| poison.into_inner());
-            lane.begin(held)
-        };
-        let mut held = match admitted {
-            Begin::Run(held) => held,
-            Begin::Parked => continue,
-            Begin::Full(held) => {
-                let _ = write_response(&held.stream, &busy(), &[("Retry-After", "1")]);
-                let _ = held.stream.shutdown(std::net::Shutdown::Write);
-                continue;
-            }
-        };
+        match gate.arrive(held) {
+            Decision::Run { class, body } => run_admitted(class, body, gate, handle),
+            Decision::Queued => {}
+            Decision::Shed {
+                body,
+                retry_after,
+                reason,
+            } => refuse(&body.stream, retry_after, reason),
+            Decision::Expired(body) => reply_expired(&body.stream),
+        }
+    }
+}
+
+/// Run `held`, then the next admitted request, until the queues have
+/// nothing this worker can start.
+fn run_admitted<H>(mut class: Class, mut held: Held, gate: &Gate, handle: &H)
+where
+    H: Fn(&Request) -> Response,
+{
+    loop {
+        let sample = dispatch(&held, handle);
+        gate.finish(class, sample);
         loop {
-            reply_ran(&held.stream, held.accepted, &held.request, handle);
-            let next = {
-                let mut lane = lane.lock().unwrap_or_else(|poison| poison.into_inner());
-                lane.end()
-            };
-            match next {
-                Some(parked) => held = parked,
-                None => break,
+            match gate.take() {
+                Next::Run { class: next, body } => {
+                    class = next;
+                    held = body;
+                    break;
+                }
+                Next::Expired(body) => reply_expired(&body.stream),
+                Next::Idle => return,
             }
         }
     }
 }
 
+/// Run `held` unless its client has gone or its deadline has passed.
+/// The duration is how long it ran, when it did.
+fn dispatch<H>(held: &Held, handle: &H) -> Option<Duration>
+where
+    H: Fn(&Request) -> Response,
+{
+    if admit::deadline_passed(held.request.deadline_ms, admit::unix_ms()) {
+        reply_expired(&held.stream);
+        return None;
+    }
+    let started = Instant::now();
+    if reply_ran(&held.stream, held.accepted, &held.request, handle) {
+        Some(started.elapsed())
+    } else {
+        None
+    }
+}
+
 /// Run `request` unless its client has gone, write the answer and close.
-fn reply_ran<H>(stream: &TcpStream, accepted: Instant, request: &Request, handle: &H)
+/// False when the client had already gone and the handler did not run.
+fn reply_ran<H>(stream: &TcpStream, accepted: Instant, request: &Request, handle: &H) -> bool
 where
     H: Fn(&Request) -> Response,
 {
@@ -392,7 +440,7 @@ where
     // has its error, so the request is not run: a write it gave up on is
     // not applied.
     if abandoned(stream) {
-        return;
+        return false;
     }
     let response = run(request, accepted, handle);
     // A listing is the bytes of every atom. Give that buffer back once it
@@ -403,6 +451,7 @@ where
     if heavy {
         crate::store::release_heap();
     }
+    true
 }
 
 fn reply(stream: &TcpStream, response: &Response) {
@@ -475,24 +524,39 @@ fn shed(stream: &TcpStream) {
             Ok(n) => seen += n,
         }
     }
-    let probe = head[..seen].starts_with(b"GET /health ");
+    let probe =
+        head[..seen].starts_with(b"GET /health ") || head[..seen].starts_with(b"GET /stats ");
     let response = if probe {
         Response::text(200, "packsetd ok, busy")
     } else {
-        busy()
+        busy("the connection queue is full; try again")
     };
     let _ = write_response(stream, &response, &[("Retry-After", "1")]);
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
+/// Answer `stream` with 503 and `Retry-After`. None of the request ran.
+fn refuse(stream: &TcpStream, retry_after: u64, reason: &str) {
+    let secs = retry_after.max(1).to_string();
+    let _ = write_response(stream, &busy(reason), &[("Retry-After", &secs)]);
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// The deadline passed while the request was waiting. It did not run.
+fn reply_expired(stream: &TcpStream) {
+    reply(
+        stream,
+        &Response::json(
+            408,
+            r#"{"error":"the deadline passed before this request ran"}"#.to_string(),
+        ),
+    );
+}
+
 /// The answer to a request this writer has no room for: none of it ran, so
 /// the client may send it again.
-fn busy() -> Response {
-    Response::json(
-        503,
-        r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#
-            .to_string(),
-    )
+fn busy(reason: &str) -> Response {
+    Response::json(503, format!(r#"{{"error":"packsetd is busy: {reason}"}}"#))
 }
 
 fn reason(code: u16) -> &'static str {
@@ -601,6 +665,7 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
     let mut chunked = false;
     let mut expect_continue = false;
     let mut authorization = None;
+    let mut deadline_ms = None;
     loop {
         line.clear();
         let n = read_line(&mut reader, &mut line, &mut head_len)?;
@@ -641,6 +706,8 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
             expect_continue = true;
         } else if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("x-packset-deadline") && deadline_ms.is_none() {
+            deadline_ms = value.parse().ok();
         }
     }
     let wants_body = chunked || length.is_some_and(|n| n > 0);
@@ -667,6 +734,7 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
         method: Method::parse(method),
         target: target.to_string(),
         authorization,
+        deadline_ms,
         body,
     })
 }
@@ -953,11 +1021,11 @@ mod tests {
 
     #[test]
     fn parked_bodies_stay_within_one_request() {
-        assert!(park_body(0, MAX_BODY, 128, 0));
-        assert!(!park_body(MAX_BODY, 1, 128, 1));
-        assert!(!park_body(1, MAX_BODY, 128, 1));
-        assert!(park_body(0, 0, 128, 127));
-        assert!(!park_body(0, 0, 128, 128));
+        assert!(admit::park_body(0, MAX_BODY, 128, 0));
+        assert!(!admit::park_body(MAX_BODY, 1, 128, 1));
+        assert!(!admit::park_body(1, MAX_BODY, 128, 1));
+        assert!(admit::park_body(0, 0, 128, 127));
+        assert!(!admit::park_body(0, 0, 128, 128));
     }
 
     #[test]
@@ -965,6 +1033,7 @@ mod tests {
         assert_eq!(dear_limit(4), 3);
         assert_eq!(dear_limit(1), 1);
         assert!(is_cheap(&Method::Get, "/health"));
+        assert!(is_cheap(&Method::Get, "/stats"));
         assert!(is_cheap(&Method::Get, "/v1/status?workspace=seat"));
         assert!(is_cheap(&Method::Get, "/v1/workspaces"));
         assert!(is_cheap(&Method::Get, "/__inside_memd/health"));
@@ -1083,5 +1152,241 @@ mod tests {
             late_wait >= HOLD,
             "the parked search returned in {late_wait:?}"
         );
+    }
+
+    fn start_gate<H>(gate: Gate, handle: H) -> u16
+    where
+        H: Fn(&Request) -> Response + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || serve_with(&listener, gate, handle));
+        port
+    }
+
+    #[test]
+    fn compaction_is_maintenance_and_a_remember_is_a_write() {
+        assert_eq!(classify(&Method::Post, "/v1/compact"), Class::Maintenance);
+        assert_eq!(
+            classify(&Method::Post, "/v1/consolidate"),
+            Class::Maintenance
+        );
+        assert_eq!(classify(&Method::Post, "/v1/sweep"), Class::Maintenance);
+        assert_eq!(classify(&Method::Post, "/v1/atoms"), Class::Write);
+        assert_eq!(classify(&Method::Put, "/v1/memory"), Class::Write);
+        assert_eq!(
+            classify(&Method::Get, "/v1/search?workspace=seat&q=a"),
+            Class::Read
+        );
+    }
+
+    #[test]
+    fn a_deadline_that_has_passed_is_not_run() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&ran);
+        let port = start(2, 8, move |_: &Request| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Response::text(200, "ran")
+        });
+        let past = admit::unix_ms().saturating_sub(1_000);
+        let raw = format!("GET /v1/search?q=late HTTP/1.1\r\nX-Packset-Deadline: {past}\r\n\r\n");
+        let out = exchange(port, raw.as_bytes());
+        assert!(out.starts_with("HTTP/1.1 408 "), "{out}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let future = admit::unix_ms().saturating_add(60_000);
+        let raw = format!("GET /v1/search?q=soon HTTP/1.1\r\nX-Packset-Deadline: {future}\r\n\r\n");
+        let out = exchange(port, raw.as_bytes());
+        assert!(out.starts_with("HTTP/1.1 200 "), "{out}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// The slot is held. The request behind it names a deadline that passes
+    /// while it waits, so the handler never sees it.
+    #[test]
+    fn a_request_that_waits_past_its_deadline_is_not_run() {
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let (g, r) = (Arc::clone(&gate), Arc::clone(&ran));
+        let port = start(2, 8, move |request: &Request| {
+            r.fetch_add(1, Ordering::SeqCst);
+            if request.target.contains("hold") {
+                let _wait = g.lock();
+            }
+            Response::text(200, "ran")
+        });
+        let first =
+            std::thread::spawn(move || exchange(port, b"GET /v1/search?q=hold HTTP/1.1\r\n\r\n"));
+        while ran.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let soon = admit::unix_ms().saturating_add(80);
+        let raw = format!("GET /v1/search?q=queued HTTP/1.1\r\nX-Packset-Deadline: {soon}\r\n\r\n");
+        let second = std::thread::spawn(move || exchange(port, raw.as_bytes()));
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held);
+        assert!(first.join().unwrap().starts_with("HTTP/1.1 200 "));
+        let late = second.join().unwrap();
+        assert!(late.starts_with("HTTP/1.1 408 "), "{late}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the late search ran");
+    }
+
+    /// Writes fill their queue and come back 503. Reads that arrive beside
+    /// them still finish quickly, and the handler never runs more than the
+    /// slot count.
+    #[test]
+    fn a_flood_of_writes_is_shed_while_reads_stay_quick() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let writes_ran = Arc::new(AtomicUsize::new(0));
+        let gate = Gate::new(4, 8);
+        gate.pin_pressure(admit::Psi::quiet());
+        let (running_h, peak_h, writes_h) = (
+            Arc::clone(&running),
+            Arc::clone(&peak),
+            Arc::clone(&writes_ran),
+        );
+        let port = start_gate(gate.clone(), move |request: &Request| {
+            let now = running_h.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_h.fetch_max(now, Ordering::SeqCst);
+            let read = request.target.contains("/v1/search");
+            if read {
+                std::thread::sleep(Duration::from_millis(30));
+            } else {
+                writes_h.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            running_h.fetch_sub(1, Ordering::SeqCst);
+            Response::text(200, if read { "read" } else { "write" })
+        });
+
+        let rss_before = rss_kib();
+        let primed = Arc::clone(&writes_ran);
+        let prime = std::thread::spawn(move || {
+            exchange(
+                port,
+                b"POST /v1/atoms HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+            )
+        });
+        let started = Instant::now();
+        while primed.load(Ordering::SeqCst) == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the first write did not start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let mut joins = Vec::new();
+        for i in 0..24 {
+            joins.push(std::thread::spawn(move || {
+                let body = format!(r#"{{"n":{i}}}"#);
+                let raw = format!(
+                    "POST /v1/atoms HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let began = Instant::now();
+                let out = exchange(port, raw.as_bytes());
+                ("write", began.elapsed(), out)
+            }));
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        for i in 0..8 {
+            joins.push(std::thread::spawn(move || {
+                let raw = format!("GET /v1/search?q={i} HTTP/1.1\r\n\r\n");
+                let began = Instant::now();
+                let out = exchange(port, raw.as_bytes());
+                ("read", began.elapsed(), out)
+            }));
+        }
+
+        let stop = Arc::new(AtomicUsize::new(0));
+        let watch_gate = gate.clone();
+        let watch_stop = Arc::clone(&stop);
+        let high = Arc::new(Mutex::new((0usize, 0usize)));
+        let high_w = Arc::clone(&high);
+        let watcher = std::thread::spawn(move || {
+            let mut max_depth = 0usize;
+            let mut max_flight = 0usize;
+            while watch_stop.load(Ordering::SeqCst) == 0 {
+                let snap = watch_gate.snapshot();
+                max_depth = max_depth.max(snap.write_depth);
+                let flight = snap.read_in_flight + snap.write_in_flight + snap.maint_in_flight;
+                max_flight = max_flight.max(flight);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            *high_w.lock().unwrap() = (max_depth, max_flight);
+        });
+
+        let mut write_shed = 0usize;
+        let mut read_ok = 0usize;
+        let mut read_slow = Duration::ZERO;
+        for join in joins {
+            let (kind, took, out) = join.join().unwrap();
+            if kind == "write" {
+                if out.starts_with("HTTP/1.1 503 ") {
+                    assert!(
+                        out.contains("Retry-After: "),
+                        "a shed write had no Retry-After: {out}"
+                    );
+                    write_shed += 1;
+                } else {
+                    assert!(out.starts_with("HTTP/1.1 200 "), "{out}");
+                }
+            } else if out.starts_with("HTTP/1.1 200 ") {
+                read_ok += 1;
+                read_slow = read_slow.max(took);
+            } else {
+                panic!("a read was not answered: {out}");
+            }
+        }
+        let prime_out = prime.join().unwrap();
+        assert!(prime_out.starts_with("HTTP/1.1 200 "), "{prime_out}");
+        stop.store(1, Ordering::SeqCst);
+        watcher.join().unwrap();
+        let (max_depth, max_flight) = *high.lock().unwrap();
+        let rss_after = rss_kib();
+        let rss_delta = rss_after.saturating_sub(rss_before);
+        eprintln!(
+            "overload writes_shed={write_shed} writes_ran={} reads_ok={read_ok} read_max_ms={:.1} peak_handler={} max_write_depth={max_depth} max_in_flight={max_flight} rss_delta_kib={rss_delta}",
+            writes_ran.load(Ordering::SeqCst),
+            read_slow.as_secs_f64() * 1000.0,
+            peak.load(Ordering::SeqCst),
+        );
+
+        assert!(write_shed >= 8, "only {write_shed} writes were shed");
+        assert_eq!(read_ok, 8, "a read was shed or lost");
+        assert!(
+            read_slow < Duration::from_millis(1_500),
+            "a read took {read_slow:?}"
+        );
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "handler peak {}",
+            peak.load(Ordering::SeqCst)
+        );
+        assert!(max_depth <= 2, "write queue depth {max_depth}");
+        assert!(max_flight <= 3, "in flight {max_flight}");
+        if rss_before > 0 {
+            assert!(rss_delta < 64 * 1024, "rss grew by {rss_delta} KiB");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rss_kib() -> u64 {
+        let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        text.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix("VmRSS")?.strip_prefix(':')?;
+                rest.split_whitespace().next()?.parse().ok()
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn rss_kib() -> u64 {
+        0
     }
 }
