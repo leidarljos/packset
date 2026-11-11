@@ -4,6 +4,28 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.17.7 (2026-11-11)
+
+- A reader that had already seen a live snapshot could then be shown a
+  shorter one.
+  The snapshot was rebuilt from the database in the gap after a write
+  committed and before that write was published, so the rebuild contained
+  a record the published snapshot did not. The following read served the
+  published snapshot, and the count went backwards.
+  A write now publishes the commit and the snapshot before any rebuild
+  can see that commit, and a rebuild that finds a snapshot already
+  published for that generation keeps it. Pages of the database file are
+  dropped only while no reader is in the map.
+- Linux release archives are built on Ubuntu 22.04, so packset, packsetd,
+  packset-mcp and packset-embed need only glibc 2.35.
+  The Open Neural Network Exchange (ONNX) Runtime is compiled from source
+  on that release, which keeps the encoder on the same floor.
+  Ubuntu 22.04's CMake package is 3.22 and the runtime requires 3.28, so
+  the job installs the CMake 3.28.6 binary first.
+  That binary is a build tool and is not linked into the archive.
+  The release job checks every Linux binary and stops when one needs a
+  glibc symbol newer than 2.35.
+
 ## 0.17.6 (2026-11-11)
 
 - Reads, writes and maintenance wait in their own queues, and a read is served
