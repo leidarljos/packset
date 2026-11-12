@@ -4,6 +4,25 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.17.8 (2026-11-11)
+
+- `packsetd` stays up under bursts and uses less memory.
+  A read takes a slot ahead of any queued write and is served from the
+  snapshot the writer last swapped in, so a write in progress does not
+  block it.
+  A request whose deadline cannot be met is answered 503 with
+  `Retry-After` and does not run.
+  When the encoder is down, a search is ranked by words.
+  The cache cap is 128 MiB of atoms, indexes and snapshots.
+  `--cache-mb` or `PACKSET_CACHE_MB` sets it, and past it `packsetd` drops
+  the least recently used workspace.
+  The encoder child stops after five minutes with no call and starts on
+  the next one, set with `--embed-idle-min` or `PACKSET_EMBED_IDLE_MIN`.
+  `/metrics` reports queue depth, sheds, latency per class and
+  `cache_bytes`.
+- arm64 release builds fall back to `ubuntu-ports` mirrors when the
+  derived mirror has no ports archive.
+
 ## 0.17.7 (2026-11-11)
 
 - A reader that had already seen a live snapshot could then be shown a

@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.17.7"
+version = "0.17.8"
 publish = true
 rust-version = "1.88"
 repository = "https://github.com/leidarljos/packset"
@@ -37,6 +37,6 @@ thiserror = "2"
 # from workspace_version import workspace_dependency_lines
 # cog.out(workspace_dependency_lines())
 # ]]]
-packset-client = { path = "crates/packset-client", version = "0.17.7" }
-packset-core = { path = "crates/packset-core", version = "0.17.7" }
+packset-client = { path = "crates/packset-client", version = "0.17.8" }
+packset-core = { path = "crates/packset-core", version = "0.17.8" }
 # [[[end]]]
