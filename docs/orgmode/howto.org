@@ -237,12 +237,26 @@ ran with nothing waiting, and it grows back one at a time. On a quiet seat
 the limits stay at the ceiling and a request does not wait.
 
 A full queue answers 503 with =Retry-After= and does not run the request.
-On Linux, memory pressure does the same to maintenance first and then to
-writes; reads are turned away only when the machine is stalled. Other
-systems have no pressure files, and then only a full queue sheds. =/health=
-still answers. =GET /stats= needs no token, like =/health=, and reports each
-queue's depth, the shed counts and the limits. Its =line= is =ok=, or
-=busy, retrying= when work is waiting or writes are being turned away.
+On Linux, memory pressure is the ten-second stall share from
+=/proc/pressure=, smoothed with an exponentially weighted moving average,
+and the mode latches with hysteresis. One sample does not flip it, and a
+short spike has to show in the sixty-second share as well. That is the
+shape of CockroachDB admission control, which sheds background work before
+foreground writes, and of Redis =maxmemory-policy=, which refuses one class
+of write and keeps another. While the mode is on, maintenance is paused:
+compaction, consolidate, sweep, reindex and embed backfill. A bulk write,
+one whose body is over 32 KiB, is answered 503. A small append is admitted.
+It is synced to an append log of 8 MiB (=PACKSET_APPEND_LOG_MB=) before the
+answer, so a crash keeps it, and the atom is stored. The log is the only
+reason a small append is answered 503, and then =Retry-After= says when to
+ask again. Shedding the small write would not free memory on a host whose
+stall is coming from other processes. Reads are turned away only when the
+machine is stalled for everyone. Other systems have no pressure files, and
+then only a full queue sheds. =/health= still answers. =GET /stats= and
+=GET /metrics= need no token. They report each queue's depth, the shed
+counts, the limits, the smoothed pressure and the append log. =line= is
+=ok=, or =busy, retrying= when work is waiting or bulk writes are being
+turned away.
 
 The client sends =X-Packset-Deadline=, the end of its budget. A request
 still waiting after that is not run. =packset-client= asks again after 503

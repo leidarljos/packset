@@ -64,12 +64,31 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
+/// Writes a body as it is produced.
+type BodyWriter = Box<dyn FnMut(&mut dyn Write) -> io::Result<()> + Send>;
+
 /// An answer: a status, a content type and the bytes.
-#[derive(Debug)]
 pub struct Response {
     pub code: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// `Retry-After` when the answer is a shed.
+    pub retry_after: Option<u64>,
+    /// When set, the body is written as it is produced and `body` is empty.
+    /// A listing uses this so the worker does not hold the whole answer twice.
+    pub stream: Option<BodyWriter>,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("code", &self.code)
+            .field("content_type", &self.content_type)
+            .field("body_len", &self.body.len())
+            .field("retry_after", &self.retry_after)
+            .field("stream", &self.stream.is_some())
+            .finish()
+    }
 }
 
 impl Response {
@@ -79,6 +98,8 @@ impl Response {
             code,
             content_type: "application/json",
             body: body.into_bytes(),
+            retry_after: None,
+            stream: None,
         }
     }
 
@@ -88,6 +109,8 @@ impl Response {
             code,
             content_type: "text/plain",
             body: body.as_bytes().to_vec(),
+            retry_after: None,
+            stream: None,
         }
     }
 }
@@ -188,6 +211,11 @@ impl Gate {
     #[cfg(test)]
     pub(crate) fn pin_pressure(&self, psi: admit::Psi) {
         self.lock().pin_pressure(psi);
+    }
+
+    /// Share the append log with admission, so a full log sheds.
+    pub(crate) fn watch_log(&self, log: std::sync::Arc<admit::LogUsage>) {
+        self.lock().watch_log(log);
     }
 
     pub(crate) fn snapshot(&self) -> admit::Snapshot {
@@ -359,7 +387,7 @@ where
             Err(ReadError::Refuse(code, why)) => {
                 reply(
                     &waiting.stream,
-                    &Response::json(code, serde_json::json!({ "error": why }).to_string()),
+                    &mut Response::json(code, serde_json::json!({ "error": why }).to_string()),
                 );
                 continue;
             }
@@ -375,7 +403,11 @@ where
             request,
         };
         match gate.arrive(held) {
-            Decision::Run { class, body } => run_admitted(class, body, gate, handle),
+            Decision::Run {
+                class,
+                body,
+                pressure_append,
+            } => run_admitted(class, body, pressure_append, gate, handle),
             Decision::Queued => {}
             Decision::Shed {
                 body,
@@ -389,18 +421,30 @@ where
 
 /// Run `held`, then the next admitted request, until the queues have
 /// nothing this worker can start.
-fn run_admitted<H>(mut class: Class, mut held: Held, gate: &Gate, handle: &H)
-where
+fn run_admitted<H>(
+    mut class: Class,
+    mut held: Held,
+    mut pressure_append: bool,
+    gate: &Gate,
+    handle: &H,
+) where
     H: Fn(&Request) -> Response,
 {
     loop {
+        let _pressure = pressure_append.then(admit::PressureGuard::enter);
         let sample = dispatch(&held, handle);
+        drop(_pressure);
         gate.finish(class, sample);
         loop {
             match gate.take() {
-                Next::Run { class: next, body } => {
+                Next::Run {
+                    class: next,
+                    body,
+                    pressure_append: append,
+                } => {
                     class = next;
                     held = body;
+                    pressure_append = append;
                     break;
                 }
                 Next::Expired(body) => reply_expired(&body.stream),
@@ -442,11 +486,11 @@ where
     if abandoned(stream) {
         return false;
     }
-    let response = run(request, accepted, handle);
+    let mut response = run(request, accepted, handle);
     // A listing is the bytes of every atom. Give that buffer back once it
     // has been written, or the worker's arena keeps the high-water mark.
-    let heavy = response.body.len() >= 64 * 1024;
-    reply(stream, &response);
+    let heavy = response.body.len() >= 64 * 1024 || response.stream.is_some();
+    reply(stream, &mut response);
     drop(response);
     if heavy {
         crate::store::release_heap();
@@ -454,7 +498,7 @@ where
     true
 }
 
-fn reply(stream: &TcpStream, response: &Response) {
+fn reply(stream: &TcpStream, response: &mut Response) {
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let _ = write_response(stream, response, &[]);
     let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -526,19 +570,19 @@ fn shed(stream: &TcpStream) {
     }
     let probe =
         head[..seen].starts_with(b"GET /health ") || head[..seen].starts_with(b"GET /stats ");
-    let response = if probe {
+    let mut response = if probe {
         Response::text(200, "packsetd ok, busy")
     } else {
         busy("the connection queue is full; try again")
     };
-    let _ = write_response(stream, &response, &[("Retry-After", "1")]);
+    let _ = write_response(stream, &mut response, &[("Retry-After", "1")]);
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// Answer `stream` with 503 and `Retry-After`. None of the request ran.
 fn refuse(stream: &TcpStream, retry_after: u64, reason: &str) {
     let secs = retry_after.max(1).to_string();
-    let _ = write_response(stream, &busy(reason), &[("Retry-After", &secs)]);
+    let _ = write_response(stream, &mut busy(reason), &[("Retry-After", &secs)]);
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
@@ -546,7 +590,7 @@ fn refuse(stream: &TcpStream, retry_after: u64, reason: &str) {
 fn reply_expired(stream: &TcpStream) {
     reply(
         stream,
-        &Response::json(
+        &mut Response::json(
             408,
             r#"{"error":"the deadline passed before this request ran"}"#.to_string(),
         ),
@@ -579,9 +623,12 @@ fn reason(code: u16) -> &'static str {
 
 fn write_response(
     mut stream: &TcpStream,
-    response: &Response,
+    response: &mut Response,
     extra: &[(&str, &str)],
 ) -> io::Result<()> {
+    if response.stream.is_some() {
+        return write_chunked(stream, response, extra);
+    }
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.code,
@@ -595,11 +642,95 @@ fn write_response(
         head.push_str(value);
         head.push_str("\r\n");
     }
+    if let Some(secs) = response.retry_after {
+        head.push_str(&format!("Retry-After: {secs}\r\n"));
+    }
     head.push_str("\r\n");
-    let mut out = head.into_bytes();
-    out.extend_from_slice(&response.body);
-    stream.write_all(&out)?;
+    // The head and the body stay apart. Joining them kept a second copy of
+    // a listing until the write finished.
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(&response.body)?;
     stream.flush()
+}
+
+/// Chunked transfer of a body that is produced as it is written. Each
+/// chunk is at most 16 KiB, so a listing does not accumulate.
+fn write_chunked(
+    mut stream: &TcpStream,
+    response: &mut Response,
+    extra: &[(&str, &str)],
+) -> io::Result<()> {
+    let Some(mut produce) = response.stream.take() else {
+        return Ok(());
+    };
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n",
+        response.code,
+        reason(response.code),
+        response.content_type
+    );
+    for (name, value) in extra {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    if let Some(secs) = response.retry_after {
+        head.push_str(&format!("Retry-After: {secs}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    let mut chunked = Chunked::new(stream);
+    produce(&mut chunked)?;
+    chunked.finish()?;
+    stream.flush()
+}
+
+/// Buffers up to 16 KiB, then writes one HTTP chunk.
+struct Chunked<W> {
+    inner: W,
+    buf: Vec<u8>,
+}
+
+impl<W: Write> Chunked<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            buf: Vec::with_capacity(16 * 1024),
+        }
+    }
+
+    fn flush_buf(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        write!(self.inner, "{:x}\r\n", self.buf.len())?;
+        self.inner.write_all(&self.buf)?;
+        self.inner.write_all(b"\r\n")?;
+        self.buf.clear();
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.flush_buf()?;
+        self.inner.write_all(b"0\r\n\r\n")?;
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for Chunked<W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= 16 * 1024 {
+            self.flush_buf()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_buf()?;
+        self.inner.flush()
+    }
 }
 
 /// Reads with one deadline for the whole request. Each read waits only for

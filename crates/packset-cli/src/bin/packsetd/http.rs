@@ -136,6 +136,10 @@ fn positive_env(name: &str) -> Option<usize> {
         .filter(|n| *n > 0)
 }
 
+/// Writes a body as it is produced. A listing uses this so the bytes of
+/// every atom are not also one buffer.
+type BodyWriter = Box<dyn FnMut(&mut dyn std::io::Write) -> std::io::Result<()> + Send>;
+
 /// What a route decided to answer.
 struct Answer {
     code: u16,
@@ -144,6 +148,14 @@ struct Answer {
     /// are not also a tree of values. `body` is filled from these bytes
     /// in tests; a release build leaves it null.
     raw: Option<Vec<u8>>,
+    /// `Retry-After`, and a body written straight to the socket. Boxed so
+    /// a route that returns `Result<_, Answer>` stays small.
+    extra: Option<Box<AnswerExtra>>,
+}
+
+struct AnswerExtra {
+    retry_after: Option<u64>,
+    stream: Option<BodyWriter>,
 }
 
 impl Answer {
@@ -152,6 +164,7 @@ impl Answer {
             code: 200,
             body,
             raw: None,
+            extra: None,
         }
     }
 
@@ -160,26 +173,19 @@ impl Answer {
             code,
             body: json!({ "error": message.to_string() }),
             raw: None,
+            extra: None,
         }
     }
 
-    /// An answer whose bytes are already JSON. Tests read [`Self::body`]
-    /// back from those bytes; the process that serves does not build the tree.
-    fn json_bytes(raw: Vec<u8>) -> Self {
-        let body = if cfg!(test) {
-            serde_json::from_slice(&raw).unwrap_or_else(|err| {
-                panic!(
-                    "the atom list is not JSON: {err}: {}",
-                    String::from_utf8_lossy(&raw)
-                )
-            })
-        } else {
-            Value::Null
-        };
+    fn busy(message: impl std::fmt::Display) -> Self {
         Self {
-            code: 200,
-            body,
-            raw: Some(raw),
+            code: 503,
+            body: json!({ "error": format!("packsetd is busy: {message}") }),
+            raw: None,
+            extra: Some(Box::new(AnswerExtra {
+                retry_after: Some(1),
+                stream: None,
+            })),
         }
     }
 }
@@ -223,6 +229,7 @@ pub fn serve(
     let busy = Arc::new(AtomicU64::new(unix_millis()));
     start_idle_release(Arc::clone(&service), Arc::clone(&busy), idle_trim_after());
     let gate = wire::Gate::new(workers, queue);
+    gate.watch_log(service.log_usage());
     wire::serve_with(&listener, gate.clone(), move |request| {
         note_busy(&busy, &request.method, &request.target);
         if request.method == Method::Get {
@@ -739,7 +746,10 @@ fn route(
                 cheap_answer(service.compact(&workspace, day, transcript))
             }
         },
-        (Method::Post, "/v1/atoms") => answer(service.add(body.clone()).map(stored)),
+        (Method::Post, "/v1/atoms") => match service.add(body.clone()) {
+            Err(err) if err.downcast_ref::<crate::journal::Full>().is_some() => Answer::busy(err),
+            other => answer(other.map(stored)),
+        },
         (Method::Post, "/v1/atoms/update") => {
             let (Some(workspace), Some(id)) = (
                 body.get("workspace").and_then(Value::as_str),
@@ -1034,43 +1044,103 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn encode(answer: Answer) -> wire::Response {
+fn encode(mut answer: Answer) -> wire::Response {
+    let extra = answer.extra.take();
+    let retry_after = extra.as_ref().and_then(|extra| extra.retry_after);
+    if let Some(stream) = extra.and_then(|extra| extra.stream) {
+        return wire::Response {
+            code: answer.code,
+            content_type: "application/json",
+            body: Vec::new(),
+            retry_after,
+            stream: Some(stream),
+        };
+    }
     if let Some(body) = answer.raw {
         return wire::Response {
             code: answer.code,
             content_type: "application/json",
             body,
+            retry_after,
+            stream: None,
         };
     }
     let body = serde_json::to_string(&answer.body).unwrap_or_else(|_| "{}".into());
-    wire::Response::json(answer.code, body)
+    let mut response = wire::Response::json(answer.code, body);
+    response.retry_after = retry_after;
+    response
 }
 
-/// The live listing as JSON bytes, one atom in hand at a time.
+/// The live listing, written one atom at a time. The socket sees each atom
+/// as it is encoded, so a pack of thousands is not a second copy of the
+/// listing in the worker.
 fn atoms_answer(
     atoms: &[std::sync::Arc<crate::store::Record>],
     originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
     omit: bool,
     kind: Option<&str>,
 ) -> Answer {
-    let mut raw = Vec::new();
-    raw.extend_from_slice(br#"{"atoms":["#);
+    let owned_atoms = atoms.to_vec();
+    let owned_originals = originals.clone();
+    let owned_kind = kind.map(str::to_string);
+    let body = if cfg!(test) {
+        let mut raw = Vec::new();
+        if write_listing(
+            &mut raw,
+            &owned_atoms,
+            &owned_originals,
+            omit,
+            owned_kind.as_deref(),
+        )
+        .is_err()
+        {
+            return Answer::err(500, "could not write the atom list");
+        }
+        serde_json::from_slice(&raw).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    Answer {
+        code: 200,
+        body,
+        raw: None,
+        extra: Some(Box::new(AnswerExtra {
+            retry_after: None,
+            stream: Some(Box::new(move |out| {
+                write_listing(
+                    out,
+                    &owned_atoms,
+                    &owned_originals,
+                    omit,
+                    owned_kind.as_deref(),
+                )
+            })),
+        })),
+    }
+}
+
+fn write_listing(
+    mut out: impl std::io::Write,
+    atoms: &[std::sync::Arc<crate::store::Record>],
+    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
+    omit: bool,
+    kind: Option<&str>,
+) -> std::io::Result<()> {
+    out.write_all(br#"{"atoms":["#)?;
     let mut first = true;
     for atom in atoms {
         if kind.is_some_and(|k| atom.get("kind").and_then(Value::as_str) != Some(k)) {
             continue;
         }
         if !first {
-            raw.push(b',');
+            out.write_all(b",")?;
         }
         first = false;
         let one = listed(atom, originals, omit);
-        if serde_json::to_writer(&mut raw, &one).is_err() {
-            return Answer::err(500, "could not write the atom list");
-        }
+        serde_json::to_writer(&mut out, &one).map_err(std::io::Error::other)?;
     }
-    raw.extend_from_slice(b"]}");
-    Answer::json_bytes(raw)
+    out.write_all(b"]}")?;
+    Ok(())
 }
 
 #[cfg(test)]

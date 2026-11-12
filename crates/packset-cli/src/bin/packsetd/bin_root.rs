@@ -12,6 +12,7 @@ pub mod embed;
 pub mod glob;
 pub mod home;
 pub mod http;
+pub mod journal;
 pub mod milli;
 pub mod proposals;
 mod run;

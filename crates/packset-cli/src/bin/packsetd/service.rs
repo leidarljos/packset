@@ -112,6 +112,11 @@ fn hold_key(recent: &mut HashMap<String, std::time::Instant>, key: String, cap: 
 pub struct Service {
     home: Home,
     store: Store,
+    /// Small appends admitted under memory pressure, durable before the
+    /// answer is sent. Folded once the pressure mode clears.
+    journal: Mutex<crate::journal::AppendLog>,
+    /// Shared with the admission gate so a full log is refused there.
+    log_usage: Arc<crate::admit::LogUsage>,
     attach: Mutex<BTreeMap<String, HeldAttach>>,
     /// One logical write at a time. LMDB serialises transactions, not the
     /// read-check-write a dedupe or a grade is, so two identical remembers
@@ -142,7 +147,7 @@ pub struct Service {
     /// Workspaces whose live set has been shaped once in this process; after
     /// that every write shapes what it wrote, so the postings stay whole
     /// without a pass over the pack. Cleared when that workspace is dropped
-    /// to make room, not when it alone is over the cap.
+    /// to make room, including when it alone is over the byte cap.
     shaped: Mutex<BTreeSet<String>>,
     /// Live claims by workspace and set. A write used to walk the whole
     /// workspace under the lock to find the set it belongs to; the dedup
@@ -780,6 +785,39 @@ fn retraction_live_at(atom: &Record, at: &str) -> bool {
     packset_core::atom::is_live_at(false, from, Some(until), at)
 }
 
+fn shape_bytes(shape: &record::Shape) -> usize {
+    fn set_bytes(set: &BTreeSet<String>) -> usize {
+        set.iter().fold(set.len().saturating_mul(40), |sum, text| {
+            sum.saturating_add(text.len())
+        })
+    }
+    set_bytes(&shape.tokens)
+        .saturating_add(set_bytes(&shape.entities))
+        .saturating_add(set_bytes(&shape.gate))
+        .saturating_add(
+            shape
+                .head
+                .iter()
+                .fold(shape.head.len().saturating_mul(24), |sum, text| {
+                    sum.saturating_add(text.len())
+                }),
+        )
+        .saturating_add(32)
+}
+
+fn journal_cap_from_env() -> usize {
+    match std::env::var("PACKSET_APPEND_LOG_MB") {
+        Ok(raw) => match raw.trim() {
+            "" => crate::journal::DEFAULT_CAP,
+            n => n
+                .parse::<usize>()
+                .map(|mebibytes| mebibytes.saturating_mul(1024 * 1024).max(1))
+                .unwrap_or(crate::journal::DEFAULT_CAP),
+        },
+        Err(_) => crate::journal::DEFAULT_CAP,
+    }
+}
+
 impl Service {
     /// Open the pack at `home`.
     ///
@@ -793,9 +831,21 @@ impl Service {
             eprintln!("{line}");
         }
         let store = Store::open(home.root())?;
+        let cap = journal_cap_from_env();
+        let log_usage = Arc::new(crate::admit::LogUsage::new(cap));
+        let mut journal = crate::journal::AppendLog::open(home.root().join("append.log"), cap)?;
+        for bytes in journal.records()? {
+            if let Ok(record) = serde_json::from_slice::<Record>(&bytes) {
+                store.upsert(&record)?;
+            }
+        }
+        journal.clear()?;
+        log_usage.note(0);
         Ok(Self {
             home,
             store,
+            journal: Mutex::new(journal),
+            log_usage,
             attach: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(()),
             live_cap: live_cap_from_env(),
@@ -823,7 +873,19 @@ impl Service {
         if let Ok(mut pending) = self.projection.lock() {
             pending.extend(ops);
         }
-        if self.flush_scheduled.swap(true, Ordering::AcqRel) {
+        // Reindex is maintenance. Under pressure the ops wait, and the
+        // next quiet request flushes them.
+        if crate::admit::under_pressure() || self.log_usage.heavy.load(Ordering::Relaxed) {
+            return;
+        }
+        self.schedule_projection();
+    }
+
+    /// Start one flush of the queued projection, if one is not already
+    /// running and there is something to write.
+    fn schedule_projection(&self) {
+        let pending_len = self.projection.lock().map(|p| p.len()).unwrap_or(0);
+        if pending_len == 0 || self.flush_scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
         let pending = Arc::clone(&self.projection);
@@ -1090,10 +1152,12 @@ impl Service {
     }
 
     /// Drop atom caches the store has already evicted, then drop further
-    /// cold workspaces while the snapshots, indexes and atom caches
-    /// together sit over the byte cap. The last workspace stays: dropping
-    /// it would only rebuild it on the next read.
+    /// cached structures while the snapshots, indexes, shapes and live
+    /// sets together sit over the byte cap. The last workspace is not
+    /// exempt: a structure that does not fit is dropped, and the next
+    /// read builds it again only when it fits.
     pub(crate) fn maintain_cache(&self) {
+        self.sync_pressure();
         for name in self.store.take_evicted() {
             self.drop_live_sets(&name);
             self.drop_workspace_shapes(&name);
@@ -1102,17 +1166,107 @@ impl Service {
         if limit == 0 {
             return;
         }
+        self.store.trim_to_cap();
         for _ in 0..64 {
-            if self.cache_bytes_now() <= limit || self.store.cached_workspaces() <= 1 {
+            if self.cache_bytes_now() <= limit {
                 break;
             }
-            let Some(name) = self.store.coldest_workspace() else {
-                break;
-            };
-            self.store.evict_workspace(&name);
-            self.drop_live_sets(&name);
-            self.drop_workspace_shapes(&name);
+            if self.store.cached_workspaces() > 1 {
+                if let Some(name) = self.store.coldest_workspace() {
+                    self.store.evict_workspace(&name);
+                    self.drop_live_sets(&name);
+                    self.drop_workspace_shapes(&name);
+                    continue;
+                }
+            }
+            if self.drop_one_shapes() {
+                continue;
+            }
+            if self.drop_one_live() {
+                continue;
+            }
+            let before = self.store.cache_resident_bytes();
+            self.store.trim_to_cap();
+            if self.store.cache_resident_bytes() < before {
+                continue;
+            }
+            break;
         }
+    }
+
+    /// Fold the append log once pressure has cleared, and let a deferred
+    /// reindex run. While pressure holds, the log stays so its cap is the
+    /// bound on admitted appends.
+    fn sync_pressure(&self) {
+        let pressed =
+            crate::admit::under_pressure() || self.log_usage.heavy.load(Ordering::Relaxed);
+        if pressed {
+            return;
+        }
+        if let Ok(mut log) = self.journal.lock() {
+            if !log.is_empty() {
+                let _ = log.clear();
+                self.log_usage.note(0);
+            }
+        }
+        self.schedule_projection();
+    }
+
+    /// The admission gate reads this, so a full log is refused before the
+    /// request runs.
+    #[must_use]
+    pub fn log_usage(&self) -> Arc<crate::admit::LogUsage> {
+        Arc::clone(&self.log_usage)
+    }
+
+    /// The cap, for a test that wants a smaller log than the process default.
+    pub fn set_append_cap(&self, cap: usize) {
+        if let Ok(mut log) = self.journal.lock() {
+            log.set_cap(cap.max(1));
+            self.log_usage.cap.store(cap.max(1), Ordering::Relaxed);
+            self.log_usage.note(log.len());
+        }
+    }
+
+    /// Drop one workspace's shapes, including when it is the only one.
+    /// The shaped mark stays, so the next write shapes the new claim and
+    /// does not rebuild the pack that did not fit.
+    fn drop_one_shapes(&self) -> bool {
+        let name = {
+            let Ok(index) = self.shapes.read() else {
+                return false;
+            };
+            index
+                .iter()
+                .max_by_key(|(_, kept)| kept.by_id.len())
+                .map(|(name, _)| name.clone())
+        };
+        let Some(name) = name else {
+            return false;
+        };
+        if let Ok(mut index) = self.shapes.write() {
+            index.remove(&name);
+        }
+        true
+    }
+
+    /// Drop one workspace's live-set copy. The next write reads the store.
+    fn drop_one_live(&self) -> bool {
+        let name = {
+            let Ok(live) = self.live_sets.lock() else {
+                return false;
+            };
+            live.iter()
+                .max_by_key(|(_, kept)| {
+                    kept.sets.values().map(|set| set.order.len()).sum::<usize>()
+                })
+                .map(|(name, _)| name.clone())
+        };
+        let Some(name) = name else {
+            return false;
+        };
+        self.drop_live_sets(&name);
+        true
     }
 
     fn cache_bytes_now(&self) -> usize {
@@ -1134,11 +1288,23 @@ impl Service {
             Err(poisoned) => poisoned.into_inner(),
         };
         let atoms = live.values().fold(0usize, |sum, workspace| {
-            workspace.sets.values().fold(sum, |inner, set| {
-                set.order.iter().fold(inner, |bytes, record| {
+            let sets = workspace.sets.values().fold(0usize, |inner, set| {
+                let records = set.order.iter().fold(0usize, |bytes, record| {
                     bytes.saturating_add(crate::store::record_bytes(record))
-                })
-            })
+                });
+                let index = set
+                    .at
+                    .keys()
+                    .fold(set.at.len().saturating_mul(32), |bytes, id| {
+                        bytes.saturating_add(id.len())
+                    });
+                inner.saturating_add(records).saturating_add(index)
+            });
+            let place = workspace.place.iter().fold(
+                workspace.place.len().saturating_mul(48),
+                |bytes, (id, _)| bytes.saturating_add(id.len()),
+            );
+            sum.saturating_add(sets).saturating_add(place)
         });
         drop(live);
         let shapes = match self.shapes.read() {
@@ -1148,11 +1314,16 @@ impl Service {
         let shaped = shapes.values().fold(0usize, |sum, kept| {
             let posts = kept.postings.iter().fold(0usize, |inner, (key, ids)| {
                 inner
-                    .saturating_add(key.len())
+                    .saturating_add(key.len().saturating_add(64))
+                    .saturating_add(ids.len().saturating_mul(48))
                     .saturating_add(ids.iter().fold(0usize, |n, id| n.saturating_add(id.len())))
             });
-            sum.saturating_add(kept.by_id.len().saturating_mul(64))
-                .saturating_add(posts)
+            let bodies = kept.by_id.iter().fold(0usize, |inner, (id, shaped)| {
+                inner
+                    .saturating_add(id.len().saturating_add(64))
+                    .saturating_add(shape_bytes(&shaped.shape))
+            });
+            sum.saturating_add(bodies).saturating_add(posts)
         });
         atoms.saturating_add(shaped)
     }
@@ -1572,6 +1743,30 @@ impl Service {
     /// # Errors
     ///
     /// [`AtomError`] when the record does not validate, else the store's.
+    /// Sync `atom` into the append log. [`crate::journal::Full`] when the
+    /// cap would be passed, which the HTTP layer answers as 503.
+    fn journal_append(&self, atom: &Record) -> anyhow::Result<usize> {
+        let bytes = serde_json::to_vec(atom).unwrap_or_default();
+        let mut log = self.journal.lock().unwrap_or_else(|err| err.into_inner());
+        let prior = log.len();
+        match log.append(&bytes) {
+            Ok(()) => {
+                self.log_usage.note(log.len());
+                Ok(prior)
+            }
+            Err(crate::journal::AppendFailure::Full(full)) => Err(anyhow::Error::new(full)),
+            Err(crate::journal::AppendFailure::Io(err)) => Err(anyhow::Error::new(err)),
+        }
+    }
+
+    fn journal_rewind(&self, prior: usize) {
+        if let Ok(mut log) = self.journal.lock() {
+            if log.rewind(prior).is_ok() {
+                self.log_usage.note(log.len());
+            }
+        }
+    }
+
     pub fn add(&self, atom: Record) -> anyhow::Result<Record> {
         // Validation and the encoder run before the lock: the encode is the
         // slow part of a write and depends on the text alone.
@@ -1579,13 +1774,23 @@ impl Service {
         let started = std::time::Instant::now();
         let atom = self.prepare(atom)?;
         let prepared = started.elapsed();
-        if let Some(ws) = atom.get("workspace").and_then(Value::as_str) {
-            self.sweep_if_due(ws);
+        let journaled = if crate::admit::under_pressure() {
+            Some(self.journal_append(&atom)?)
+        } else {
+            None
+        };
+        if journaled.is_none() {
+            if let Some(ws) = atom.get("workspace").and_then(Value::as_str) {
+                self.sweep_if_due(ws);
+            }
         }
         let _write = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         let mut trace = WriteTrace::begin();
         trace.add("prepare", prepared);
         let written = self.add_prepared_traced(atom, trace, false);
+        if let (Some(prior), Err(_)) = (journaled, &written) {
+            self.journal_rewind(prior);
+        }
         self.store.release_after_write();
         written
     }
@@ -1898,6 +2103,12 @@ impl Service {
 
     /// Fill the vector slot when this seat has an encoder; null otherwise.
     fn encode_into(&self, atom: &mut Record) {
+        // Embed backfill is maintenance. A small append under pressure is
+        // stored without a vector; search ranks it by words until a quiet
+        // write fills the vector.
+        if crate::admit::under_pressure() || self.log_usage.heavy.load(Ordering::Relaxed) {
+            return;
+        }
         let text = atom.get("text").and_then(Value::as_str).unwrap_or_default();
         let Some(vector) = crate::embed::encode_document(text) else {
             return;
@@ -3446,6 +3657,98 @@ mod tests {
         let line = serde_json::to_string(&rec).unwrap();
         std::fs::write(&path, format!("{line}\n")).unwrap();
         "p-held"
+    }
+
+    #[test]
+    fn the_byte_cap_counts_shapes_and_holds_for_one_workspace() {
+        let (_dir, svc) = service();
+        let shape = record::Shape::of(&atom("alpha beta gamma"));
+        assert!(shape_bytes(&shape) >= "alpha".len() + "beta".len() + "gamma".len());
+        svc.store.set_cache_limit_bytes(0);
+        for i in 0..8 {
+            let text = (0..12)
+                .map(|word| format!("w{i}t{word}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            svc.add(atom(&text)).unwrap();
+        }
+        svc.store.searchable("w").unwrap();
+        let store_only = svc.store.cache_resident_bytes();
+        let full = svc.resident_cache_bytes();
+        assert!(svc.shape_count() > 0, "the claims were not shaped");
+        assert!(
+            full > store_only,
+            "shapes and live sets were not counted: {full} vs {store_only}"
+        );
+        let cap = (full / 3).max(1);
+        svc.store.set_cache_limit_bytes(cap);
+        let held = svc.resident_cache_bytes();
+        assert!(held <= cap, "held {held} cap {cap} full {full}");
+        assert_eq!(svc.store.live("w").unwrap().len(), 8);
+        let after = svc.resident_cache_bytes();
+        assert!(after <= cap, "a read left {after} cached, cap {cap}");
+    }
+
+    #[test]
+    fn a_small_append_under_pressure_is_journaled_and_a_full_log_is_refused() {
+        let (dir, svc) = service();
+        let _pressure = crate::admit::PressureGuard::enter();
+        svc.set_append_cap(8_000);
+        let stored = svc.add(atom("A short lesson about the fuse.")).unwrap();
+        let id = stored
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let path = dir.path().join("append.log");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            bytes
+                .windows(id.len())
+                .any(|window| window == id.as_bytes()),
+            "the lesson was not in the log"
+        );
+        assert_eq!(svc.store.live("w").unwrap().len(), 1);
+        let err = svc.add(atom(&"x".repeat(9_000))).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::journal::Full>().is_some(),
+            "{err}"
+        );
+        drop(_pressure);
+        svc.maintain_cache();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "the log was kept after pressure"
+        );
+    }
+
+    #[test]
+    fn a_crashed_append_is_replayed_when_the_pack_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = serde_json::to_vec(&json!({
+            "id": "kept",
+            "workspace": "w",
+            "text": "the lesson that must survive"
+        }))
+        .unwrap();
+        let mut log =
+            crate::journal::AppendLog::open(dir.path().join("append.log"), 1_000_000).unwrap();
+        log.append(&record).unwrap();
+        drop(log);
+        let svc = Service::open(Home::new(dir.path())).unwrap();
+        let live = svc.store.live("w").unwrap();
+        assert!(
+            live.iter()
+                .any(|atom| atom.get("id").and_then(Value::as_str) == Some("kept")),
+            "the journaled lesson was not replayed"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join("append.log"))
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     fn atom(text: &str) -> Record {

@@ -410,14 +410,12 @@ fn dense_slot() -> &'static Slot {
 /// child is replaced once and the text retried.
 #[must_use]
 /// How many query encoders the writer keeps. One encoder is one model in
-/// RAM. Default 1. `PACKSET_EMBED_QUERY_WORKERS` raises it; a pool of two
-/// was 4 GB on a laptop that also held a document encoder.
+/// RAM. `PACKSET_EMBED_QUERY_WORKERS` used to raise it; a pool of two was
+/// 4 GB on a laptop that also held a document encoder, and a cold start
+/// under pressure spawned one child per search. Concurrent searches wait
+/// on this one child. The variable is ignored.
 fn query_workers() -> usize {
-    std::env::var("PACKSET_EMBED_QUERY_WORKERS")
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .filter(|n: &usize| *n >= 1)
-        .unwrap_or(1)
+    1
 }
 
 /// The query encoders side by side. Sized once, the first time a pooled
@@ -1313,19 +1311,17 @@ for line in sys.stdin:
         assert!(seen.iter().all(|seen| *seen), "a text has no chunk");
     }
 
-    /// A document batch leaves a slot for a waiting query: with a query
-    /// on the pump, documents spread over one slot fewer, and with the
-    /// queue drained they spend the whole pool again. The queue is
-    /// borrowed directly without notifying, so the pump stays asleep and
-    /// there is no timing. Serialised on `EMBED` like the other tests
-    /// that touch process-global encoder state.
+    /// One encoder, whatever `PACKSET_EMBED_QUERY_WORKERS` says. Documents
+    /// and queries share that child, so a cold start cannot load the model
+    /// twice. The queue is borrowed directly without notifying, so the
+    /// pump stays asleep.
     #[test]
-    fn document_batches_leave_a_slot_for_a_waiting_query() {
+    fn one_encoder_is_shared_by_documents_and_queries() {
         let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
         let old_workers = std::env::var_os("PACKSET_EMBED_QUERY_WORKERS");
         // SAFETY: EMBED is held, so no other test reads this variable.
-        unsafe { std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", "2") };
-        let slots = pool_slots().len().max(1);
+        unsafe { std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", "4") };
+        let slots = pool_slots().len();
         let (tx, _rx) = std::sync::mpsc::sync_channel(1);
         {
             let (lock, _) = pending();
@@ -1349,10 +1345,11 @@ for line in sys.stdin:
             }
         }
         drop(_held);
-        assert!(slots >= 2, "the pool this test spreads over has one slot");
-        assert_eq!(throttled, slots - 1, "documents yield a slot to the query");
-        assert_eq!(free, slots, "idle documents spend the pool");
-        assert_eq!(queries, slots, "queries always spread");
+        assert_eq!(slots, 1, "a second encoder was kept");
+        assert_eq!(query_workers(), 1);
+        assert_eq!(throttled, 1);
+        assert_eq!(free, 1);
+        assert_eq!(queries, 1);
     }
 
     /// An explicit encoder beats any kept discovery: even if a burst has
@@ -1412,22 +1409,13 @@ for line in sys.stdin:
         assert_eq!(found, Some(plant));
     }
 
-    /// A pooled batch encodes on one child per free slot: four texts with
-    /// two workers start two stub children, not one child twice. The
-    /// stubs sleep before answering, so the second chunk cannot inherit
-    /// the first slot before it is free; two distinct child PIDs are the
-    /// assertion. No pump, no timing windows: `encode_spread` joins both
-    /// chunks itself. Serialised on `EMBED` with the other stub tests,
-    /// and the pool slots are cleared behind it. A stub logs its pid only
-    /// for this test's batch: a test that does not hold `EMBED` can
-    /// encode through the stub while `PACKSET_EMBED` names it.
+    /// Concurrent cold starts share one child. Four searches ask at once,
+    /// the stub sleeps before it answers, and one pid is written. A second
+    /// child would be a second model. Serialised on `EMBED`.
     #[test]
-    fn a_batch_encodes_on_one_child_per_free_slot() {
+    fn concurrent_cold_starts_share_one_encoder() {
         let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
-        let old_workers = std::env::var_os("PACKSET_EMBED_QUERY_WORKERS");
         let old_embed = std::env::var_os("PACKSET_EMBED");
-        // SAFETY: EMBED is held, so no other test reads these variables.
-        unsafe { std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", "2") };
         let dir = tempfile::tempdir().unwrap();
         let pids = dir.path().join("pids");
         let stub = dir.path().join("packset-embed");
@@ -1442,15 +1430,12 @@ for line in sys.stdin:
         asked = json.loads(line)
     except json.JSONDecodeError:
         continue
-    if any(text.startswith("spread ") for text in asked.get("texts", [])):
+    text = asked.get("text") or ""
+    if text.startswith("spread "):
         with log.open("a") as handle:
             handle.write(str(os.getpid()) + "\n")
-    time.sleep(0.2)
-    count = len(asked.get("texts", [])) or 1
-    if "texts" in asked:
-        print(json.dumps({{"vs": [[0.1]] * count}}), flush=True)
-    else:
-        print(json.dumps({{"v": [0.1]}}), flush=True)
+        time.sleep(0.2)
+    print(json.dumps({{"v": [0.1]}}), flush=True)
 "#,
                 log = pids.display()
             ),
@@ -1462,39 +1447,41 @@ for line in sys.stdin:
         std::fs::set_permissions(&stub, perm).unwrap();
         // SAFETY: EMBED is held, so no other test reads this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
-        for slot in pool_slots() {
-            if let Ok(mut held) = slot.lock() {
-                *held = None;
+        *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+        LAST_DENSE.store(0, Ordering::Relaxed);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                encode_now(&[format!("spread {i}")], true)
+            }));
+        }
+        let mut answered = 0usize;
+        for handle in handles {
+            if handle.join().unwrap().is_some() {
+                answered += 1;
             }
         }
-        let texts: Vec<String> = ["a", "b", "c", "d"]
-            .iter()
-            .map(|t| format!("spread {t}"))
-            .collect();
-        let vecs = encode_spread(&texts, true);
-        for slot in pool_slots() {
-            if let Ok(mut held) = slot.lock() {
-                *held = None;
-            }
-        }
+        *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
         unsafe {
-            match old_workers {
-                Some(v) => std::env::set_var("PACKSET_EMBED_QUERY_WORKERS", v),
-                None => std::env::remove_var("PACKSET_EMBED_QUERY_WORKERS"),
-            }
             match old_embed {
                 Some(v) => std::env::set_var("PACKSET_EMBED", v),
                 None => std::env::remove_var("PACKSET_EMBED"),
             }
         }
         drop(_held);
-        let vecs = vecs.expect("the stubs answer");
-        assert_eq!(vecs.len(), 4, "{vecs:?}");
+        assert_eq!(answered, 4, "a search was not answered");
         let lines = std::fs::read_to_string(&pids).unwrap();
         let mut ids: Vec<_> = lines.lines().collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 2, "one batch, two slots, two children: {lines}");
+        assert_eq!(
+            ids.len(),
+            1,
+            "cold starts spawned more than one encoder: {lines}"
+        );
     }
 
     /// An encoder that is on disk but does not answer is reported as not

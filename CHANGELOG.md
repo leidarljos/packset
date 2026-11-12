@@ -4,6 +4,19 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## Unreleased
+
+- The cache cap counts snapshots, indexes, shapes and live sets, including when one workspace is the whole cache.
+  Past the cap those structures are dropped until `cache_bytes` is inside it.
+  `GET /v1/atoms` is written as it is encoded, so the worker does not keep a second copy of the listing.
+- Under memory pressure a small append is synced to a bounded append log and stored.
+  Maintenance and a large write are answered 503 with `Retry-After`.
+  A small append is answered 503 only when that log is full.
+  The pressure mode follows a smoothed stall-share reading with hysteresis, so one spike does not flip it.
+- One encoder child serves every search.
+  Concurrent cold starts wait on that child instead of starting another.
+  The child still stops after it has been idle.
+
 ## 0.17.8 (2026-11-11)
 
 - `packsetd` stays up under bursts and uses less memory.

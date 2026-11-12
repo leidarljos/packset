@@ -67,8 +67,9 @@ fn is_map_full(err: &anyhow::Error) -> bool {
 }
 
 /// Cached atoms, indexes and snapshots, in bytes, when `PACKSET_CACHE_MB`
-/// is unset. 128 MiB is the whole of those copies, not the process. A
-/// workspace that was just read is kept even when it alone is larger.
+/// is unset. 128 MiB is the whole of those copies, not the process. Past
+/// it every cached structure is dropped, including the workspace just
+/// read, until the resident total is inside the cap.
 pub const DEFAULT_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Parsed workspaces kept at once when `PACKSET_WORKSPACE_CACHE` is unset.
@@ -107,12 +108,18 @@ fn cache_limit_from_env() -> usize {
     }
 }
 
+/// A small heap string is mostly the allocator chunk and the header.
+/// Counting characters alone left the cache a third of its real size.
+fn str_bytes(len: usize) -> usize {
+    len.saturating_add(16)
+}
+
 fn value_bytes(value: &Value) -> usize {
     match value {
         Value::Null => 0,
         Value::Bool(_) => 1,
-        Value::Number(number) => number.to_string().len(),
-        Value::String(text) => text.len(),
+        Value::Number(number) => str_bytes(number.to_string().len()),
+        Value::String(text) => str_bytes(text.len()),
         Value::Array(items) => items.iter().fold(items.len() * 8, |sum, item| {
             sum.saturating_add(value_bytes(item))
         }),
@@ -125,39 +132,70 @@ fn value_bytes(value: &Value) -> usize {
 }
 
 pub(crate) fn record_bytes(record: &Record) -> usize {
-    record.iter().fold(32, |sum, (key, value)| {
-        sum.saturating_add(key.len())
-            .saturating_add(16)
+    record.iter().fold(64, |sum, (key, value)| {
+        sum.saturating_add(str_bytes(key.len()))
             .saturating_add(value_bytes(value))
     })
 }
 
+/// Empty buckets and the map entry, on top of the bytes the caller counted.
+fn table_bytes(entries: usize) -> usize {
+    // hashbrown keeps an empty control byte per slot and a load factor
+    // under one, so the table is larger than the entries sitting in it.
+    entries.saturating_mul(48)
+}
+
 fn snapshot_bytes(snap: &Snapshot) -> usize {
-    let stored = snap.stored.iter().fold(0usize, |sum, record| {
-        sum.saturating_add(record_bytes(record))
-    });
-    let shown = snap.shown.iter().fold(0usize, |sum, record| {
-        sum.saturating_add(record_bytes(record))
-    });
-    let vectors = snap.vectors.values().fold(0usize, |sum, vector| {
-        sum.saturating_add(vector.len().saturating_mul(4))
-            .saturating_add(32)
-    });
-    let originals = snap.originals.values().fold(0usize, |sum, numbers| {
-        sum.saturating_add(numbers.len().saturating_mul(24))
-            .saturating_add(32)
-    });
+    let stored = snap
+        .stored
+        .iter()
+        .fold(table_bytes(snap.stored.len()), |sum, record| {
+            sum.saturating_add(record_bytes(record))
+        });
+    let shown = snap
+        .shown
+        .iter()
+        .fold(table_bytes(snap.shown.len()), |sum, record| {
+            sum.saturating_add(record_bytes(record))
+        });
+    let vectors = snap
+        .vectors
+        .iter()
+        .fold(table_bytes(snap.vectors.len()), |sum, (id, vector)| {
+            sum.saturating_add(id.len())
+                .saturating_add(vector.len().saturating_mul(4))
+                .saturating_add(32)
+        });
+    let originals =
+        snap.originals
+            .iter()
+            .fold(table_bytes(snap.originals.len()), |sum, (id, numbers)| {
+                sum.saturating_add(id.len())
+                    .saturating_add(
+                        numbers
+                            .len()
+                            .saturating_mul(std::mem::size_of::<serde_json::Number>()),
+                    )
+                    .saturating_add(32)
+            });
+    let dangling = snap
+        .dangling
+        .iter()
+        .fold(table_bytes(snap.dangling.len()), |sum, id| {
+            sum.saturating_add(id.len())
+        });
     stored
         .saturating_add(shown)
         .saturating_add(vectors)
         .saturating_add(originals)
+        .saturating_add(dangling)
 }
 
 fn documents_bytes(documents: &[Vec<String>]) -> usize {
     documents.iter().fold(0usize, |sum, document| {
-        sum.saturating_add(24)
+        sum.saturating_add(48)
             .saturating_add(document.iter().fold(0usize, |inner, token| {
-                inner.saturating_add(token.len()).saturating_add(24)
+                inner.saturating_add(str_bytes(token.len()))
             }))
     })
 }
@@ -165,9 +203,8 @@ fn documents_bytes(documents: &[Vec<String>]) -> usize {
 fn searchable_bytes(set: &Searchable) -> usize {
     let (_, (fingerprint, index, documents)) = set;
     let names = fingerprint.iter().fold(0usize, |sum, (id, hash)| {
-        sum.saturating_add(id.len())
-            .saturating_add(hash.len())
-            .saturating_add(16)
+        sum.saturating_add(str_bytes(id.len()))
+            .saturating_add(str_bytes(hash.len()))
     });
     names
         .saturating_add(index.resident_bytes())
@@ -1229,7 +1266,92 @@ impl Store {
         let indexes = terms
             .values()
             .fold(0usize, |sum, set| sum.saturating_add(searchable_bytes(set)));
-        snapshots.saturating_add(indexes)
+        drop(live);
+        drop(terms);
+        let counts = match self.counts.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let counted = counts.len().saturating_mul(256);
+        snapshots.saturating_add(indexes).saturating_add(counted)
+    }
+
+    /// Drop cached structures until [`Self::cache_resident_bytes`] is within
+    /// the cap. Indexes go before the vectors, and the vectors before the
+    /// records. The last snapshot goes too when it alone is over the cap:
+    /// the next read scans the database and does not install what will not
+    /// fit.
+    pub fn trim_to_cap(&self) {
+        let limit = self.cache_limit.load(Ordering::Relaxed);
+        if limit == 0 {
+            return;
+        }
+        for _ in 0..64 {
+            if self.cache_resident_bytes() <= limit {
+                return;
+            }
+            if self.cached_workspaces() > 1 {
+                if let Some(name) = self.coldest_workspace() {
+                    self.evict_workspace(&name);
+                    continue;
+                }
+            }
+            if self.drop_one_index() {
+                continue;
+            }
+            if self.drop_payloads() {
+                continue;
+            }
+            if let Some(name) = self.coldest_workspace() {
+                self.evict_workspace(&name);
+                continue;
+            }
+            if self.drop_one_index() {
+                continue;
+            }
+            return;
+        }
+    }
+
+    /// Drop the coldest search index. The next search builds it again.
+    fn drop_one_index(&self) -> bool {
+        let mut terms = match self.terms.write() {
+            Ok(terms) => terms,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if terms.is_empty() {
+            return false;
+        }
+        let name = {
+            let used = match self.cache_used.lock() {
+                Ok(used) => used,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            terms
+                .keys()
+                .min_by_key(|name| used.get(*name).copied().unwrap_or(0))
+                .cloned()
+        };
+        name.is_some_and(|name| terms.remove(&name).is_some())
+    }
+
+    /// Drop cached vectors and the original JSON numbers. The records stay.
+    /// A later read lifts the vectors out of the database again.
+    fn drop_payloads(&self) -> bool {
+        let mut live = match self.live.write() {
+            Ok(live) => live,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut dropped = false;
+        for snap in live.values_mut() {
+            if snap.vectors.is_empty() && snap.originals.is_empty() {
+                continue;
+            }
+            snap.vectors = Arc::new(HashMap::new());
+            snap.originals = Arc::new(HashMap::new());
+            dropped = true;
+        }
+        dropped
     }
 
     /// The least recently used cached workspace.
@@ -1751,9 +1873,16 @@ impl Store {
                 vectors,
                 originals,
                 generation,
-                installed: true,
+                installed: cache.contains_key(workspace),
             }
         };
+        self.trim_to_cap();
+        let mut snap = snap;
+        snap.installed = self
+            .live
+            .read()
+            .map(|cache| cache.contains_key(workspace))
+            .unwrap_or(false);
         // The parse of the log peaked well above what stays live, and glibc
         // keeps that peak in its arenas. The log holds every rewrite, so the
         // peak grew with each one and the writer's size followed the log,
@@ -1873,6 +2002,7 @@ impl Store {
                 self.evict_cached(&mut live, workspace);
             }
         }
+        self.trim_to_cap();
         Ok((atoms, index, documents, vectors))
     }
 
