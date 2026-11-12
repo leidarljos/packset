@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use heed::types::Bytes;
@@ -66,6 +66,11 @@ fn is_map_full(err: &anyhow::Error) -> bool {
     )
 }
 
+/// Cached atoms, indexes and snapshots, in bytes, when `PACKSET_CACHE_MB`
+/// is unset. 128 MiB is the whole of those copies, not the process. A
+/// workspace that was just read is kept even when it alone is larger.
+pub const DEFAULT_CACHE_BYTES: usize = 128 * 1024 * 1024;
+
 /// Parsed workspaces kept at once when `PACKSET_WORKSPACE_CACHE` is unset.
 /// Each one holds its live claims and the index over them. A dense vector
 /// is one copy of floats beside the record, not a JSON array on both
@@ -84,6 +89,89 @@ fn workspace_cache_from_env() -> usize {
         },
         Err(_) => DEFAULT_WORKSPACE_CACHE,
     }
+}
+
+/// The byte cap. `off`, `none` and `0` keep every workspace the count cap
+/// allows. Anything else is a number of mebibytes.
+fn cache_limit_from_env() -> usize {
+    match std::env::var("PACKSET_CACHE_MB") {
+        Ok(raw) => match raw.trim() {
+            "" => DEFAULT_CACHE_BYTES,
+            "off" | "none" | "0" => 0,
+            n => n
+                .parse::<usize>()
+                .map(|mebibytes| mebibytes.saturating_mul(1024 * 1024))
+                .unwrap_or(DEFAULT_CACHE_BYTES),
+        },
+        Err(_) => DEFAULT_CACHE_BYTES,
+    }
+}
+
+fn value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(text) => text.len(),
+        Value::Array(items) => items.iter().fold(items.len() * 8, |sum, item| {
+            sum.saturating_add(value_bytes(item))
+        }),
+        Value::Object(map) => map.iter().fold(0usize, |sum, (key, item)| {
+            sum.saturating_add(key.len())
+                .saturating_add(16)
+                .saturating_add(value_bytes(item))
+        }),
+    }
+}
+
+pub(crate) fn record_bytes(record: &Record) -> usize {
+    record.iter().fold(32, |sum, (key, value)| {
+        sum.saturating_add(key.len())
+            .saturating_add(16)
+            .saturating_add(value_bytes(value))
+    })
+}
+
+fn snapshot_bytes(snap: &Snapshot) -> usize {
+    let stored = snap.stored.iter().fold(0usize, |sum, record| {
+        sum.saturating_add(record_bytes(record))
+    });
+    let shown = snap.shown.iter().fold(0usize, |sum, record| {
+        sum.saturating_add(record_bytes(record))
+    });
+    let vectors = snap.vectors.values().fold(0usize, |sum, vector| {
+        sum.saturating_add(vector.len().saturating_mul(4))
+            .saturating_add(32)
+    });
+    let originals = snap.originals.values().fold(0usize, |sum, numbers| {
+        sum.saturating_add(numbers.len().saturating_mul(24))
+            .saturating_add(32)
+    });
+    stored
+        .saturating_add(shown)
+        .saturating_add(vectors)
+        .saturating_add(originals)
+}
+
+fn documents_bytes(documents: &[Vec<String>]) -> usize {
+    documents.iter().fold(0usize, |sum, document| {
+        sum.saturating_add(24)
+            .saturating_add(document.iter().fold(0usize, |inner, token| {
+                inner.saturating_add(token.len()).saturating_add(24)
+            }))
+    })
+}
+
+fn searchable_bytes(set: &Searchable) -> usize {
+    let (_, (fingerprint, index, documents)) = set;
+    let names = fingerprint.iter().fold(0usize, |sum, (id, hash)| {
+        sum.saturating_add(id.len())
+            .saturating_add(hash.len())
+            .saturating_add(16)
+    });
+    names
+        .saturating_add(index.resident_bytes())
+        .saturating_add(documents_bytes(documents))
 }
 
 /// One atom record.
@@ -119,6 +207,19 @@ pub struct LiveSnapshot {
     /// JSON numbers for each vector, as stored, for an answer to copy.
     pub originals: Arc<HashMap<String, Arc<[serde_json::Number]>>>,
     pub generation: u64,
+    /// Whether this set is the one a writer has published. A scan taken
+    /// while a write is held is not installed: the writer is about to
+    /// swap its own.
+    pub installed: bool,
+}
+
+/// Clears the writing flag when the publish lock is dropped.
+struct Writing<'a>(&'a AtomicBool);
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// A workspace's index at one generation: the id and content hash of
@@ -335,6 +436,7 @@ impl Store {
             // After the last commit, as in `forget_workspace`. The publish
             // lock keeps a rebuild from sampling the old generation and then
             // reading the bumped one.
+            let _writing = self.mark_writing();
             let _publish = self.publish.write().unwrap_or_else(|e| e.into_inner());
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
@@ -496,7 +598,13 @@ pub struct Store {
     /// Unix millis of the last [`Self::release_after_write`].
     last_release: AtomicU64,
     /// One parsed live set per workspace, shared by concurrent readers.
+    /// A writer replaces the entry after its commit. A reader clones the
+    /// `Arc` and does not take that writer's lock, so the write in
+    /// progress serves the set already published.
     live: RwLock<HashMap<String, Snapshot>>,
+    /// Set for as long as a writer holds [`Self::publish`], so a reader
+    /// can serve the published set instead of waiting on the lock.
+    writing: AtomicBool,
     /// The inverted index over one workspace's live atoms, per generation,
     /// kept beside the snapshot its ordinals index.
     terms: RwLock<HashMap<String, Searchable>>,
@@ -512,6 +620,11 @@ pub struct Store {
     /// Parsed workspaces kept at once. Zero keeps every workspace a read
     /// has touched.
     workspace_cache: AtomicUsize,
+    /// Bytes of snapshots and indexes kept at once. Zero is no byte cap.
+    cache_limit: AtomicUsize,
+    /// Workspaces dropped by the byte or count cap, for the atom caches
+    /// that live beside this store.
+    evicted: Mutex<Vec<String>>,
     /// Bumped when a cached workspace is used, so the coldest can be dropped.
     cache_clock: AtomicU64,
     /// The tick of each workspace last read or written.
@@ -601,11 +714,14 @@ impl Store {
             publish: RwLock::new(()),
             last_release: AtomicU64::new(0),
             live: RwLock::new(HashMap::new()),
+            writing: AtomicBool::new(false),
             terms: RwLock::new(HashMap::new()),
             terms_build: Mutex::new(()),
             counts: RwLock::new(HashMap::new()),
             counts_build: Mutex::new(()),
             workspace_cache: AtomicUsize::new(workspace_cache_from_env()),
+            cache_limit: AtomicUsize::new(cache_limit_from_env()),
+            evicted: Mutex::new(Vec::new()),
             cache_clock: AtomicU64::new(1),
             cache_used: Mutex::new(HashMap::new()),
             db_dir: db_path,
@@ -851,9 +967,11 @@ impl Store {
     /// The clock is an argument so a test can place two writes in one
     /// millisecond. The index follows the text either way.
     fn upsert_many_at(&self, atoms: &[Record], now: &str) -> anyhow::Result<Vec<Record>> {
-        // Held until the snapshot is published. A rebuild takes the shared
-        // side, so it cannot observe this commit under the previous
-        // generation and then be followed by a read of that older snapshot.
+        // Held until the snapshot is published. A reader that arrives while
+        // this is held serves the snapshot already swapped in, and does not
+        // take the lock. The flag is cleared after the lock, so the next
+        // read rebuilds if this write did not publish.
+        let _writing = self.mark_writing();
         let _publish = self.publish.write().unwrap_or_else(|e| e.into_inner());
         let written = self.write(|wtxn| {
             let mut written = Vec::with_capacity(atoms.len());
@@ -918,6 +1036,7 @@ impl Store {
         let Ok(mut cache) = self.live.write() else {
             return;
         };
+        let mut keep = String::new();
         for (workspace, snap) in cache.iter_mut() {
             // One behind is this write; anything else raced and the snapshot
             // is not a base this write can be added to.
@@ -992,8 +1111,12 @@ impl Store {
                 &mut snap.dangling,
             );
             if touched {
+                keep = workspace.clone();
                 self.note_cached(workspace);
             }
+        }
+        if !keep.is_empty() {
+            self.evict_cached(&mut cache, &keep);
         }
     }
 
@@ -1009,16 +1132,31 @@ impl Store {
         }
     }
 
-    /// Drop the coldest parsed workspaces until the cap holds. `keep` is the
-    /// workspace a caller just built and must not be the one dropped. Zero
-    /// is no cap. The index and the status counts leave with the snapshot:
-    /// they are the other copies of the same corpus.
+    /// Drop the coldest parsed workspaces until both caps hold. `keep` is
+    /// the workspace a caller just built and must not be the one dropped.
+    /// A count of zero is no count cap. A byte limit of zero is no byte
+    /// cap. The index and the status counts leave with the snapshot.
     fn evict_cached(&self, cache: &mut HashMap<String, Snapshot>, keep: &str) {
         let cap = self.workspace_cache.load(Ordering::Relaxed);
-        if cap == 0 {
-            return;
-        }
-        while cache.len() > cap {
+        let limit = self.cache_limit.load(Ordering::Relaxed);
+        loop {
+            let terms_bytes = self
+                .terms
+                .read()
+                .map(|terms| {
+                    terms
+                        .values()
+                        .fold(0usize, |sum, set| sum.saturating_add(searchable_bytes(set)))
+                })
+                .unwrap_or(0);
+            let live_bytes = cache
+                .values()
+                .fold(0usize, |sum, snap| sum.saturating_add(snapshot_bytes(snap)));
+            let over_count = cap != 0 && cache.len() > cap;
+            let over_bytes = limit != 0 && live_bytes.saturating_add(terms_bytes) > limit;
+            if !over_count && !over_bytes {
+                break;
+            }
             let coldest = {
                 let used = match self.cache_used.lock() {
                     Ok(used) => used,
@@ -1043,7 +1181,90 @@ impl Store {
             if let Ok(mut used) = self.cache_used.lock() {
                 used.remove(&name);
             }
+            self.note_evicted(&name);
         }
+    }
+
+    fn note_evicted(&self, name: &str) {
+        if let Ok(mut evicted) = self.evicted.lock() {
+            if !evicted.iter().any(|kept| kept == name) {
+                evicted.push(name.to_string());
+            }
+        }
+    }
+
+    /// Workspaces the cap dropped since the last call.
+    pub fn take_evicted(&self) -> Vec<String> {
+        match self.evicted.lock() {
+            Ok(mut evicted) => std::mem::take(&mut *evicted),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        }
+    }
+
+    /// The byte cap. Zero keeps every snapshot the count cap allows.
+    pub fn set_cache_limit_bytes(&self, bytes: usize) {
+        self.cache_limit.store(bytes, Ordering::Relaxed);
+    }
+
+    /// The byte cap. Zero is no cap.
+    #[must_use]
+    pub fn cache_limit_bytes(&self) -> usize {
+        self.cache_limit.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of the cached snapshots and their indexes.
+    #[must_use]
+    pub fn cache_resident_bytes(&self) -> usize {
+        let live = match self.live.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let terms = match self.terms.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let snapshots = live
+            .values()
+            .fold(0usize, |sum, snap| sum.saturating_add(snapshot_bytes(snap)));
+        let indexes = terms
+            .values()
+            .fold(0usize, |sum, set| sum.saturating_add(searchable_bytes(set)));
+        snapshots.saturating_add(indexes)
+    }
+
+    /// The least recently used cached workspace.
+    pub fn coldest_workspace(&self) -> Option<String> {
+        let cache = match self.live.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let used = match self.cache_used.lock() {
+            Ok(used) => used,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cache
+            .keys()
+            .min_by_key(|name| used.get(*name).copied().unwrap_or(0))
+            .cloned()
+    }
+
+    /// Drop one workspace's snapshot and index. The atom caches hear about
+    /// it from [`Self::take_evicted`].
+    pub fn evict_workspace(&self, name: &str) {
+        if let Ok(mut cache) = self.live.write() {
+            cache.remove(name);
+        }
+        if let Ok(mut terms) = self.terms.write() {
+            terms.remove(name);
+        }
+        if let Ok(mut counts) = self.counts.write() {
+            counts.remove(&Some(name.to_string()));
+        }
+        if let Ok(mut used) = self.cache_used.lock() {
+            used.remove(name);
+        }
+        self.note_evicted(name);
+        release_heap();
     }
 
     /// Drop indexes the workspace cap no longer has a snapshot for, and any
@@ -1141,7 +1362,6 @@ impl Store {
     }
 
     /// How many workspaces are parsed right now.
-    #[cfg(test)]
     pub fn cached_workspaces(&self) -> usize {
         self.live.read().map(|cache| cache.len()).unwrap_or(0)
     }
@@ -1345,6 +1565,13 @@ impl Store {
         (*seen == generation).then(|| found.clone())
     }
 
+    /// Remember that a writer holds [`Self::publish`]. Dropped after the
+    /// lock, so a reader observes the flag for the whole hold.
+    fn mark_writing(&self) -> Writing<'_> {
+        self.writing.store(true, Ordering::Release);
+        Writing(&self.writing)
+    }
+
     /// The cached snapshot when it is the generation a writer has published.
     ///
     /// The generation is read while the cache lock is held. A publish bumps
@@ -1363,6 +1590,57 @@ impl Store {
             vectors: Arc::clone(&found.vectors),
             originals: Arc::clone(&found.originals),
             generation,
+            installed: true,
+        })
+    }
+
+    /// The snapshot last swapped in, even when a writer has since bumped
+    /// the generation and not published the next one yet.
+    fn published_live(&self, workspace: &str) -> Option<LiveSnapshot> {
+        let cache = self.live.read().unwrap_or_else(|e| e.into_inner());
+        let found = cache.get(workspace)?;
+        self.note_cached(workspace);
+        Some(LiveSnapshot {
+            atoms: Arc::clone(&found.shown),
+            vectors: Arc::clone(&found.vectors),
+            originals: Arc::clone(&found.originals),
+            generation: found.generation,
+            installed: true,
+        })
+    }
+
+    /// Scan `workspace` without waiting on a writer and without installing
+    /// the result. LMDB readers do not block on the writer's transaction.
+    fn scan_live_unpinned(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let now = packset_core::clock::utcnow();
+        let scanned: Vec<Record> = self
+            .scan_past_tombstones(workspace)?
+            .into_iter()
+            .filter(|atom| shown_at(atom, &now))
+            .collect();
+        let mut vectors = HashMap::with_capacity(scanned.len());
+        let mut originals = HashMap::with_capacity(scanned.len());
+        let mut stored = Vec::with_capacity(scanned.len());
+        for record in scanned {
+            let parked = park(&record);
+            if let Some(id) = parked.lean.get("id").and_then(Value::as_str) {
+                if let Some(vector) = parked.vector {
+                    vectors.insert(id.to_string(), vector);
+                }
+                if let Some(original) = parked.original {
+                    originals.insert(id.to_string(), original);
+                }
+            }
+            stored.push(parked.lean);
+        }
+        let (shown, _dangling) = shown_from(&stored);
+        Ok(LiveSnapshot {
+            atoms: Arc::new(shown),
+            vectors: Arc::new(vectors),
+            originals: Arc::new(originals),
+            generation,
+            installed: false,
         })
     }
 
@@ -1380,6 +1658,16 @@ impl Store {
     pub fn live_versioned(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
         if let Some(found) = self.cached_live(workspace) {
             return Ok(found);
+        }
+        // A writer holds the publish lock across its commit. Waiting for
+        // that lock is how a burst of readers used to stall behind one
+        // remember. Serve the set the writer last swapped in, or scan
+        // without installing, and do not take the lock.
+        if self.writing.load(Ordering::Acquire) {
+            if let Some(found) = self.published_live(workspace) {
+                return Ok(found);
+            }
+            return self.scan_live_unpinned(workspace);
         }
         self.rebuild_live(workspace)
     }
@@ -1441,6 +1729,7 @@ impl Store {
                         vectors: Arc::clone(&found.vectors),
                         originals: Arc::clone(&found.originals),
                         generation,
+                        installed: true,
                     });
                 }
             }
@@ -1462,6 +1751,7 @@ impl Store {
                 vectors,
                 originals,
                 generation,
+                installed: true,
             }
         };
         // The parse of the log peaked well above what stays live, and glibc
@@ -1514,6 +1804,7 @@ impl Store {
             return Ok(found);
         }
         let snap = self.live_versioned(workspace)?;
+        let installed = snap.installed;
         let atoms = snap.atoms;
         let generation = snap.generation;
         let vectors = snap.vectors;
@@ -1560,20 +1851,27 @@ impl Store {
             }
         };
         // Cached under the generation the set was read at: a reader at a
-        // later generation patches from it rather than rebuilding.
-        if let Ok(mut cache) = self.terms.write() {
-            cache.insert(
-                workspace.to_string(),
-                (
-                    generation,
+        // later generation patches from it rather than rebuilding. A scan
+        // taken while a write was held is not installed; the writer swaps
+        // its own set when it commits.
+        if installed {
+            if let Ok(mut cache) = self.terms.write() {
+                cache.insert(
+                    workspace.to_string(),
                     (
-                        fingerprint(&atoms),
-                        Arc::clone(&index),
-                        Arc::clone(&documents),
+                        generation,
+                        (
+                            fingerprint(&atoms),
+                            Arc::clone(&index),
+                            Arc::clone(&documents),
+                        ),
                     ),
-                ),
-            );
-            self.evict_terms(&mut cache, workspace);
+                );
+                self.evict_terms(&mut cache, workspace);
+            }
+            if let Ok(mut live) = self.live.write() {
+                self.evict_cached(&mut live, workspace);
+            }
         }
         Ok((atoms, index, documents, vectors))
     }
@@ -1729,7 +2027,9 @@ impl Store {
         };
         // The delete, the generation, and the cache drop publish together.
         // A rebuild that saw the delete and then the snapshot from before
-        // it would hand a reader a set that grew back.
+        // it would hand a reader a set that grew back. A reader that
+        // arrives during the delete serves what is still published.
+        let _writing = self.mark_writing();
         let _publish = self.publish.write().unwrap_or_else(|e| e.into_inner());
         if !keys.is_empty() {
             self.write(|wtxn| {
@@ -4467,5 +4767,112 @@ mod snapshot_tests {
             reader.join().unwrap();
         }
         assert_eq!(store.live("w").unwrap().len(), WRITES, "every write landed");
+    }
+
+    /// Two fat snapshots do not both stay when the byte cap fits one.
+    /// The colder workspace is read from the database again.
+    #[test]
+    fn a_small_cache_budget_drops_the_colder_snapshot() {
+        let (_dir, store) = store();
+        store.set_workspace_cache(0);
+        let fat = "x".repeat(8_000);
+        store
+            .upsert(&record(json!({
+                "id": "a", "workspace": "cold", "text": fat
+            })))
+            .unwrap();
+        assert_eq!(store.live("cold").unwrap().len(), 1);
+        let one = store.cache_resident_bytes();
+        assert!(one > 0, "the snapshot was not counted");
+        store.set_cache_limit_bytes(one);
+        store
+            .upsert(&record(json!({
+                "id": "b", "workspace": "hot", "text": fat
+            })))
+            .unwrap();
+        assert_eq!(store.live("hot").unwrap().len(), 1);
+        assert_eq!(
+            store.cached_workspaces(),
+            1,
+            "both snapshots stayed under a one-snapshot cap"
+        );
+        let before = store.scanned.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(store.live("cold").unwrap().len(), 1);
+        assert!(
+            store.scanned.load(std::sync::atomic::Ordering::SeqCst) > before,
+            "the cold snapshot was still cached"
+        );
+    }
+
+    /// N readers, while a write holds the publish lock, each answer from
+    /// the snapshot already swapped in. None of them wait the write out.
+    #[test]
+    fn a_burst_of_readers_does_not_wait_on_a_held_write() {
+        const READERS: usize = 20;
+        let (_dir, store) = store();
+        let store = Arc::new(store);
+        store
+            .upsert(&record(
+                json!({"id": "a", "workspace": "w", "text": "alpha"}),
+            ))
+            .unwrap();
+        assert_eq!(store.live("w").unwrap().len(), 1);
+        let _indexed = store.searchable("w").unwrap();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writing = Arc::clone(&store);
+        let holder = std::thread::spawn(move || {
+            let _flag = writing.mark_writing();
+            let _publish = writing.publish.write().unwrap_or_else(|e| e.into_inner());
+            // The generation moves before the snapshot does. A reader that
+            // rebuilds here waits on this lock; one that serves the
+            // published set does not.
+            let _bumped = writing
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the write did not take the lock");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        for _ in 0..READERS {
+            let store = Arc::clone(&store);
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let live = store.live("w").map(|atoms| atoms.len());
+                let search = store.searchable("w").map(|set| set.0.len());
+                let _ = done_tx.send((started.elapsed(), live, search));
+            });
+        }
+        drop(done_tx);
+        let mut answered = 0usize;
+        let deadline = std::time::Duration::from_millis(500);
+        while answered < READERS {
+            match done_rx.recv_timeout(deadline) {
+                Ok((took, live, search)) => {
+                    assert!(
+                        took < deadline,
+                        "a reader waited {took:?} on the held write"
+                    );
+                    assert_eq!(live.unwrap(), 1);
+                    assert_eq!(search.unwrap(), 1);
+                    answered += 1;
+                }
+                Err(_) => {
+                    let _ = release_tx.send(());
+                    holder.join().ok();
+                    panic!(
+                        "{answered} of {READERS} readers answered; the rest blocked on the write"
+                    );
+                }
+            }
+        }
+        let _ = release_tx.send(());
+        holder.join().unwrap();
     }
 }

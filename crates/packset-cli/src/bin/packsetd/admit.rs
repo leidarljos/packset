@@ -12,12 +12,17 @@
 //! backlog is waiting and the requests that just finished took more than
 //! twice as long as the ones that ran with nothing waiting, and it grows
 //! back one at a time when they do not. A short queue never shrinks it,
-//! so a single seat on a quiet machine runs as it did before.
+//! so a single seat on a quiet machine runs as it did before. Pressure
+//! scales that budget again: maintenance stops first, then writes, and
+//! reads keep a share until the machine is stalled for everyone.
+//!
+//! A request names a deadline, as unix milliseconds. When the wait already
+//! in its queue would pass that deadline, it is shed at once. It is not
+//! left parked until the deadline expires.
 //!
 //! Linux writes the share of time tasks spent stalled for memory or CPU to
-//! `/proc/pressure`. Maintenance stops first, then writes; reads stop only
-//! when every task is stalled for memory. The files are absent off Linux,
-//! and then nothing is shed for pressure.
+//! `/proc/pressure`. The files are absent off Linux, and then nothing is
+//! shed for pressure.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -123,14 +128,16 @@ pub struct Psi {
     pub cpu_some: f64,
 }
 
-/// Maintenance pauses once memory or CPU stall is visible. Writes stop at
-/// a higher memory stall, and reads only when the machine is stuck.
+/// Maintenance pauses once memory or CPU stall is visible. Writes lose
+/// their slots as stall climbs and stop at the top of that scale. Reads
+/// keep a share until every task is stalled for most of the interval:
+/// a full stall of 15% used to refuse every search.
 const MAINT_MEMORY_SOME: f64 = 10.0;
 const MAINT_MEMORY_FULL: f64 = 1.0;
 const MAINT_CPU_SOME: f64 = 70.0;
 const WRITE_MEMORY_SOME: f64 = 25.0;
 const WRITE_MEMORY_FULL: f64 = 2.0;
-const READ_MEMORY_FULL: f64 = 10.0;
+const READ_MEMORY_FULL: f64 = 80.0;
 
 impl Psi {
     #[must_use]
@@ -175,6 +182,24 @@ impl Psi {
             Class::Read => self.shed_reads(),
             Class::Write => self.shed_writes(),
             Class::Maintenance => self.pause_maintenance(),
+        }
+    }
+
+    /// The fraction of the latency budget `class` may still use, in
+    /// `[0, 1]`. Zero is a shed. Reads fall off only as `memory_full`
+    /// approaches [`READ_MEMORY_FULL`].
+    fn scale(self, class: Class) -> f64 {
+        if self.sheds(class) {
+            return 0.0;
+        }
+        match class {
+            Class::Maintenance => 1.0,
+            Class::Write => {
+                let some = (self.memory_some / WRITE_MEMORY_SOME).clamp(0.0, 1.0);
+                let full = (self.memory_full / WRITE_MEMORY_FULL).clamp(0.0, 1.0);
+                (1.0 - some.max(full)).max(0.0)
+            }
+            Class::Read => (1.0 - (self.memory_full / READ_MEMORY_FULL).clamp(0.0, 1.0)).max(0.0),
         }
     }
 }
@@ -343,6 +368,13 @@ impl Limiter {
     #[must_use]
     pub fn ceiling(&self) -> usize {
         self.ceiling
+    }
+
+    /// How long a request of this class has been taking, in microseconds.
+    /// Zero until one has finished.
+    #[must_use]
+    pub fn latency_us(&self) -> u64 {
+        self.short_us
     }
 
     /// `sample` is how long one request took. `queued` is whether more of
@@ -558,6 +590,14 @@ impl<T> Control<T> {
                 body: arrival.body,
             };
         }
+        if self.misses_deadline(class, arrival.deadline_ms, now_ms) {
+            self.note_shed(class, false);
+            return Decision::Shed {
+                body: arrival.body,
+                retry_after: self.retry_after(class),
+                reason: "the deadline cannot be met; try again",
+            };
+        }
         if park_body(
             self.parked_bytes,
             arrival.bytes,
@@ -629,14 +669,20 @@ impl<T> Control<T> {
             read_depth: self.lanes[0].len,
             read_in_flight: self.in_flight[0],
             read_limit: self.limiters[0].current(),
+            read_budget: self.budget(Class::Read),
+            read_latency_us: self.limiters[0].latency_us(),
             read_shed: self.sheds[0],
             write_depth: self.lanes[1].len,
             write_in_flight: self.in_flight[1],
             write_limit: self.limiters[1].current(),
+            write_budget: self.budget(Class::Write),
+            write_latency_us: self.limiters[1].latency_us(),
             write_shed: self.sheds[1],
             maint_depth: self.lanes[2].len,
             maint_in_flight: self.in_flight[2],
             maint_limit: self.limiters[2].current(),
+            maint_budget: self.budget(Class::Maintenance),
+            maint_latency_us: self.limiters[2].latency_us(),
             maint_shed: self.sheds[2],
             maint_paused: paused,
             total_limit: self.total_limit,
@@ -651,14 +697,52 @@ impl<T> Control<T> {
         }
     }
 
-    fn can_run(&self, class: Class) -> bool {
+    /// Slots `class` may hold right now: the latency budget, scaled by
+    /// pressure. Zero when that class is shed.
+    fn budget(&self, class: Class) -> usize {
         if self.pressure.sheds(class) {
+            return 0;
+        }
+        let current = self.limiters[class.index()].current().max(1);
+        let scaled = (current as f64 * self.pressure.scale(class)).round() as usize;
+        scaled.clamp(1, current)
+    }
+
+    /// Whether parking `class` would start it only after `deadline_ms`.
+    /// No measurement yet is not a reason to refuse: the wait is unknown.
+    fn misses_deadline(&self, class: Class, deadline_ms: Option<u64>, now_ms: u64) -> bool {
+        let Some(deadline) = deadline_ms else {
+            return false;
+        };
+        let wait = self.estimate_wait_ms(class);
+        wait > deadline.saturating_sub(now_ms)
+    }
+
+    /// How long a request that cannot run now would sit, from the recent
+    /// service time and the work already ahead of it.
+    fn estimate_wait_ms(&self, class: Class) -> u64 {
+        let service_us = self.limiters[class.index()].latency_us();
+        if service_us == 0 {
+            return 0;
+        }
+        let service_ms = (service_us / 1000).max(1);
+        let slots = (self.budget(class).max(1)) as u64;
+        let waiting = self.lanes[class.index()].len as u64;
+        let occupied = u64::from(
+            self.in_flight[class.index()] > 0 || self.total_in_flight >= self.total_limit,
+        );
+        waiting.saturating_add(occupied).saturating_mul(service_ms) / slots
+    }
+
+    fn can_run(&self, class: Class) -> bool {
+        let budget = self.budget(class);
+        if budget == 0 {
             return false;
         }
         if self.total_in_flight >= self.total_limit {
             return false;
         }
-        if self.in_flight[class.index()] >= self.limiters[class.index()].current() {
+        if self.in_flight[class.index()] >= budget {
             return false;
         }
         if class == Class::Maintenance
@@ -753,14 +837,22 @@ pub struct Snapshot {
     pub read_depth: usize,
     pub read_in_flight: usize,
     pub read_limit: usize,
+    /// Slots a read may hold after pressure is applied.
+    pub read_budget: usize,
+    /// Recent read time, in microseconds. Zero until one has finished.
+    pub read_latency_us: u64,
     pub read_shed: u64,
     pub write_depth: usize,
     pub write_in_flight: usize,
     pub write_limit: usize,
+    pub write_budget: usize,
+    pub write_latency_us: u64,
     pub write_shed: u64,
     pub maint_depth: usize,
     pub maint_in_flight: usize,
     pub maint_limit: usize,
+    pub maint_budget: usize,
+    pub maint_latency_us: u64,
     pub maint_shed: u64,
     pub maint_paused: bool,
     pub total_limit: usize,
@@ -797,18 +889,24 @@ impl Snapshot {
                     "depth": self.read_depth,
                     "in_flight": self.read_in_flight,
                     "limit": self.read_limit,
+                    "budget": self.read_budget,
+                    "latency_us": self.read_latency_us,
                     "shed": self.read_shed,
                 },
                 "write": {
                     "depth": self.write_depth,
                     "in_flight": self.write_in_flight,
                     "limit": self.write_limit,
+                    "budget": self.write_budget,
+                    "latency_us": self.write_latency_us,
                     "shed": self.write_shed,
                 },
                 "maintenance": {
                     "depth": self.maint_depth,
                     "in_flight": self.maint_in_flight,
                     "limit": self.maint_limit,
+                    "budget": self.maint_budget,
+                    "latency_us": self.maint_latency_us,
                     "shed": self.maint_shed,
                     "paused": self.maint_paused,
                 },
@@ -1071,6 +1169,8 @@ mod tests {
         ));
         control.finish(Class::Read, None);
 
+        // A full stall of 12% used to shed every read. The read budget
+        // shrinks and the read still runs. Writes are already shed.
         control.pin_pressure(Psi {
             memory_some: 30.0,
             memory_full: 12.0,
@@ -1078,12 +1178,130 @@ mod tests {
         });
         assert!(matches!(
             control.arrive(job(Class::Read, "seat", 5), NOW),
+            Decision::Run { .. }
+        ));
+        control.finish(Class::Read, None);
+        let mid = control.snapshot();
+        assert!(mid.read_budget >= 1);
+        assert!(mid.read_budget <= mid.read_limit);
+
+        // The host in the report: some 18%, full 15%. Writes stop.
+        // Reads keep a budget, so a search is not answered busy.
+        control.pin_pressure(Psi {
+            memory_some: 18.0,
+            memory_full: 15.0,
+            cpu_some: 0.0,
+        });
+        assert!(matches!(
+            control.arrive(job(Class::Write, "seat", 6), NOW),
+            Decision::Shed { .. }
+        ));
+        assert!(matches!(
+            control.arrive(job(Class::Maintenance, "seat", 7), NOW),
+            Decision::Shed { .. }
+        ));
+        assert!(matches!(
+            control.arrive(job(Class::Read, "seat", 8), NOW),
+            Decision::Run { .. }
+        ));
+        control.finish(Class::Read, None);
+        let pressed = control.snapshot();
+        assert!(pressed.read_budget >= 1, "reads had no slot");
+        assert_eq!(pressed.write_budget, 0);
+        assert_eq!(pressed.maint_budget, 0);
+
+        control.pin_pressure(Psi {
+            memory_some: 30.0,
+            memory_full: 80.0,
+            cpu_some: 0.0,
+        });
+        assert!(matches!(
+            control.arrive(job(Class::Read, "seat", 9), NOW),
             Decision::Shed { .. }
         ));
         let snap = control.snapshot();
         assert!(snap.pressure_sheds >= 3);
         assert!(snap.busy);
         assert!(snap.shedding_writes);
+        assert_eq!(snap.read_budget, 0);
+    }
+
+    #[test]
+    fn reads_are_taken_before_writes_under_contention() {
+        let mut control = quiet(2, 32);
+        assert!(matches!(
+            control.arrive(job(Class::Write, "seat", 1), NOW),
+            Decision::Run { .. }
+        ));
+        for body in [2, 3, 4] {
+            assert!(
+                matches!(
+                    control.arrive(job(Class::Write, "seat", body), NOW),
+                    Decision::Queued
+                ),
+                "write {body} was not queued"
+            );
+        }
+        for body in [10, 11] {
+            assert!(
+                matches!(
+                    control.arrive(job(Class::Read, "seat", body), NOW),
+                    Decision::Queued
+                ),
+                "read {body} was not queued"
+            );
+        }
+        control.finish(Class::Write, Some(Duration::from_millis(1)));
+        for expected in [10, 11] {
+            match control.take(NOW) {
+                Next::Run { class, body } => {
+                    assert_eq!(class, Class::Read);
+                    assert_eq!(body, expected);
+                    control.finish(Class::Read, Some(Duration::from_millis(1)));
+                }
+                Next::Expired(_) => panic!("the read had no deadline"),
+                Next::Idle => panic!("a read was still waiting"),
+            }
+        }
+        match control.take(NOW) {
+            Next::Run { class, body } => {
+                assert_eq!(class, Class::Write);
+                assert_eq!(body, 2);
+            }
+            Next::Expired(_) => panic!("the write had no deadline"),
+            Next::Idle => panic!("the write was still waiting"),
+        }
+    }
+
+    #[test]
+    fn a_deadline_the_queue_cannot_meet_is_shed_at_once() {
+        let mut control = quiet(2, 32);
+        assert!(matches!(
+            control.arrive(job(Class::Read, "seat", 1), NOW),
+            Decision::Run { .. }
+        ));
+        control.finish(Class::Read, Some(Duration::from_millis(200)));
+        assert!(matches!(
+            control.arrive(job(Class::Read, "seat", 2), NOW),
+            Decision::Run { .. }
+        ));
+        let mut late = job(Class::Read, "seat", 3);
+        late.deadline_ms = Some(NOW + 50);
+        match control.arrive(late, NOW) {
+            Decision::Shed {
+                body,
+                retry_after,
+                reason,
+            } => {
+                assert_eq!(body, 3);
+                assert!(retry_after >= 1);
+                assert!(reason.contains("deadline"), "{reason}");
+            }
+            other => panic!("{}", label(&other)),
+        }
+        assert_eq!(control.snapshot().read_depth, 0, "the late read was queued");
+        assert_eq!(control.snapshot().read_shed, 1);
+        assert!(control.snapshot().read_latency_us >= 200_000);
     }
 
     #[test]
@@ -1148,8 +1366,14 @@ mod tests {
         let value = control.snapshot().json();
         assert_eq!(value["line"], "ok");
         assert_eq!(value["queues"]["read"]["limit"], 3);
+        assert_eq!(value["queues"]["read"]["budget"], 3);
+        assert_eq!(value["queues"]["read"]["depth"], 0);
+        assert_eq!(value["queues"]["read"]["latency_us"], 0);
+        assert_eq!(value["queues"]["read"]["shed"], 0);
         assert_eq!(value["queues"]["write"]["limit"], 3);
+        assert_eq!(value["queues"]["write"]["budget"], 3);
         assert_eq!(value["queues"]["maintenance"]["limit"], 1);
+        assert_eq!(value["queues"]["maintenance"]["budget"], 1);
         assert_eq!(value["limits"]["total"], 3);
         assert_eq!(value["shed"]["write"], 0);
     }

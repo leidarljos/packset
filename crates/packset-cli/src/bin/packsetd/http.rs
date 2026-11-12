@@ -235,8 +235,10 @@ pub fn serve(
                 };
                 return wire::Response::text(200, text);
             }
-            if path == "/stats" {
-                return wire::Response::json(200, gate.stats_body());
+            if path == "/stats" || path == "/metrics" {
+                let mut body = gate.snapshot().json();
+                body["cache_bytes"] = json!(service.resident_cache_bytes());
+                return wire::Response::json(200, body.to_string());
             }
         }
         handle(&service, &panel, token.as_deref(), request)
@@ -307,6 +309,7 @@ fn route(
     query: &HashMap<String, String>,
     body: &Map<String, Value>,
 ) -> Answer {
+    service.maintain_cache();
     match (method, path) {
         // The old name answered here once; a client still asking for it is
         // reading a store this writer does not serve.
@@ -1163,8 +1166,28 @@ mod tests {
         assert_eq!(stats["queues"]["maintenance"]["limit"], json!(caps[2]));
         assert_eq!(stats["limits"]["total"], json!(caps[3]));
         assert_eq!(stats["queues"]["read"]["depth"], json!(0));
+        assert_eq!(stats["queues"]["read"]["shed"], json!(0));
+        assert!(stats["queues"]["read"]["latency_us"].is_number());
+        assert!(stats["queues"]["write"]["latency_us"].is_number());
+        assert!(stats["queues"]["maintenance"]["latency_us"].is_number());
+        assert!(stats["cache_bytes"].is_number());
         assert_eq!(stats["shed"]["write"], json!(0));
         assert_eq!(stats["shed"]["deadline"], json!(0));
+        let metrics: serde_json::Value = ureq::get(&format!("http://{LOOPBACK}:{port}/metrics"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(
+            metrics["queues"]["read"]["depth"],
+            stats["queues"]["read"]["depth"]
+        );
+        assert_eq!(metrics["shed"]["read"], stats["shed"]["read"]);
+        assert_eq!(
+            metrics["queues"]["write"]["latency_us"],
+            stats["queues"]["write"]["latency_us"]
+        );
+        assert!(metrics["cache_bytes"].is_number());
     }
 
     #[test]
@@ -1180,6 +1203,7 @@ mod tests {
         let busy = AtomicU64::new(7);
         for target in [
             "/health",
+            "/metrics",
             "/v1/status?workspace=seat",
             "/v1/workspaces",
             "/__inside_memd/health",
@@ -1196,6 +1220,7 @@ mod tests {
     fn health_status_and_workspaces_stay_off_the_search_lane() {
         assert!(wire::is_cheap(&Method::Get, "/health"));
         assert!(wire::is_cheap(&Method::Get, "/stats"));
+        assert!(wire::is_cheap(&Method::Get, "/metrics"));
         assert!(wire::is_cheap(&Method::Get, "/v1/status?workspace=seat"));
         assert!(wire::is_cheap(&Method::Get, "/v1/workspaces"));
         assert!(wire::is_cheap(&Method::Get, "/__inside_memd/health"));

@@ -162,6 +162,26 @@ impl Index {
         self.lengths.is_empty()
     }
 
+    /// Bytes the postings and the occurrence map occupy. The token lists
+    /// they were built from are not included; the caller holds those.
+    #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        let posts: usize = self
+            .postings
+            .iter()
+            .map(|(term, list)| term.len().saturating_add(24).saturating_add(list.len() * 8))
+            .sum();
+        let occurrences: usize = self
+            .occurrences
+            .keys()
+            .map(|term| term.len().saturating_add(32))
+            .sum();
+        posts
+            .saturating_add(occurrences)
+            .saturating_add(self.lengths.len() * 4)
+            .saturating_add(64)
+    }
+
     /// How often a term occurs across the corpus, counting repeats.
     #[must_use]
     pub fn occurrences_of(&self, term: &str) -> u64 {

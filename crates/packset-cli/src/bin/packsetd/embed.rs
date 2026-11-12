@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -654,6 +654,7 @@ pub fn last_dense() -> Option<bool> {
 
 fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     let binary = binary()?;
+    touch_embed();
     let mut held = lock_dense()?;
     for _ in 0..2 {
         if held.as_mut().is_none_or(|running| !running.alive()) {
@@ -704,6 +705,201 @@ pub fn encode(text: &str, query: bool) -> Option<Vec<f32>> {
 #[must_use]
 pub fn encode_query(text: &str) -> Option<Vec<f32>> {
     encode(text, true)
+}
+
+/// A query vector when an encoder is up.
+///
+/// A down encoder is not restarted on this call: the search ranks by
+/// words and a child is started aside. A live encoder that another
+/// request holds is waited on, so the dense ballot is not dropped just
+/// because the slot is busy.
+#[must_use]
+pub fn try_encode_query(text: &str) -> Option<Vec<f32>> {
+    if text.trim().is_empty() || !enabled() {
+        return None;
+    }
+    if LAST_DENSE.load(Ordering::Relaxed) == 2 {
+        return None;
+    }
+    binary()?;
+    let held = match dense_slot().try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            if LAST_DENSE.load(Ordering::Relaxed) != 1 {
+                return None;
+            }
+            match dense_slot().lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            }
+        }
+    };
+    encode_if_up(held, text)
+}
+
+/// Encode with `held` when the child is alive. Otherwise leave this
+/// request and, if a child has never come up, start one aside.
+fn encode_if_up(
+    mut held: std::sync::MutexGuard<'static, Option<Encoder>>,
+    text: &str,
+) -> Option<Vec<f32>> {
+    let alive = held.as_mut().is_some_and(|running| running.alive());
+    if !alive {
+        let failed = held.is_some();
+        *held = None;
+        drop(held);
+        if failed {
+            if LAST_DENSE.swap(2, Ordering::Relaxed) != 2 {
+                eprintln!(
+                    "packsetd: the encoder is down; search is ranked by words until it answers"
+                );
+            }
+            return None;
+        }
+        if binary().is_some() {
+            warm_in_background();
+        }
+        return None;
+    }
+    let owned = text.to_string();
+    match held
+        .as_mut()?
+        .encode_batch(std::slice::from_ref(&owned), true)
+    {
+        Some(mut vectors) => {
+            LAST_DENSE.store(1, Ordering::Relaxed);
+            touch_embed();
+            vectors.pop()
+        }
+        None => {
+            *held = None;
+            LAST_DENSE.store(2, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+/// Start the encoder off the request that asked. One start at a time.
+/// A failure stays recorded, so the next search does not spawn again.
+fn warm_in_background() {
+    static STARTING: AtomicBool = AtomicBool::new(false);
+    if STARTING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("packset-embed-start".into())
+        .spawn(move || {
+            let _ = encode_now(std::slice::from_ref(&".".to_string()), true);
+            STARTING.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        STARTING.store(false, Ordering::Release);
+    }
+}
+
+/// Minutes before an idle encoder child is stopped. `u64::MAX` reads
+/// [`PACKSET_EMBED_IDLE_MIN`].
+static IDLE_MINUTES: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Unix milliseconds of the last encode or rerank. Zero means none yet.
+static LAST_EMBED: AtomicU64 = AtomicU64::new(0);
+
+/// `minutes` is how long an encoder may sit unused. Zero leaves it up.
+pub fn set_idle_minutes(minutes: u64) {
+    IDLE_MINUTES.store(minutes, Ordering::Relaxed);
+}
+
+/// How long an encoder child may sit with no call.
+///
+/// `PACKSET_EMBED_IDLE_MIN` overrides the five minute default. `off` and
+/// `none` leave the child up.
+#[must_use]
+pub fn idle_limit() -> Duration {
+    let set = IDLE_MINUTES.load(Ordering::Relaxed);
+    if set != u64::MAX {
+        return Duration::from_secs(set.saturating_mul(60));
+    }
+    match std::env::var("PACKSET_EMBED_IDLE_MIN") {
+        Ok(raw) => match raw.trim() {
+            "off" | "none" => Duration::ZERO,
+            other => other
+                .parse::<u64>()
+                .map(|minutes| Duration::from_secs(minutes.saturating_mul(60)))
+                .unwrap_or(Duration::from_secs(5 * 60)),
+        },
+        Err(_) => Duration::from_secs(5 * 60),
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn touch_embed() {
+    LAST_EMBED.store(unix_ms().max(1), Ordering::Relaxed);
+    ensure_idle_watch();
+}
+
+fn ensure_idle_watch() {
+    static START: OnceLock<()> = OnceLock::new();
+    START.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("packset-embed-idle".into())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_secs(30));
+                let _ = reap_if_older_than(idle_limit());
+            });
+    });
+}
+
+/// Stop the encoder children when the last call is older than `limit`.
+///
+/// The next encode starts a child again. A limit of zero does nothing.
+/// The clock is read again after the slot is taken, so a call that arrived
+/// while this waited is not stopped.
+#[must_use]
+pub fn reap_if_older_than(limit: Duration) -> bool {
+    if limit.is_zero() {
+        return false;
+    }
+    let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
+    let last = LAST_EMBED.load(Ordering::Relaxed);
+    if last == 0 || unix_ms().saturating_sub(last) < limit_ms {
+        return false;
+    }
+    let mut dense = match dense_slot().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let last = LAST_EMBED.load(Ordering::Relaxed);
+    if last == 0 || unix_ms().saturating_sub(last) < limit_ms {
+        return false;
+    }
+    *dense = None;
+    drop(dense);
+    for slot in [rerank_slot(), late_slot(), sparse_slot()] {
+        match slot.lock() {
+            Ok(mut held) => *held = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+    LAST_DENSE.store(0, Ordering::Relaxed);
+    LAST_EMBED.store(0, Ordering::Relaxed);
+    true
+}
+
+#[cfg(test)]
+fn dense_child_alive() -> bool {
+    match dense_slot().lock() {
+        Ok(mut held) => held.as_mut().is_some_and(|child| child.alive()),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .as_mut()
+            .is_some_and(|child| child.alive()),
+    }
 }
 
 /// Encode one atom's text.
@@ -912,6 +1108,7 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
         return None;
     }
     let binary = binary()?;
+    touch_embed();
     // One cross-encoder answers one question at a time. A search that finds
     // it busy for longer than a moment keeps its first-stage order and says
     // the stage was absent, rather than queue behind every other search: six
@@ -951,6 +1148,81 @@ pub(crate) static EMBED: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_down_encoder_is_not_asked_again() {
+        let _held = EMBED.lock().unwrap_or_else(|err| err.into_inner());
+        let previous = LAST_DENSE.swap(2, Ordering::Relaxed);
+        struct Restore(u8);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LAST_DENSE.store(self.0, Ordering::Relaxed);
+            }
+        }
+        let _restore = Restore(previous);
+        let started = std::time::Instant::now();
+        assert!(try_encode_query("a question the encoder must not see").is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "a down encoder was waited on: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The child is stopped after it has sat unused, and another can be
+    /// started for the next call. The limit is the argument, not the
+    /// process default. The stub is handed to the slot directly, so the
+    /// test does not retarget `PACKSET_EMBED` for every other test.
+    #[test]
+    fn an_idle_encoder_stops_and_the_next_call_starts_it() {
+        let _held = EMBED.lock().unwrap_or_else(|err| err.into_inner());
+        reset_for_test();
+        let previous = LAST_DENSE.load(Ordering::Relaxed);
+        struct Restore(u8);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                reset_for_test();
+                LAST_EMBED.store(0, Ordering::Relaxed);
+                LAST_DENSE.store(self.0, Ordering::Relaxed);
+            }
+        }
+        let _restore = Restore(previous);
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("packset-embed");
+        std::fs::write(
+            &stub,
+            r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    print(json.dumps({"v": [0.25, 0.5]}), flush=True)
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        let started = Encoder::start(&stub, true).expect("the stub starts");
+        {
+            let mut slot = dense_slot().lock().unwrap_or_else(|err| err.into_inner());
+            *slot = Some(started);
+        }
+        {
+            let mut slot = dense_slot().lock().unwrap_or_else(|err| err.into_inner());
+            let vectors = slot
+                .as_mut()
+                .expect("the encoder was not installed")
+                .encode_batch(&["a sentence".into()], true);
+            assert_eq!(vectors, Some(vec![vec![0.25, 0.5]]));
+        }
+        assert!(dense_child_alive(), "the encoder was not started");
+        LAST_EMBED.store(1, Ordering::Relaxed);
+        assert!(reap_if_older_than(Duration::from_secs(60)));
+        assert!(!dense_child_alive(), "the idle encoder was left up");
+        let mut again = Encoder::start(&stub, true).expect("the stub starts again");
+        let vectors = again.encode_batch(&["a sentence".into()], true);
+        assert_eq!(vectors, Some(vec![vec![0.25, 0.5]]));
+    }
 
     #[test]
     fn a_busy_cross_encoder_is_skipped_after_a_short_wait() {

@@ -308,6 +308,7 @@ const PROJECTION_BATCH: usize = 512;
 /// Apply queued projection ops to the index at `dir`, consecutive runs of
 /// one kind as one batch, in arrival order.
 fn flush_projection_ops(ops: Vec<ProjectionOp>, dir: &std::path::Path) {
+    let heavy = ops.len() >= PROJECTION_BATCH;
     let mut upserts: Vec<Value> = Vec::new();
     let mut deletes: Vec<String> = Vec::new();
     let mut last_upsert = true;
@@ -336,6 +337,11 @@ fn flush_projection_ops(ops: Vec<ProjectionOp>, dir: &std::path::Path) {
     }
     if !deletes.is_empty() {
         let _ = crate::milli::delete(&deletes, dir);
+    }
+    // A bulk import holds every document of the chunk. The copies are
+    // gone; give the arenas back rather than keeping the high-water mark.
+    if heavy {
+        crate::store::release_heap();
     }
 }
 
@@ -1083,6 +1089,74 @@ impl Service {
         }
     }
 
+    /// Drop atom caches the store has already evicted, then drop further
+    /// cold workspaces while the snapshots, indexes and atom caches
+    /// together sit over the byte cap. The last workspace stays: dropping
+    /// it would only rebuild it on the next read.
+    pub(crate) fn maintain_cache(&self) {
+        for name in self.store.take_evicted() {
+            self.drop_live_sets(&name);
+            self.drop_workspace_shapes(&name);
+        }
+        let limit = self.store.cache_limit_bytes();
+        if limit == 0 {
+            return;
+        }
+        for _ in 0..64 {
+            if self.cache_bytes_now() <= limit || self.store.cached_workspaces() <= 1 {
+                break;
+            }
+            let Some(name) = self.store.coldest_workspace() else {
+                break;
+            };
+            self.store.evict_workspace(&name);
+            self.drop_live_sets(&name);
+            self.drop_workspace_shapes(&name);
+        }
+    }
+
+    fn cache_bytes_now(&self) -> usize {
+        self.store
+            .cache_resident_bytes()
+            .saturating_add(self.atom_cache_bytes())
+    }
+
+    /// Bytes of the snapshot, index and atom caches after a trim.
+    #[must_use]
+    pub fn resident_cache_bytes(&self) -> usize {
+        self.maintain_cache();
+        self.cache_bytes_now()
+    }
+
+    fn atom_cache_bytes(&self) -> usize {
+        let live = match self.live_sets.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let atoms = live.values().fold(0usize, |sum, workspace| {
+            workspace.sets.values().fold(sum, |inner, set| {
+                set.order.iter().fold(inner, |bytes, record| {
+                    bytes.saturating_add(crate::store::record_bytes(record))
+                })
+            })
+        });
+        drop(live);
+        let shapes = match self.shapes.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let shaped = shapes.values().fold(0usize, |sum, kept| {
+            let posts = kept.postings.iter().fold(0usize, |inner, (key, ids)| {
+                inner
+                    .saturating_add(key.len())
+                    .saturating_add(ids.iter().fold(0usize, |n, id| n.saturating_add(id.len())))
+            });
+            sum.saturating_add(kept.by_id.len().saturating_mul(64))
+                .saturating_add(posts)
+        });
+        atoms.saturating_add(shaped)
+    }
+
     /// Drop every shape filed under `workspace` and mark it unshaped, so
     /// the next write there rebuilds the postings from the live set.
     fn drop_workspace_shapes(&self, workspace: &str) {
@@ -1501,6 +1575,7 @@ impl Service {
     pub fn add(&self, atom: Record) -> anyhow::Result<Record> {
         // Validation and the encoder run before the lock: the encode is the
         // slow part of a write and depends on the text alone.
+        self.maintain_cache();
         let started = std::time::Instant::now();
         let atom = self.prepare(atom)?;
         let prepared = started.elapsed();
@@ -2398,6 +2473,7 @@ impl Service {
         kind: Option<&str>,
         rank: packset_core::search::Rank,
     ) -> anyhow::Result<Value> {
+        self.maintain_cache();
         let named = match set {
             Some(raw) => Some(
                 packset_core::set_name::check(raw).map_err(|e| anyhow::Error::new(AtomError(e)))?,
@@ -2516,24 +2592,21 @@ impl Service {
         // pack's own scorer (hit@1 0.267 against 0.342) and searched slower.
         // A seat with no encoder reads the pack unless it named the binary.
         //
-        // The projection is a child process and the encoder is another; the
-        // two do not read each other, so the child runs while the encoder
-        // works instead of after it, which is 13 to 22 ms of the 85 ms a
-        // search took on a 29-atom pack. Whether its answer is read is
-        // decided once the encoder has answered, as before.
+        // The projection is a child process. It runs beside the encoder
+        // attempt. A down or busy encoder is not waited on: this request
+        // is ranked by words, and a child that is not already up is started
+        // aside rather than in the request.
         let projection_may_count =
             as_of.is_none() && (crate::milli::named() || crate::embed::binary().is_some());
         let (ranked_meaning, projected_early) = std::thread::scope(|scope_| {
             let projecting = projection_may_count.then(|| {
                 scope_.spawn(|| crate::milli::search(corpus, query, first_limit, &dir, scope, kind))
             });
-            // The dense ballot is the encoder's. `INSIDE_EMBED=off` and
-            // `--no-embed` leave it out, so this search does not start a
-            // child and does not add a third ranking. Lexical search still
-            // answers. `binary` reads the same switch, which is what keeps
-            // a later caller from starting the child anyway.
+            // The dense ballot is the encoder's, when one is already up
+            // and free. `INSIDE_EMBED=off` and `--no-embed` leave it out.
+            // A miss leaves the two word rankings.
             let meaning = if crate::embed::enabled() {
-                crate::embed::encode_query(query)
+                crate::embed::try_encode_query(query)
                     .map(|vector| packset_core::search::search_dense_at(&ask, &vector, &embedded))
                     .filter(|hits| !hits.is_empty())
             } else {

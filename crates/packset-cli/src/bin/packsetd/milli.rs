@@ -502,7 +502,10 @@ pub fn reindex_atoms<R: Borrow<Record>>(atoms: &[R], dir: &Path) -> bool {
         })
         .map(atom_document)
         .collect();
-    upsert(&docs, dir)
+    let indexed = upsert(&docs, dir);
+    drop(docs);
+    crate::store::release_heap();
+    indexed
 }
 
 /// Whether the projection exists on disk.

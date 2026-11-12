@@ -138,7 +138,12 @@ pub(crate) fn is_cheap(method: &Method, target: &str) -> bool {
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     match path {
-        "/health" | "/stats" | "/v1/status" | "/v1/workspaces" | "/__inside_memd/health" => true,
+        "/health"
+        | "/stats"
+        | "/metrics"
+        | "/v1/status"
+        | "/v1/workspaces"
+        | "/__inside_memd/health" => true,
         "/v1/atoms" => {
             query.split('&').any(|pair| pair == "embedding=omit")
                 && !query.split('&').any(|pair| pair.starts_with("as_of="))
@@ -192,11 +197,6 @@ impl Gate {
     #[must_use]
     pub(crate) fn busy(&self) -> bool {
         self.snapshot().busy
-    }
-
-    #[must_use]
-    pub(crate) fn stats_body(&self) -> String {
-        self.snapshot().json().to_string()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Control<Held>> {
@@ -629,6 +629,23 @@ impl Read for Deadline<'_> {
     }
 }
 
+/// `deadline` or `deadline_ms` on the query, as unix milliseconds. The
+/// header wins when both are present; this is only read when the header
+/// was absent.
+fn query_deadline(target: &str) -> Option<u64> {
+    let (_, query) = target.split_once('?')?;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if (key == "deadline" || key == "deadline_ms") && !value.is_empty() {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
 /// The request line, the headers this server reads, and the body, all
 /// within [`IO_TIMEOUT`].
 fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
@@ -709,6 +726,9 @@ fn read_request(stream: &TcpStream) -> Result<Request, ReadError> {
         } else if name.eq_ignore_ascii_case("x-packset-deadline") && deadline_ms.is_none() {
             deadline_ms = value.parse().ok();
         }
+    }
+    if deadline_ms.is_none() {
+        deadline_ms = query_deadline(target);
     }
     let wants_body = chunked || length.is_some_and(|n| n > 0);
     if length.is_some_and(|n| n > MAX_BODY) {
@@ -1034,6 +1054,7 @@ mod tests {
         assert_eq!(dear_limit(1), 1);
         assert!(is_cheap(&Method::Get, "/health"));
         assert!(is_cheap(&Method::Get, "/stats"));
+        assert!(is_cheap(&Method::Get, "/metrics"));
         assert!(is_cheap(&Method::Get, "/v1/status?workspace=seat"));
         assert!(is_cheap(&Method::Get, "/v1/workspaces"));
         assert!(is_cheap(&Method::Get, "/__inside_memd/health"));
@@ -1229,6 +1250,111 @@ mod tests {
         let late = second.join().unwrap();
         assert!(late.starts_with("HTTP/1.1 408 "), "{late}");
         assert_eq!(ran.load(Ordering::SeqCst), 1, "the late search ran");
+    }
+
+    /// The same deadline the header carries, as a query parameter.
+    #[test]
+    fn a_deadline_on_the_query_is_the_one_admission_sees() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&ran);
+        let port = start(2, 8, move |_: &Request| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Response::text(200, "ran")
+        });
+        let past = admit::unix_ms().saturating_sub(1_000);
+        let raw = format!("GET /v1/search?q=late&deadline={past} HTTP/1.1\r\n\r\n");
+        let out = exchange(port, raw.as_bytes());
+        assert!(out.starts_with("HTTP/1.1 408 "), "{out}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        let future = admit::unix_ms().saturating_add(60_000);
+        let raw = format!("GET /v1/atoms?workspace=seat&deadline_ms={future} HTTP/1.1\r\n\r\n");
+        let out = exchange(port, raw.as_bytes());
+        assert!(out.starts_with("HTTP/1.1 200 "), "{out}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        // The header wins when both name a time.
+        let raw = format!(
+            "GET /v1/search?q=both&deadline={future} HTTP/1.1\r\nX-Packset-Deadline: {past}\r\n\r\n"
+        );
+        let out = exchange(port, raw.as_bytes());
+        assert!(out.starts_with("HTTP/1.1 408 "), "{out}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// One write holds its slot. N searches, each with a deadline, answer
+    /// inside that deadline or come back 503 before it. None of them wait
+    /// the write out.
+    #[test]
+    fn a_burst_of_readers_during_a_held_write_meets_the_deadline_or_sheds() {
+        const READERS: usize = 20;
+        const HOLD: Duration = Duration::from_secs(2);
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let entered = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (g, entered_h, ran_h) = (Arc::clone(&gate), Arc::clone(&entered), Arc::clone(&ran));
+        let port = start(4, 64, move |request: &Request| {
+            ran_h.lock().unwrap().push(request.target.clone());
+            if request.method == Method::Post {
+                entered_h.fetch_add(1, Ordering::SeqCst);
+                let _wait = g.lock();
+                return Response::text(200, "write");
+            }
+            Response::text(200, "read")
+        });
+        let write = std::thread::spawn(move || {
+            exchange(
+                port,
+                b"POST /v1/atoms HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+            )
+        });
+        let started = Instant::now();
+        while entered.load(Ordering::SeqCst) == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the write did not start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let allowance = Duration::from_millis(400);
+        let mut joins = Vec::new();
+        for i in 0..READERS {
+            joins.push(std::thread::spawn(move || {
+                let deadline = admit::unix_ms().saturating_add(allowance.as_millis() as u64);
+                let raw = format!("GET /v1/search?q={i}&deadline={deadline} HTTP/1.1\r\n\r\n");
+                let began = Instant::now();
+                let out = exchange(port, raw.as_bytes());
+                (began.elapsed(), out)
+            }));
+        }
+        for join in joins {
+            let (took, out) = join.join().unwrap();
+            assert!(
+                took < HOLD,
+                "a reader waited {took:?}, as long as the held write"
+            );
+            if out.starts_with("HTTP/1.1 200 ") {
+                assert!(
+                    took < allowance + Duration::from_millis(150),
+                    "a read answered after its deadline: {took:?}"
+                );
+            } else {
+                assert!(out.starts_with("HTTP/1.1 503 "), "{out}");
+                assert!(out.contains("Retry-After: "), "{out}");
+                assert!(
+                    took < Duration::from_millis(150),
+                    "a shed read was not fast: {took:?} {out}"
+                );
+            }
+        }
+        drop(held);
+        assert!(write.join().unwrap().starts_with("HTTP/1.1 200 "));
+        let targets = ran.lock().unwrap();
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.starts_with("/v1/search")),
+            "no search ran: {targets:?}"
+        );
     }
 
     /// Writes fill their queue and come back 503. Reads that arrive beside

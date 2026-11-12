@@ -27,6 +27,8 @@ pub fn run() -> anyhow::Result<()> {
     let mut decay = None;
     let mut owned = false;
     let mut supervise = false;
+    let mut cache_mb: Option<usize> = None;
+    let mut embed_idle_min: Option<u64> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -46,6 +48,8 @@ pub fn run() -> anyhow::Result<()> {
             // `embed::enabled` reads this argument. The arm is what keeps
             // the writer from refusing the flag as unknown.
             "--no-embed" => {}
+            "--cache-mb" => cache_mb = Some(next("--cache-mb")?.parse()?),
+            "--embed-idle-min" => embed_idle_min = Some(next("--embed-idle-min")?.parse()?),
             "-h" | "--help" => {
                 println!("{}", packsetd_usage());
                 return Ok(());
@@ -103,6 +107,14 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     let service = Arc::new(Service::open(Home::new(&root))?);
+    if let Some(mebibytes) = cache_mb {
+        service
+            .store()
+            .set_cache_limit_bytes(mebibytes.saturating_mul(1024 * 1024));
+    }
+    if let Some(minutes) = embed_idle_min {
+        crate::embed::set_idle_minutes(minutes);
+    }
     if owned {
         watch_parent(Arc::clone(&service), parent_signal);
     }
@@ -135,6 +147,8 @@ fn packsetd_usage() -> String {
              --owned             exit when stdin closes; Linux also signals this process when its parent dies\n\
              --supervise         restart this process when it dies; a stop signal ends the loop\n\
              --no-embed          leave the encoder unstarted; INSIDE_EMBED=off\n\
+             --cache-mb <n>      cap on cached atoms, indexes and snapshots, in MiB; default 128, or PACKSET_CACHE_MB; 0 is no cap\n\
+             --embed-idle-min <n> stop the encoder after n minutes without a call; default 5, or PACKSET_EMBED_IDLE_MIN; 0 leaves it up\n\
          \n\
          Every request but GET /health carries the token in <home>/token as\n\
          Authorization: Bearer TOKEN. PACKSET_AUTH=off drops the check.",
@@ -436,6 +450,8 @@ mod tests {
     fn help_names_the_encoder_switch_and_port_zero() {
         let usage = packsetd_usage();
         assert!(usage.contains("--no-embed"), "{usage}");
+        assert!(usage.contains("--cache-mb"), "{usage}");
+        assert!(usage.contains("--embed-idle-min"), "{usage}");
         assert!(usage.contains("INSIDE_EMBED=off"), "{usage}");
         assert!(
             usage.contains("0 prints and writes the assigned port"),

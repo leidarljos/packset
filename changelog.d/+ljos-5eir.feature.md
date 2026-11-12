@@ -1,0 +1,3 @@
+Reads keep a slot budget under memory pressure, and a write in progress no longer blocks them.
+
+Search and atom reads use the snapshot the writer last swapped in. A request whose deadline cannot be met is answered 503 with Retry-After. A down encoder is skipped and that request is ranked by words. Cached atoms, indexes and snapshots stay within 128 MiB (`--cache-mb`, `PACKSET_CACHE_MB`) by dropping the least recently used workspace. The encoder child stops after five minutes without a call and starts again on the next one. `/metrics` reports queue depth, sheds, per-class latency and resident cache bytes.
