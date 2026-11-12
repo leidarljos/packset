@@ -4,7 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
-## Unreleased
+## 0.17.9 (2026-11-12)
 
 - The cache cap counts snapshots, indexes, shapes and live sets, including when one workspace is the whole cache.
   Past the cap those structures are dropped until `cache_bytes` is inside it.
