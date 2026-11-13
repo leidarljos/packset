@@ -2783,7 +2783,7 @@ fn explain_home(path: &Path, err: &std::io::Error) -> anyhow::Error {
 }
 
 /// The process that still has `path` open, when this user can see it.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn lock_holder(path: &Path) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(path).ok()?;
@@ -2810,6 +2810,276 @@ fn lock_holder(path: &Path) -> Option<u32> {
     None
 }
 
+/// The process that still has `path` open, on macOS.
+///
+/// There is no `/proc`. libproc lists the open files, which is what `lsof`
+/// asks, and `lsof` itself answers when that walk cannot see the holder.
+/// `F_GETLK` names a POSIX record lock when the kernel gives a pid. A
+/// `flock` comes back with pid -1, and a process does not block its own
+/// record lock, so a pid the kernel will not give stays absent. The caller
+/// then says another process has the file.
+#[cfg(target_os = "macos")]
+fn lock_holder(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    let dev = meta.dev();
+    let ino = meta.ino();
+    let canon = fs::canonicalize(path).ok();
+    let canon = canon.as_deref();
+    let me = std::process::id();
+    if pid_has_file(me, dev, ino, path, canon) {
+        return Some(me);
+    }
+    for pid in listed_pids() {
+        if pid != me && pid_has_file(pid, dev, ino, path, canon) {
+            return Some(pid);
+        }
+    }
+    lsof_pid(path).or_else(|| record_lock_pid(path))
+}
+
+/// `PROC_ALL_PIDS` from `<libproc.h>`.
+#[cfg(target_os = "macos")]
+const PROC_ALL_PIDS: u32 = 1;
+
+/// `PROC_PIDFDVNODEPATHINFO` from `<sys/proc_info.h>`.
+#[cfg(target_os = "macos")]
+const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+/// `proc_fileinfo` from `<sys/proc_info.h>`. `off_t` is 8 bytes, so this
+/// is 24 with no padding, and `vnode_info_path` follows it directly.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ProcFileInfo {
+    _fi_openflags: u32,
+    _fi_status: u32,
+    _fi_offset: libc::off_t,
+    _fi_type: i32,
+    _fi_guardflags: u32,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<ProcFileInfo>() == 24);
+
+/// `vnode_fdinfowithpath`: the fd's stat, then its path.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct VnodeFdPath {
+    _pfi: ProcFileInfo,
+    pvip: libc::vnode_info_path,
+}
+
+/// Every pid libproc will list. An empty list is a failed query, and the
+/// caller has already looked at this process on its own.
+#[cfg(target_os = "macos")]
+fn listed_pids() -> Vec<u32> {
+    let bytes = unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+    // A few births between the size query and the fill.
+    let count = bytes as usize / 4 + 32;
+    let mut raw = vec![0i32; count];
+    let got = unsafe {
+        libc::proc_listpids(
+            PROC_ALL_PIDS,
+            0,
+            raw.as_mut_ptr().cast(),
+            (count * 4) as libc::c_int,
+        )
+    };
+    if got <= 0 {
+        return Vec::new();
+    }
+    let n = (got as usize / 4).min(raw.len());
+    raw.truncate(n);
+    raw.into_iter()
+        .filter(|&pid| pid > 0)
+        .map(|pid| pid as u32)
+        .collect()
+}
+
+/// The open vnode fds of `pid`. A process we may not inspect yields nothing.
+#[cfg(target_os = "macos")]
+fn fd_table(pid: i32) -> Vec<libc::proc_fdinfo> {
+    let bytes =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+    let extra = std::mem::size_of::<libc::proc_fdinfo>();
+    let count = bytes as usize / extra + 8;
+    // Named so `as_mut_ptr().cast()` knows the pointee.
+    let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
+    for _ in 0..count {
+        // SAFETY: `proc_fdinfo` is two integers. The fill below overwrites
+        // the entries that `got` says are live, and the rest are dropped.
+        fds.push(unsafe { std::mem::zeroed::<libc::proc_fdinfo>() });
+    }
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            (count * extra) as libc::c_int,
+        )
+    };
+    if got <= 0 {
+        return Vec::new();
+    }
+    let n = (got as usize / extra).min(fds.len());
+    fds.truncate(n);
+    fds
+}
+
+/// The path libproc stored for this fd, when it stored one.
+#[cfg(target_os = "macos")]
+fn vnode_path(info: &VnodeFdPath) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = Vec::new();
+    for &b in info.pvip.vip_path.as_flattened() {
+        if b == 0 {
+            break;
+        }
+        bytes.push(b as u8);
+    }
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(Path::new(std::ffi::OsStr::from_bytes(&bytes)).to_path_buf())
+    }
+}
+
+/// `stat.st_dev` is a signed `dev_t` widened to `u64`. `vst_dev` is the
+/// same bits in a `u32`. Either widening can be the one Rust's metadata
+/// used.
+#[cfg(target_os = "macos")]
+fn same_dev(stat_dev: u64, vst_dev: u32) -> bool {
+    let widened = u64::from(vst_dev);
+    // `as u64` from `i32` sign-extends, which is what a signed `dev_t`
+    // becomes when Rust's metadata widens it.
+    let signed = i32::from_ne_bytes(vst_dev.to_ne_bytes()) as u64;
+    stat_dev == widened || stat_dev == signed
+}
+
+/// Whether this vnode is `path`. Device and inode are the Linux test.
+/// The path covers a device number the two calls spell differently.
+/// A zero device is libproc saying it has no stat, and it does not match.
+#[cfg(target_os = "macos")]
+fn same_open_file(
+    vst_dev: u32,
+    vst_ino: u64,
+    vnode: Option<&Path>,
+    dev: u64,
+    ino: u64,
+    path: &Path,
+    canon: Option<&Path>,
+) -> bool {
+    if vst_dev != 0 && same_dev(dev, vst_dev) && vst_ino == ino {
+        return true;
+    }
+    vnode.is_some_and(|got| got == path || canon.is_some_and(|real| got == real))
+}
+
+/// Whether `pid` has `path` open as a vnode fd.
+#[cfg(target_os = "macos")]
+fn pid_has_file(pid: u32, dev: u64, ino: u64, path: &Path, canon: Option<&Path>) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    for fd in fd_table(pid) {
+        if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
+            continue;
+        }
+        // SAFETY: the buffer is a zeroed `vnode_fdinfowithpath` and the
+        // size passed is its size. A short or failed read is discarded.
+        let mut info = unsafe { std::mem::zeroed::<VnodeFdPath>() };
+        let got = unsafe {
+            libc::proc_pidfdinfo(
+                pid,
+                fd.proc_fd,
+                PROC_PIDFDVNODEPATHINFO,
+                (&mut info as *mut VnodeFdPath).cast(),
+                std::mem::size_of::<VnodeFdPath>() as libc::c_int,
+            )
+        };
+        if got < std::mem::size_of::<VnodeFdPath>() as libc::c_int {
+            continue;
+        }
+        let vnode = vnode_path(&info);
+        if same_open_file(
+            info.pvip.vip_vi.vi_stat.vst_dev,
+            info.pvip.vip_vi.vi_stat.vst_ino,
+            vnode.as_deref(),
+            dev,
+            ino,
+            path,
+            canon,
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pids `lsof` prints for `path`. The base system keeps it in `/usr/sbin`,
+/// which a login PATH has and a trimmed one may not.
+#[cfg(target_os = "macos")]
+fn lsof_pid(path: &Path) -> Option<u32> {
+    let pids = match lsof_pids("lsof", path) {
+        Ok(pids) => pids,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            lsof_pids("/usr/sbin/lsof", path).unwrap_or_default()
+        }
+        Err(_) => return None,
+    };
+    let me = std::process::id();
+    pids.iter()
+        .copied()
+        .find(|&pid| pid == me)
+        .or_else(|| pids.first().copied())
+}
+
+#[cfg(target_os = "macos")]
+fn lsof_pids(bin: &str, path: &Path) -> std::io::Result<Vec<u32>> {
+    use std::process::{Command, Stdio};
+    let out = Command::new(bin)
+        .args(["-t", "-n", "-P"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(pid) = line.trim().parse::<u32>().ok().filter(|&pid| pid > 0) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+/// The pid in a blocking POSIX record lock, when `F_GETLK` reports one.
+/// `-1` is a `flock`, whose owner this call does not name.
+#[cfg(target_os = "macos")]
+fn record_lock_pid(path: &Path) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let file = fs::File::open(path).ok()?;
+    // SAFETY: `flock` is plain data. `F_GETLK` overwrites it.
+    let mut info = unsafe { std::mem::zeroed::<libc::flock>() };
+    // `F_WRLCK` is a `c_short` on macOS. `SEEK_SET` is a `c_int`.
+    info.l_type = libc::F_WRLCK;
+    info.l_whence = libc::SEEK_SET as libc::c_short;
+    info.l_start = 0;
+    info.l_len = 0;
+    // SAFETY: `info` is a `flock` this function owns. `F_GETLK` only writes it.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut info) };
+    if rc != 0 || info.l_type == libc::F_UNLCK || info.l_pid <= 0 {
+        return None;
+    }
+    u32::try_from(info.l_pid).ok()
+}
+
 #[cfg(not(unix))]
 fn lock_holder(_path: &Path) -> Option<u32> {
     None
@@ -2827,7 +3097,27 @@ fn process_comm(pid: u32) -> Option<String> {
             Some(name.to_string())
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 32];
+        // SAFETY: `buf` is writable for the length passed. `proc_name`
+        // writes a NUL-terminated name, or nothing when `pid` is gone.
+        let n = unsafe {
+            libc::proc_name(pid.cast_signed(), buf.as_mut_ptr().cast(), buf.len() as u32)
+        };
+        if n <= 0 {
+            return None;
+        }
+        let n = (n as usize).min(buf.len());
+        let end = buf.iter().take(n).position(|&b| b == 0).unwrap_or(n);
+        let name = std::str::from_utf8(&buf[..end]).ok()?.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
@@ -2940,15 +3230,33 @@ mod tests {
             Err(err) => err.to_string(),
             Ok(_) => panic!("a second open took the lock"),
         };
-        assert!(
-            err.contains(&std::process::id().to_string()),
-            "the holder is unnamed: {err}"
-        );
-        assert!(
-            err.contains("stop that process, then run packset ensure"),
-            "{err}"
-        );
         assert!(err.contains("packsetd.lock"), "{err}");
+        let pid = std::process::id();
+        // Linux reads `/proc`. macOS asks libproc, then `lsof`, then
+        // `F_GETLK`. Those hosts name this process. Anywhere else the
+        // message says another process, which is all that could be said.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert!(
+                err.contains(&format!("pid {pid}")),
+                "the holder is unnamed: {err}"
+            );
+            assert!(
+                err.contains("stop that process, then run packset ensure"),
+                "{err}"
+            );
+            let name = process_comm(pid).expect("this process has no name");
+            assert!(err.contains(&format!("({name})")), "{err}");
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            assert!(err.contains("already open by another process"), "{err}");
+            assert!(
+                err.contains("stop that writer, then run packset ensure"),
+                "{err}"
+            );
+            assert!(!err.contains(&format!("pid {pid}")), "{err}");
+        }
     }
 
     #[test]

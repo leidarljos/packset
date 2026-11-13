@@ -4,8 +4,9 @@
 //! process took it. A connect answers the first. On Linux the second is a
 //! socket inode in `/proc/net/tcp` and then a walk of `/proc/<pid>/fd` looking
 //! for it, which is what `ss -ltnp` does and what `lsof` does, without either
-//! being present. macOS has no `/proc`, and there `lsof`, which the base
-//! system ships, answers it.
+//! being present. macOS has no `/proc`. There `lsof`, which the base system
+//! ships, answers the pid, and `proc_name` answers the short name `comm`
+//! would have given.
 
 use std::fs;
 use std::io;
@@ -128,8 +129,10 @@ pub fn pid_on_port(port: u16) -> Option<u32> {
         .find_map(|line| line.trim().parse().ok())
 }
 
-/// The short name of `pid`, from the kernel. `None` off Linux, or when
-/// the process is gone.
+/// The short name of `pid`, from the kernel.
+///
+/// Linux reads `comm`. macOS asks `proc_name`, which is the same field.
+/// `None` when the process is gone, or on a host that has neither.
 #[must_use]
 pub fn process_name(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
@@ -142,7 +145,29 @@ pub fn process_name(pid: u32) -> Option<String> {
             Some(name.to_string())
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // `p_comm` is `MAXCOMLEN` (16) bytes. A wider buffer still comes
+        // back that short, and the extra room keeps a longer `pbi_name`.
+        let mut buf = [0u8; 32];
+        // SAFETY: `buf` is writable for the length passed. `proc_name`
+        // writes a NUL-terminated name, or nothing when `pid` is gone.
+        let n = unsafe {
+            libc::proc_name(pid.cast_signed(), buf.as_mut_ptr().cast(), buf.len() as u32)
+        };
+        if n <= 0 {
+            return None;
+        }
+        let n = (n as usize).min(buf.len());
+        let end = buf.iter().take(n).position(|&b| b == 0).unwrap_or(n);
+        let name = std::str::from_utf8(&buf[..end]).ok()?.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
@@ -195,8 +220,23 @@ mod tests {
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = socket.local_addr().unwrap().port();
         assert!(listening(port));
-        assert_eq!(pid_on_port(port), Some(std::process::id()));
-        let name = process_name(std::process::id()).unwrap();
-        assert!(!name.is_empty(), "{name}");
+        let pid = pid_on_port(port);
+        // Linux reads the socket inode out of `/proc`. macOS asks `lsof`
+        // and `proc_name`. Both name this process. A host with neither
+        // leaves the holder unnamed, and the caller says another process
+        // has the port.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert_eq!(pid, Some(std::process::id()));
+            let name = process_name(std::process::id()).expect("this process has no name");
+            assert!(!name.is_empty(), "{name}");
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            if let Some(found) = pid {
+                assert_eq!(found, std::process::id());
+            }
+            assert!(process_name(std::process::id()).is_none());
+        }
     }
 }
