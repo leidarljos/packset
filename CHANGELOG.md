@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.17.10 (2026-11-13)
+
+- A search no longer keeps a copy of the pack.
+  The first search parsed every record, embeddings included. It then kept that tree until it lifted the floats out.
+  On a pack of 322332 KiB that first search reached 1742296 KiB and left anonymous memory 637020 KiB above its base. Starting over that pack added 10044 KiB at peak.
+  The scan now reads a step at a time, skips building the embedding array, and drops those pages before the next step. The floats stay with the records they were read with, and the stored JSON numbers are read for the one atom an answer is about.
+  After the same start the later search reached 231080 KiB, of which 219800 KiB stayed anonymous, and the start itself grew 4384 KiB. The data file stayed a shared map.
+
 ## 0.17.9 (2026-11-12)
 
 - The cache cap counts snapshots, indexes, shapes and live sets, including when one workspace is the whole cache.
