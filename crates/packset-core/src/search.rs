@@ -842,21 +842,6 @@ pub fn max_sim(query: &[Vec<f32>], document: &[Vec<f32>]) -> f64 {
         .sum()
 }
 
-/// The vector for `ordinal`, from the cache when it was passed in, else
-/// parsed from the record. A cache hit does not rebuild the JSON array.
-fn vector_at<'a>(
-    vectors: &'a [Option<&'a [f32]>],
-    ordinal: usize,
-    atom: &'a Record,
-) -> Option<std::borrow::Cow<'a, [f32]>> {
-    if let Some(Some(vector)) = vectors.get(ordinal) {
-        if !vector.is_empty() {
-            return Some(std::borrow::Cow::Borrowed(*vector));
-        }
-    }
-    embedding_of(atom).map(std::borrow::Cow::Owned)
-}
-
 /// The dense ballot. Atoms without a stored vector are skipped, not scored
 /// zero: a missing encoder is not a vote.
 ///
@@ -867,18 +852,23 @@ fn vector_at<'a>(
 /// fuse reads those scores.
 #[must_use]
 pub fn search_dense<R: Borrow<Record>>(ask: &Ask<'_, R>, query: &[f32]) -> Vec<Value> {
-    search_dense_at(ask, query, &[])
+    search_dense_at(ask, query, |ordinal| {
+        ask.atoms
+            .get(ordinal)
+            .and_then(|atom| embedding_of(atom.borrow()))
+    })
 }
 
-/// [`search_dense`] when the caller already holds the vectors as floats.
-/// `vectors[i]` belongs to `ask.atoms[i]`. An empty slice, or a missing
-/// slot, is read from the record's JSON array.
+/// [`search_dense`] when the caller can produce atom `ordinal`'s floats.
+/// A missing vector is skipped, the same as a record with no array.
+/// The closure may be called again for a hit that is kept, to record the
+/// cosine.
 #[must_use]
-pub fn search_dense_at<R: Borrow<Record>>(
-    ask: &Ask<'_, R>,
-    query: &[f32],
-    vectors: &[Option<&[f32]>],
-) -> Vec<Value> {
+pub fn search_dense_at<R, F>(ask: &Ask<'_, R>, query: &[f32], mut vector_at: F) -> Vec<Value>
+where
+    R: Borrow<Record>,
+    F: FnMut(usize) -> Option<Vec<f32>>,
+{
     let Ask {
         atoms,
         limit,
@@ -896,7 +886,7 @@ pub fn search_dense_at<R: Borrow<Record>>(
         if !serves(atom, set, kind, now) {
             continue;
         }
-        let Some(vector) = vector_at(vectors, ordinal, atom) else {
+        let Some(vector) = vector_at(ordinal) else {
             continue;
         };
         let relevance = cosine(query, &vector);
@@ -920,7 +910,7 @@ pub fn search_dense_at<R: Borrow<Record>>(
             let mut hit = atom_hit(atom, c.score);
             // The plain cosine, without the tenth of trust added to the
             // score: one scale a client can set a floor on.
-            if let Some(vector) = vector_at(vectors, c.ordinal, atom) {
+            if let Some(vector) = vector_at(c.ordinal) {
                 hit["cosine"] = json!((cosine(query, &vector) * 10_000.0).round() / 10_000.0);
             }
             hit

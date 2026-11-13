@@ -388,7 +388,7 @@ fn route(
                                 .get("kind")
                                 .map(String::as_str)
                                 .filter(|k| !k.is_empty());
-                            atoms_answer(&snap.atoms, &snap.originals, omit, kind)
+                            atoms_answer(&snap.atoms, Arc::clone(&snap.vectors), omit, kind)
                         }
                         Err(e) => Answer::err(400, e),
                     },
@@ -650,7 +650,7 @@ fn route(
                                 .filter(|k| !k.is_empty()),
                         );
                         for atom in &mut recalled {
-                            crate::store::restore_embedding(atom, &snap.originals);
+                            crate::store::put_snapshot_embedding(atom, &snap.vectors);
                         }
                         Answer::ok(json!({ "atoms": recalled }))
                     }
@@ -817,19 +817,19 @@ fn route(
 /// left vectors out. A record with no vector stays as the cache has it.
 fn listed(
     atom: &Map<String, Value>,
-    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
+    vectors: &std::collections::HashMap<String, std::sync::Arc<[f32]>>,
     omit: bool,
 ) -> Value {
-    let id = atom.get("id").and_then(Value::as_str);
-    let has_vector = id.is_some_and(|id| originals.contains_key(id));
-    if !omit && !has_vector {
-        return Value::Object(packset_core::record::shown(atom).into_owned());
+    if omit {
+        let mut copy = atom.clone();
+        copy.remove("embedding");
+        packset_core::record::fill_origin(&mut copy);
+        return Value::Object(copy);
     }
     let mut copy = atom.clone();
-    if omit {
-        copy.remove("embedding");
-    } else {
-        crate::store::restore_embedding(&mut copy, originals);
+    crate::store::put_snapshot_embedding(&mut copy, vectors);
+    if copy.get("embedding").is_none() {
+        return Value::Object(packset_core::record::shown(atom).into_owned());
     }
     packset_core::record::fill_origin(&mut copy);
     Value::Object(copy)
@@ -1076,19 +1076,18 @@ fn encode(mut answer: Answer) -> wire::Response {
 /// listing in the worker.
 fn atoms_answer(
     atoms: &[std::sync::Arc<crate::store::Record>],
-    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
+    vectors: std::sync::Arc<std::collections::HashMap<String, std::sync::Arc<[f32]>>>,
     omit: bool,
     kind: Option<&str>,
 ) -> Answer {
     let owned_atoms = atoms.to_vec();
-    let owned_originals = originals.clone();
     let owned_kind = kind.map(str::to_string);
     let body = if cfg!(test) {
         let mut raw = Vec::new();
         if write_listing(
             &mut raw,
             &owned_atoms,
-            &owned_originals,
+            &vectors,
             omit,
             owned_kind.as_deref(),
         )
@@ -1107,13 +1106,7 @@ fn atoms_answer(
         extra: Some(Box::new(AnswerExtra {
             retry_after: None,
             stream: Some(Box::new(move |out| {
-                write_listing(
-                    out,
-                    &owned_atoms,
-                    &owned_originals,
-                    omit,
-                    owned_kind.as_deref(),
-                )
+                write_listing(out, &owned_atoms, &vectors, omit, owned_kind.as_deref())
             })),
         })),
     }
@@ -1122,7 +1115,7 @@ fn atoms_answer(
 fn write_listing(
     mut out: impl std::io::Write,
     atoms: &[std::sync::Arc<crate::store::Record>],
-    originals: &std::collections::HashMap<String, std::sync::Arc<[serde_json::Number]>>,
+    vectors: &std::collections::HashMap<String, std::sync::Arc<[f32]>>,
     omit: bool,
     kind: Option<&str>,
 ) -> std::io::Result<()> {
@@ -1136,7 +1129,7 @@ fn write_listing(
             out.write_all(b",")?;
         }
         first = false;
-        let one = listed(atom, originals, omit);
+        let one = listed(atom, vectors, omit);
         serde_json::to_writer(&mut out, &one).map_err(std::io::Error::other)?;
     }
     out.write_all(b"]}")?;

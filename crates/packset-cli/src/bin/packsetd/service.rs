@@ -2355,7 +2355,7 @@ impl Service {
                 .collect();
             atoms.iter_mut().for_each(|atom| {
                 record::fill_origin(atom);
-                crate::store::restore_embedding(atom, &snap.originals);
+                crate::store::put_stored_embedding(atom, &self.store, workspace);
             });
             Ok(atoms)
         };
@@ -2788,14 +2788,6 @@ impl Service {
         // `vectors` is the snapshot these atoms were read with. A second
         // cache lookup can miss the workspace and drop the ballot. A dated
         // read has no side table, and the scorer reads the record instead.
-        let embedded: Vec<Option<&[f32]>> = atoms
-            .iter()
-            .map(|atom| {
-                atom.get("id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| vectors.get(id).map(AsRef::as_ref))
-            })
-            .collect();
         // The milli projection is live-now. A dated question over a closed
         // window would otherwise miss the atom the retrieve just found.
         // Without an encoder the projection is the only lexical voice besides
@@ -2818,7 +2810,19 @@ impl Service {
             // A miss leaves the two word rankings.
             let meaning = if crate::embed::enabled() {
                 crate::embed::try_encode_query(query)
-                    .map(|vector| packset_core::search::search_dense_at(&ask, &vector, &embedded))
+                    .map(|vector| {
+                        packset_core::search::search_dense_at(&ask, &vector, |ordinal| {
+                            let atom = atoms.get(ordinal)?;
+                            if let Some(parsed) = packset_core::search::embedding_of(atom) {
+                                return Some(parsed);
+                            }
+                            let id = atom.get("id").and_then(Value::as_str)?;
+                            if let Some(cached) = vectors.get(id) {
+                                return Some(cached.as_ref().to_vec());
+                            }
+                            self.store.stored_vector(workspace, id)
+                        })
+                    })
                     .filter(|hits| !hits.is_empty())
             } else {
                 None
@@ -3929,8 +3933,8 @@ mod tests {
                 Some(3),
                 "{id} lost its vector: {disk:?}"
             );
+            assert_eq!(svc.store.stored_vector("w", id).unwrap().len(), 3);
         }
-        assert_eq!(svc.store.vectors("w").len(), 2);
     }
 
     /// A new sentence drops the old vector. A new vector sent with it is
@@ -3959,7 +3963,7 @@ mod tests {
         svc.update("w", "a", &fields).unwrap();
         let disk = svc.store.get("w", "a").unwrap().unwrap();
         assert!(disk["embedding"].is_null(), "old vector kept: {disk:?}");
-        assert!(svc.store.vectors("w").get("a").is_none());
+        assert!(svc.store.stored_vector("w", "a").is_none());
 
         fields.insert("embedding".into(), json!([0.1, 0.2, 0.3]));
         fields.insert(
@@ -3981,7 +3985,7 @@ mod tests {
         svc.update("w", "a", &clear).unwrap();
         let disk = svc.store.get("w", "a").unwrap().unwrap();
         assert!(disk["embedding"].is_null(), "{disk:?}");
-        assert!(svc.store.vectors("w").get("a").is_none());
+        assert!(svc.store.stored_vector("w", "a").is_none());
     }
 
     /// A pack answers a client vector as it was stored, not as f32.
@@ -6546,6 +6550,78 @@ else:
             .unwrap();
         assert_eq!(empty["rerank"], json!("off"), "{empty}");
         assert!(empty["hits"].as_array().unwrap().is_empty());
+    }
+
+    /// Claims that carry vectors rank by their text, the same order the
+    /// scorer returns over those records. The vectors stay stored.
+    #[test]
+    fn search_ranks_the_stored_text_the_way_the_scorer_does() {
+        let (_dir, svc) = service();
+        let embedding = json!([0.2, 0.4, 0.6, 0.1]);
+        for (id, text) in [
+            ("alpha", "The quartz lens sits on the bench."),
+            ("beta", "The river gate opens at dawn."),
+        ] {
+            let mut claim = atom(text);
+            claim.insert("id".into(), json!(id));
+            claim.insert("embedding".into(), embedding.clone());
+            svc.store.upsert(&claim).unwrap();
+        }
+        let panel = packset_core::Panel::default();
+        let found = svc
+            .search("w", "quartz lens", 5, None, &panel, None, false, None)
+            .unwrap();
+        let got: Vec<&str> = found["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|hit| hit["id"].as_str())
+            .collect();
+        let live = svc.store.live("w").unwrap();
+        let documents: Vec<Vec<String>> = live
+            .iter()
+            .map(|atom| packset_core::search::atom_tokens(atom))
+            .collect();
+        let index = packset_core::bm25::Index::build(documents.iter().map(Vec::as_slice));
+        let now = packset_core::clock::utcnow();
+        let ask = packset_core::search::Ask {
+            user: "",
+            memory: "",
+            atoms: live.as_slice(),
+            query: "quartz lens",
+            limit: 5,
+            set: None,
+            kind: None,
+            now: &now,
+        };
+        let lexical = packset_core::search::search_linear_with_ranked(
+            &ask,
+            &documents,
+            packset_core::search::Rank::Fused,
+        );
+        let terms = packset_core::search::search_bm25_ranked(
+            &ask,
+            &index,
+            packset_core::search::Rank::Fused,
+        );
+        let merged = packset_core::search::merge_ballots_ranked(
+            &[lexical, terms],
+            5,
+            &panel,
+            &now,
+            packset_core::search::Rank::Fused,
+        );
+        let expect: Vec<&str> = merged.iter().filter_map(|hit| hit["id"].as_str()).collect();
+        assert_eq!(got, expect, "{found}");
+        assert_eq!(got.first().copied(), Some("alpha"));
+        for id in ["alpha", "beta"] {
+            assert_eq!(
+                svc.store.get("w", id).unwrap().unwrap()["embedding"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(4)
+            );
+        }
     }
 
     /// A requested rerank over a lone hit never reaches the model: one

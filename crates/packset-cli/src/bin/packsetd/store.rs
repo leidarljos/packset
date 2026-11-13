@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use heed::types::Bytes;
-use heed::{Database, Env, EnvOpenOptions};
+use heed::{Database, Env, EnvFlags, EnvOpenOptions};
 use packset_core::bm25::Index;
 use packset_core::record::{self, AtomError};
 use serde_json::{Map, Value};
@@ -214,19 +214,21 @@ fn searchable_bytes(set: &Searchable) -> usize {
 /// One atom record.
 pub type Record = Map<String, Value>;
 
+/// Records kept from one scan, and the floats lifted out of them.
+type Kept = (Vec<Arc<Record>>, HashMap<String, Arc<[f32]>>);
+
 /// One workspace's live set at a write count. `stored` is what a write
 /// folds into. `shown` is that set with links narrowed to ids present.
 /// `vectors` is the one copy of each atom's embedding. The records here
 /// omit the key, so a null a client sent still means clear.
 struct Snapshot {
     generation: u64,
-    stored: Vec<Record>,
+    stored: Vec<Arc<Record>>,
     shown: Live,
     dangling: HashSet<String>,
     vectors: Arc<HashMap<String, Arc<[f32]>>>,
-    /// The JSON numbers the client stored. Answers copy these. The floats
-    /// are for scoring, and rebuilding the array from them is not the
-    /// value that was written.
+    /// Empty. An answer that needs the stored numbers reads that one
+    /// record. Keeping them here kept a second copy of every embedding.
     originals: Arc<HashMap<String, Arc<[serde_json::Number]>>>,
 }
 
@@ -241,7 +243,8 @@ pub type Live = Arc<Vec<Arc<Record>>>;
 pub struct LiveSnapshot {
     pub atoms: Live,
     pub vectors: Arc<HashMap<String, Arc<[f32]>>>,
-    /// JSON numbers for each vector, as stored, for an answer to copy.
+    /// Empty. [`Store::embedding_numbers`] reads the one record an answer
+    /// is about. The map stays so a caller compiled against it still builds.
     pub originals: Arc<HashMap<String, Arc<[serde_json::Number]>>>,
     pub generation: u64,
     /// Whether this set is the one a writer has published. A scan taken
@@ -717,11 +720,14 @@ impl Store {
         // SAFETY: LMDB maps the file; the contract is that no other process
         // writes it, which the lock above is what enforces. The map starts
         // from the file's size and grows when a write needs room; the file
-        // grows with the pages written.
+        // grows with the pages written. `NO_READ_AHEAD` asks the kernel not
+        // to fault the rest of the file when a scan reads one page: a start
+        // and a search then keep the pages they touch, not the pack.
         let env = match unsafe {
             EnvOpenOptions::new()
                 .map_size(map_for(&db_path))
                 .max_dbs(1)
+                .flags(EnvFlags::NO_READ_AHEAD)
                 .open(&db_path)
         } {
             Ok(env) => env,
@@ -852,6 +858,95 @@ impl Store {
         Ok(out)
     }
 
+    /// The records `keep` accepts in one workspace. A numeric embedding is
+    /// dropped; the JSON of one record is live at a time.
+    /// Tombstones the index does not name yet are entered, as
+    /// [`Self::scan_past_tombstones`] does, and are not kept.
+    fn load_kept(
+        &self,
+        workspace: &str,
+        mut keep: impl FnMut(&Record) -> bool,
+    ) -> anyhow::Result<Kept> {
+        #[cfg(test)]
+        self.scanned.fetch_add(1, Ordering::SeqCst);
+        if workspace.is_empty() {
+            return Ok((Vec::new(), HashMap::new()));
+        }
+        use std::ops::Bound;
+        let prefix = workspace_prefix(workspace);
+        let mut stored = Vec::new();
+        let mut vectors = HashMap::new();
+        let mut unindexed = Vec::new();
+        let mut after: Option<Vec<u8>> = None;
+        loop {
+            let step_end = {
+                let _gate = self.gate();
+                let rtxn = self.env.read_txn()?;
+                let range = (
+                    match after.as_deref() {
+                        Some(key) => Bound::Excluded(key),
+                        None => Bound::Included(prefix.as_slice()),
+                    },
+                    Bound::Unbounded,
+                );
+                let mut buried = self
+                    .db
+                    .prefix_iter(&rtxn, &tombstone_key(&prefix))?
+                    .map_while(Result::ok)
+                    .map(|(entry, _)| &entry[1..])
+                    .peekable();
+                let mut read = 0usize;
+                let mut step_end = None;
+                for item in self.db.range(&rtxn, &range)? {
+                    let (key, raw) = item?;
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    while buried.next_if(|entry| *entry < key).is_some() {}
+                    if buried.next_if_eq(&key).is_some() {
+                        continue;
+                    }
+                    let Some((atom, vector)) = lean_record(raw) else {
+                        continue;
+                    };
+                    read = read.saturating_add(key.len() + raw.len());
+                    if record::is_tombstone(&atom) {
+                        #[cfg(test)]
+                        self.tombstones_read.fetch_add(1, Ordering::SeqCst);
+                        unindexed.push(key.to_vec());
+                    } else if keep(&atom) {
+                        if let Some(id) = atom.get("id").and_then(Value::as_str) {
+                            if let Some(vector) = vector {
+                                vectors.insert(id.to_string(), Arc::<[f32]>::from(vector));
+                            }
+                        }
+                        stored.push(Arc::new(atom));
+                    }
+                    // Larger than a stamp step: a search is not rewriting, and
+                    // a smaller step made a 50,000-claim search wait out the
+                    // client's deadline while the stamp pass ran beside it.
+                    if read >= 4 * STAMP_STEP_BYTES {
+                        step_end = Some(key.to_vec());
+                        break;
+                    }
+                }
+                step_end
+            };
+            // The step's pages leave the map before the next step reads.
+            // A scan that kept them resident was the pack.
+            self.release_pages();
+            release_heap();
+            match step_end {
+                Some(key) => after = Some(key),
+                None => break,
+            }
+        }
+        if !unindexed.is_empty() {
+            let _ = self.index_tombstones(&unindexed);
+        }
+        Ok((stored, vectors))
+    }
+
     /// Visit each record without collecting them. Status counts 30k expired
     /// atoms this way instead of holding every JSON value at once.
     ///
@@ -869,7 +964,7 @@ impl Store {
         let _gate = self.gate();
         let rtxn = self.env.read_txn()?;
         let mut each = |raw: &[u8]| {
-            if let Ok(Value::Object(record)) = serde_json::from_slice::<Value>(raw) {
+            if let Some((record, _)) = lean_record(raw) {
                 visit(&record);
             }
         };
@@ -978,6 +1073,35 @@ impl Store {
         }))
     }
 
+    /// The embedding stored for one atom, as the JSON numbers that were
+    /// written. `None` when the atom has no vector. One record is parsed.
+    pub fn embedding_numbers(
+        &self,
+        workspace: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<Vec<serde_json::Number>>> {
+        let Some(record) = self.get(workspace, id)? else {
+            return Ok(None);
+        };
+        Ok(match record.get("embedding") {
+            Some(Value::Array(items)) if !items.is_empty() => {
+                items.iter().map(|item| item.as_number().cloned()).collect()
+            }
+            _ => None,
+        })
+    }
+
+    /// The stored embedding as the floats a score uses. `None` when the
+    /// atom has no vector. One record is parsed.
+    pub fn stored_vector(&self, workspace: &str, id: &str) -> Option<Vec<f32>> {
+        let numbers = self.embedding_numbers(workspace, id).ok()??;
+        let mut out = Vec::with_capacity(numbers.len());
+        for number in &numbers {
+            out.push(number.as_f64()? as f32);
+        }
+        (!out.is_empty() && out.len() == numbers.len()).then_some(out)
+    }
+
     /// Write one record, replacing whatever shared its key.
     ///
     /// # Errors
@@ -1084,59 +1208,45 @@ impl Store {
             let mut lean_written = Vec::new();
             {
                 let vectors = Arc::make_mut(&mut snap.vectors);
-                let originals = Arc::make_mut(&mut snap.originals);
-                for item in &parked {
-                    if item.lean.get("workspace").and_then(Value::as_str)
-                        != Some(workspace.as_str())
-                    {
+                for Parked {
+                    lean: item,
+                    vector,
+                    clear,
+                } in &parked
+                {
+                    if item.get("workspace").and_then(Value::as_str) != Some(workspace.as_str()) {
                         continue;
                     }
                     touched = true;
-                    let Some(id) = item.lean.get("id").and_then(Value::as_str) else {
+                    let Some(id) = item.get("id").and_then(Value::as_str) else {
                         continue;
                     };
-                    match &item.vector {
+                    match vector {
                         Some(vector) => {
-                            let same = vectors
-                                .get(id)
-                                .is_some_and(|old| old.as_ref() == vector.as_ref());
-                            if !same {
-                                vectors.insert(id.to_string(), Arc::clone(vector));
-                            }
-                            if let Some(original) = &item.original {
-                                let same = originals
-                                    .get(id)
-                                    .is_some_and(|old| old.as_ref() == original.as_ref());
-                                if !same {
-                                    originals.insert(id.to_string(), Arc::clone(original));
-                                }
-                            }
+                            vectors.insert(id.to_string(), Arc::clone(vector));
                         }
-                        None if item.named => {
+                        None if *clear => {
                             vectors.remove(id);
-                            originals.remove(id);
                         }
                         None => {}
                     }
-                    let visible = shown_at(&item.lean, &now);
+                    let visible = shown_at(item, &now);
                     let at = snap
                         .stored
                         .iter()
                         .position(|a| a.get("id").and_then(Value::as_str) == Some(id));
                     match (at, visible) {
-                        (Some(i), true) => snap.stored[i] = item.lean.clone(),
+                        (Some(i), true) => snap.stored[i] = Arc::new(item.clone()),
                         (Some(i), false) => {
                             snap.stored.remove(i);
                             vectors.remove(id);
-                            originals.remove(id);
                         }
-                        (None, true) => snap.stored.push(item.lean.clone()),
+                        (None, true) => snap.stored.push(Arc::new(item.clone())),
                         (None, false) => {
                             vectors.remove(id);
-                            originals.remove(id);
                         }
                     }
-                    lean_written.push(item.lean.clone());
+                    lean_written.push(item.clone());
                 }
             }
             snap.generation = generation;
@@ -1664,6 +1774,11 @@ impl Store {
                 *counts.expired.entry(kind).or_insert(0) += 1;
             }
         })?;
+        // The walk parsed one record at a time. Drop the pages it faulted
+        // and the arena that parsed them, so a status over the pack does
+        // not leave the pack resident.
+        self.release_pages();
+        release_heap();
         let dropped = if let Ok(mut cache) = self.counts.write() {
             cache.insert(key, (generation, counts.clone()));
             if let Some(name) = workspace {
@@ -1736,31 +1851,12 @@ impl Store {
     fn scan_live_unpinned(&self, workspace: &str) -> anyhow::Result<LiveSnapshot> {
         let generation = self.generation.load(Ordering::Acquire);
         let now = packset_core::clock::utcnow();
-        let scanned: Vec<Record> = self
-            .scan_past_tombstones(workspace)?
-            .into_iter()
-            .filter(|atom| shown_at(atom, &now))
-            .collect();
-        let mut vectors = HashMap::with_capacity(scanned.len());
-        let mut originals = HashMap::with_capacity(scanned.len());
-        let mut stored = Vec::with_capacity(scanned.len());
-        for record in scanned {
-            let parked = park(&record);
-            if let Some(id) = parked.lean.get("id").and_then(Value::as_str) {
-                if let Some(vector) = parked.vector {
-                    vectors.insert(id.to_string(), vector);
-                }
-                if let Some(original) = parked.original {
-                    originals.insert(id.to_string(), original);
-                }
-            }
-            stored.push(parked.lean);
-        }
+        let (stored, vectors) = self.load_kept(workspace, |atom| shown_at(atom, &now))?;
         let (shown, _dangling) = shown_from(&stored);
         Ok(LiveSnapshot {
             atoms: Arc::new(shown),
             vectors: Arc::new(vectors),
-            originals: Arc::new(originals),
+            originals: Arc::new(HashMap::new()),
             generation,
             installed: false,
         })
@@ -1810,34 +1906,17 @@ impl Store {
                 return Ok(found);
             }
             let generation = self.generation.load(Ordering::Acquire);
-            // The vector is lifted out of the record here, once. The cached
-            // copies omit the key, and the original numbers are kept beside
-            // the floats for answers.
+            // One record at a time. Holding every JSON value, embeddings
+            // included, made the first search a copy of the pack: a 315 MiB
+            // pack peaked at 1.7 GiB of anonymous memory that way. The floats
+            // stay, one copy, and an answer reads the stored numbers for the
+            // atom it returns.
             let now = packset_core::clock::utcnow();
-            let scanned: Vec<Record> = self
-                .scan_past_tombstones(workspace)?
-                .into_iter()
-                .filter(|atom| shown_at(atom, &now))
-                .collect();
-            let mut vectors = HashMap::with_capacity(scanned.len());
-            let mut originals = HashMap::with_capacity(scanned.len());
-            let mut stored = Vec::with_capacity(scanned.len());
-            for record in scanned {
-                let parked = park(&record);
-                if let Some(id) = parked.lean.get("id").and_then(Value::as_str) {
-                    if let Some(vector) = parked.vector {
-                        vectors.insert(id.to_string(), vector);
-                    }
-                    if let Some(original) = parked.original {
-                        originals.insert(id.to_string(), original);
-                    }
-                }
-                stored.push(parked.lean);
-            }
+            let (stored, vectors) = self.load_kept(workspace, |atom| shown_at(atom, &now))?;
             let (shown, dangling) = shown_from(&stored);
             let shared = Arc::new(shown);
             let vectors = Arc::new(vectors);
-            let originals = Arc::new(originals);
+            let originals = Arc::new(HashMap::new());
             let mut cache = self.live.write().unwrap_or_else(|e| e.into_inner());
             // Another rebuild may have published this generation while we
             // waited for the cache lock. Keep that snapshot: replacing it
@@ -1947,7 +2026,8 @@ impl Store {
             .map(|(_, set)| set);
         let (index, documents) = match previous {
             Some((old_atoms, mut index, mut documents))
-                if old_atoms.len() <= atoms.len()
+                if documents.len() == old_atoms.len()
+                    && old_atoms.len() <= atoms.len()
                     && old_atoms.iter().zip(atoms.iter()).all(|((id, _), b)| {
                         Some(id.as_str()) == b.get("id").and_then(Value::as_str)
                     }) =>
@@ -1971,11 +2051,14 @@ impl Store {
                 (index, documents)
             }
             _ => {
-                let documents: Vec<Vec<String>> = atoms
-                    .iter()
-                    .map(|atom| packset_core::search::atom_tokens(atom))
-                    .collect();
-                let index = Index::build(documents.iter().map(Vec::as_slice));
+                let mut documents = Vec::with_capacity(atoms.len());
+                let mut index = Index::default();
+                for atom in atoms.iter() {
+                    let tokens = packset_core::search::atom_tokens(atom);
+                    index.push(&tokens);
+                    documents.push(tokens);
+                }
+                release_heap();
                 (Arc::new(index), Arc::new(documents))
             }
         };
@@ -2034,10 +2117,11 @@ impl Store {
     pub fn as_of(&self, workspace: &str, at: &str) -> anyhow::Result<Vec<Arc<Record>>> {
         let at = packset_core::clock::canonicalize(at)
             .ok_or_else(|| anyhow::anyhow!("as_of must be a timestamp"))?;
-        let stored: Vec<Record> = self
+        let stored: Vec<Arc<Record>> = self
             .scan_past_tombstones(workspace)?
             .into_iter()
             .filter(|atom| record::is_live_at(atom, &at))
+            .map(Arc::new)
             .collect();
         Ok(shown_from(&stored).0)
     }
@@ -2204,7 +2288,7 @@ fn shown_at(atom: &Record, now: &str) -> bool {
 
 /// The shown copy of a stored set, links cut to live ids, and the ids the
 /// cuts named: the targets a later arrival may restore.
-fn shown_from(stored: &[Record]) -> (Vec<Arc<Record>>, HashSet<String>) {
+fn shown_from(stored: &[Arc<Record>]) -> (Vec<Arc<Record>>, HashSet<String>) {
     let live: HashSet<&str> = stored
         .iter()
         .filter_map(|a| a.get("id").and_then(Value::as_str))
@@ -2213,9 +2297,17 @@ fn shown_from(stored: &[Record]) -> (Vec<Arc<Record>>, HashSet<String>) {
     let shown = stored
         .iter()
         .map(|atom| {
-            let mut copy = atom.clone();
-            dangling.extend(cut_links(&mut copy, &live));
-            Arc::new(copy)
+            let links_before = atom.get("links").cloned();
+            let mut copy = Record::clone(atom);
+            let cut = cut_links(&mut copy, &live);
+            // A record whose links did not change is the stored one. Cloning
+            // it made a second copy of every claim.
+            if cut.is_empty() && copy.get("links") == links_before.as_ref() {
+                Arc::clone(atom)
+            } else {
+                dangling.extend(cut);
+                Arc::new(copy)
+            }
         })
         .collect();
     (shown, dangling)
@@ -2231,7 +2323,7 @@ fn shown_from(stored: &[Record]) -> (Vec<Arc<Record>>, HashSet<String>) {
 /// once by `Arc::make_mut`, an unshared one is edited in place.
 fn patch_shown(
     shown: &mut Live,
-    stored: &[Record],
+    stored: &[Arc<Record>],
     written: &[Record],
     now: &str,
     dangling: &mut HashSet<String>,
@@ -2291,7 +2383,7 @@ fn patch_shown(
             .iter()
             .position(|a| a.get("id").and_then(Value::as_str) == Some(id))
         {
-            let mut copy = atom.clone();
+            let mut copy = Record::clone(atom);
             dangling.extend(cut_links(&mut copy, &live));
             out[i] = Arc::new(copy);
         }
@@ -2334,79 +2426,132 @@ fn is_tombstone(raw: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// A record as the cache keeps it, and the vector that left it.
+/// One stored record without its numeric embedding.
+///
+/// The array is the bulk of a pack and is skipped, not built. Null and `[]`
+/// stay, because those are a clear; anything else that is not an array stays.
+fn lean_record(raw: &[u8]) -> Option<(Record, Option<Vec<f32>>)> {
+    if let Ok(mut row) = serde_json::from_slice::<LeanRecord>(raw) {
+        let vector = match row.embedding {
+            Some(LeanEmbedding::Items(items)) if items.is_empty() => {
+                row.record
+                    .insert("embedding".into(), Value::Array(Vec::new()));
+                None
+            }
+            Some(LeanEmbedding::Items(items)) => {
+                Some(items.into_iter().map(|item| item.0).collect())
+            }
+            Some(LeanEmbedding::Other(value)) => {
+                row.record.insert("embedding".into(), value);
+                None
+            }
+            None => None,
+        };
+        return Some((row.record, vector));
+    }
+    let Value::Object(map) = serde_json::from_slice::<Value>(raw).ok()? else {
+        return None;
+    };
+    let Parked { lean, vector, .. } = park(&map);
+    Some((lean, vector.map(|vector| vector.to_vec())))
+}
+
+#[derive(serde::Deserialize)]
+struct LeanRecord {
+    #[serde(default)]
+    embedding: Option<LeanEmbedding>,
+    #[serde(flatten)]
+    record: Record,
+}
+
+struct LeanFloat(f32);
+
+impl<'de> serde::Deserialize<'de> for LeanFloat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <f64 as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(LeanFloat(value as f32))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum LeanEmbedding {
+    Items(Vec<LeanFloat>),
+    Other(Value),
+}
+
+/// A record as the cache keeps it, and the floats that left it.
 struct Parked {
     lean: Record,
     vector: Option<Arc<[f32]>>,
-    original: Option<Arc<[serde_json::Number]>>,
-    /// The write named `embedding`, so a null clears a vector the cache held.
-    named: bool,
+    /// The write named `embedding` and it was not a vector, so a cached
+    /// vector is cleared.
+    clear: bool,
 }
 
-/// Lift `embedding` out of a clone of `record`. An array of numbers becomes
-/// floats and the key leaves the clone. A null on the clone would be the
-/// clear a client sends, and a fire copies this record back on a rewrite.
-/// Anything that is not a vector stays on the clone.
+/// A clone of `record` without a numeric embedding. The floats stay in the
+/// file. A null, or anything that is not a vector, stays: a fire copies this
+/// record back, and a null is how a client clears the vector.
 fn park(record: &Record) -> Parked {
     let mut lean = record.clone();
     let named = lean.contains_key("embedding");
-    let (vector, original) = match lean.remove("embedding") {
-        Some(Value::Array(items)) if !items.is_empty() => {
-            match (floats_of(&items), numbers_of(&items)) {
-                (Some(parsed), Some(original)) => (Some(Arc::from(parsed)), Some(original)),
-                _ => {
-                    lean.insert("embedding".into(), Value::Array(items));
-                    (None, None)
-                }
-            }
+    let vector = match lean.get("embedding").and_then(Value::as_array) {
+        Some(items) if !items.is_empty() && items.iter().all(|item| item.as_f64().is_some()) => {
+            let floats: Vec<f32> = items
+                .iter()
+                .map(|item| item.as_f64().unwrap_or(0.0) as f32)
+                .collect();
+            lean.remove("embedding");
+            Some(Arc::from(floats))
         }
-        Some(other) => {
-            lean.insert("embedding".into(), other);
-            (None, None)
-        }
-        None => (None, None),
+        _ => None,
     };
     Parked {
+        clear: named && vector.is_none(),
         lean,
         vector,
-        original,
-        named,
     }
 }
 
-fn floats_of(items: &[Value]) -> Option<Box<[f32]>> {
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        out.push(item.as_f64()? as f32);
-    }
-    Some(out.into_boxed_slice())
-}
-
-/// The JSON numbers as parsed. Scoring uses f32; an answer copies these,
-/// so 0.1 stays 0.1 and a value f32 cannot hold does not become null.
-fn numbers_of(items: &[Value]) -> Option<Arc<[serde_json::Number]>> {
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        out.push(item.as_number()?.clone());
-    }
-    Some(Arc::from(out))
-}
-
-/// Put the stored JSON numbers back on `atom` for an answer. A record
-/// with no cached vector is left as it is.
-pub(crate) fn restore_embedding(
-    atom: &mut Record,
-    originals: &HashMap<String, Arc<[serde_json::Number]>>,
-) {
+/// Put the embedding stored for `atom` back, read from the database.
+/// One record. An atom with no vector is left as it is.
+/// Put the snapshot's floats back on `atom`. Same read as the record, so a
+/// listing does not look the vector up again and miss it.
+pub(crate) fn put_snapshot_embedding(atom: &mut Record, vectors: &HashMap<String, Arc<[f32]>>) {
     let Some(id) = atom.get("id").and_then(Value::as_str) else {
         return;
     };
-    let Some(numbers) = originals.get(id) else {
+    let Some(vector) = vectors.get(id) else {
         return;
     };
     atom.insert(
         "embedding".into(),
-        Value::Array(numbers.iter().cloned().map(Value::Number).collect()),
+        Value::Array(
+            vector
+                .iter()
+                .copied()
+                .map(|value| Value::from(f64::from(value)))
+                .collect(),
+        ),
+    );
+}
+
+/// Put the embedding stored for `atom` back, read from the database.
+/// One record, so 0.1 stays 0.1 and a value `f32` cannot hold does not
+/// become null. An atom with no vector is left as it is.
+pub(crate) fn put_stored_embedding(atom: &mut Record, store: &Store, workspace: &str) {
+    let Some(id) = atom.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Ok(Some(numbers)) = store.embedding_numbers(workspace, id) else {
+        return;
+    };
+    atom.insert(
+        "embedding".into(),
+        Value::Array(numbers.into_iter().map(Value::Number).collect()),
     );
 }
 
@@ -3224,8 +3369,9 @@ mod tests {
             live[0].get("embedding").is_none(),
             "the cache kept the JSON array"
         );
-        let cached = store.vectors("w");
-        let got = cached.get("a").expect("the vector was dropped");
+        let got = store
+            .stored_vector("w", "a")
+            .expect("the vector was dropped");
         assert_eq!(got.len(), 384);
         assert!((got[1] - (1.0 / 384.0)).abs() < 1e-6);
         let disk = store.get("w", "a").unwrap().unwrap();
@@ -3240,10 +3386,8 @@ mod tests {
         let disk = store.get("w", "a").unwrap().unwrap();
         assert_eq!(disk["text"], json!("a lesson about vectors revised"));
         assert_eq!(disk["embedding"].as_array().unwrap().len(), 384);
-        assert_eq!(store.vectors("w").get("a").unwrap().len(), 384);
+        assert_eq!(store.stored_vector("w", "a").unwrap().len(), 384);
         assert!(store.live("w").unwrap()[0].get("embedding").is_none());
-        // The second write reused the float buffer when the numbers matched.
-        assert!(Arc::ptr_eq(got, store.vectors("w").get("a").unwrap()));
     }
 
     /// Null and an empty array are a clear. Omitting the key is not.
@@ -3261,27 +3405,16 @@ mod tests {
                 .unwrap();
         };
         write(json!([0.2, 0.4, 0.6]));
-        let snap = store.live_versioned("w").unwrap();
-        assert_eq!(snap.vectors.get("a").map(|v| v.len()), Some(3));
+        assert_eq!(store.stored_vector("w", "a").unwrap().len(), 3);
         write(Value::Null);
         let disk = store.get("w", "a").unwrap().unwrap();
         assert!(disk["embedding"].is_null(), "{disk:?}");
-        assert!(store
-            .live_versioned("w")
-            .unwrap()
-            .vectors
-            .get("a")
-            .is_none());
+        assert!(store.stored_vector("w", "a").is_none());
         write(json!([0.2, 0.4, 0.6]));
         write(json!([]));
         let disk = store.get("w", "a").unwrap().unwrap();
         assert_eq!(disk["embedding"], json!([]));
-        assert!(store
-            .live_versioned("w")
-            .unwrap()
-            .vectors
-            .get("a")
-            .is_none());
+        assert!(store.stored_vector("w", "a").is_none());
     }
 
     /// A client vector is answered as stored. f32 would turn 0.1 into its
@@ -3299,17 +3432,17 @@ mod tests {
             })))
             .unwrap();
         let check = |store: &Store| {
-            let snap = store.live_versioned("w").unwrap();
-            let mut atom = Record::clone(&snap.atoms[0]);
-            restore_embedding(&mut atom, &snap.originals);
-            assert_eq!(atom.get("embedding"), Some(&json!([0.1, 1e39, -0.3])));
-            assert!(atom["embedding"]
+            let numbers = store.embedding_numbers("w", "a").unwrap().unwrap();
+            let embedding = Value::Array(numbers.into_iter().map(Value::Number).collect());
+            assert_eq!(embedding, json!([0.1, 1e39, -0.3]));
+            assert!(embedding
                 .as_array()
                 .unwrap()
                 .iter()
                 .all(|item| item.as_f64().is_some()));
             let disk = store.get("w", "a").unwrap().unwrap();
-            assert_eq!(disk.get("embedding"), atom.get("embedding"));
+            assert_eq!(disk.get("embedding"), Some(&embedding));
+            assert!(store.live("w").unwrap()[0].get("embedding").is_none());
         };
         check(&store);
         drop(store);
@@ -4279,6 +4412,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl StartReport {
+        /// A `name=number` field of the child's line. Missing is zero.
+        fn line_field(&self, name: &str) -> u64 {
+            self.line
+                .split_whitespace()
+                .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0)
+        }
+
         /// By kind and by file, what the start left resident over its base after the pass.
         fn residual(&self) -> String {
             let grew = |after: u64, before: u64| after as i64 - before as i64;
@@ -4524,6 +4666,117 @@ mod tests {
             }
         }
     }
+
+    /// A pack of a few hundred megabytes is mapped, not copied into the
+    /// heap, at startup or by one search. The child reports KiB. On this
+    /// host, before the stepped scan, the same pack's search grew anonymous
+    /// memory by 637020 KiB and peaked 1735348 KiB over its base.
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "Linux only: reads /proc/self/status and /proc/self/maps"
+    )]
+    fn a_large_pack_stays_mapped_through_start_and_search() {
+        #[cfg(target_os = "linux")]
+        large_pack_stays_mapped();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn large_pack_stays_mapped() {
+        if let Some(home) = std::env::var_os("PACKSET_START_CHILD") {
+            report_search(Path::new(&home));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, _) = write_unstamped_pack(dir.path(), 40_000, 1);
+        let pack_kib = disk / 1024;
+        assert!(
+            pack_kib >= 200 * 1024,
+            "the synthetic pack is {pack_kib} KiB, under 200 MiB"
+        );
+        let got = start_in_child(
+            dir.path(),
+            "store::tests::a_large_pack_stays_mapped_through_start_and_search",
+        );
+        println!("large pack: {}", got.line);
+        let pack = got.line_field("pack");
+        let start_grew = got.line_field("start_grew");
+        let anon_grew = got.line_field("anon_grew");
+        let hwm_grew = got.line_field("hwm_grew");
+        let mmap = got.line_field("mmap");
+        let hits = got.line_field("hits");
+        assert!(got.passed, "{}", got.line);
+        assert_eq!(mmap, 1, "the pack was not a shared map: {}", got.line);
+        assert!(
+            start_grew < 32 * 1024,
+            "startup grew {start_grew} KiB over a {pack} KiB pack: {}",
+            got.line
+        );
+        assert!(
+            anon_grew < 256 * 1024,
+            "search left {anon_grew} KiB of anonymous memory over a {pack} KiB pack: {}",
+            got.line
+        );
+        assert!(
+            hwm_grew < 256 * 1024,
+            "search peaked {hwm_grew} KiB over a {pack} KiB pack: {}",
+            got.line
+        );
+        assert_eq!(hits, 5, "{}", got.line);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn report_search(home: &Path) {
+        let data = home.join("memory.lmdb").join("data.mdb");
+        let pack = fs::metadata(&data).unwrap().len() / 1024;
+        let _ = fs::write("/proc/self/clear_refs", "5");
+        let base = status_kib("VmRSS");
+        let opened = crate::service::Service::open(crate::home::Home::new(home)).unwrap();
+        let _ = opened.store().restore_created();
+        let start_hwm = status_kib("VmHWM");
+        let mmap = pack_is_shared_map(&data);
+        let _ = fs::write("/proc/self/clear_refs", "5");
+        let search_base = status_kib("VmRSS");
+        let search_anon = status_kib("RssAnon");
+        let hits = opened
+            .search(
+                "git:github.com/example/pack-0",
+                "parser keeps header",
+                5,
+                None,
+                &packset_core::Panel::default(),
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+        let n = hits["hits"].as_array().map(Vec::len).unwrap_or(0);
+        let anon_grew = status_kib("RssAnon").saturating_sub(search_anon);
+        let hwm_grew = status_kib("VmHWM").saturating_sub(search_base);
+        println!(
+            "start {} pack={pack} start_grew={} anon_grew={anon_grew} hwm_grew={hwm_grew} \
+             mmap={mmap} hits={n}",
+            if n == 5 { "ok" } else { "short" },
+            start_hwm.saturating_sub(base),
+        );
+    }
+
+    /// `1` when `path` is a shared read-only mapping of this process.
+    #[cfg(target_os = "linux")]
+    fn pack_is_shared_map(path: &Path) -> u64 {
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = path.to_string_lossy();
+        let Ok(maps) = fs::read_to_string("/proc/self/maps") else {
+            return 0;
+        };
+        u64::from(maps.lines().any(|line| {
+            line.contains(path.as_ref())
+                && line
+                    .split_whitespace()
+                    .nth(1)
+                    .is_some_and(|perms| perms.starts_with("r--s"))
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -4539,6 +4792,28 @@ mod snapshot_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn a_record_without_an_embedding_still_parses() {
+        let raw = serde_json::to_vec(&json!({"id": "a", "workspace": "w", "text": "a"})).unwrap();
+        let (parsed, vector) = lean_record(&raw).expect("parse");
+        assert_eq!(parsed["id"], json!("a"));
+        assert!(vector.is_none());
+        assert!(parsed.get("embedding").is_none());
+        let (_dir, store) = store();
+        store
+            .upsert(&record(
+                json!({"id": "a", "workspace": "a", "text": "a", "kind": "lesson"}),
+            ))
+            .unwrap();
+        store
+            .upsert(&record(
+                json!({"id": "b", "workspace": "b", "text": "b", "kind": "lesson"}),
+            ))
+            .unwrap();
+        assert_eq!(store.live("a").unwrap().len(), 1);
+        assert_eq!(store.live("b").unwrap().len(), 1);
     }
 
     #[test]
