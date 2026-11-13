@@ -713,10 +713,10 @@ impl Store {
     /// Fails when the home cannot be created, when another process already
     /// holds the lock, or when LMDB refuses the directory.
     pub fn open(root: &Path) -> anyhow::Result<Self> {
-        private_home(root)?;
+        private_home(root).map_err(|err| explain_home(root, &err))?;
         let lock = take_lock(&root.join("packsetd.lock"))?;
         let db_path = root.join("memory.lmdb");
-        fs::create_dir_all(&db_path)?;
+        fs::create_dir_all(&db_path).map_err(|err| explain_home(&db_path, &err))?;
         // SAFETY: LMDB maps the file; the contract is that no other process
         // writes it, which the lock above is what enforces. The map starts
         // from the file's size and grows when a write needs room; the file
@@ -2711,8 +2711,16 @@ fn private_home(root: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if root.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} is a file, not a directory", root.display()),
+            ));
+        }
         if let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|err| {
+                std::io::Error::new(err.kind(), format!("{}: {err}", parent.display()))
+            })?;
         }
         if !root.is_dir() {
             fs::DirBuilder::new().mode(0o700).create(root)?;
@@ -2742,13 +2750,108 @@ fn take_lock(path: &Path) -> anyhow::Result<HomeLock> {
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)?;
+        .open(path)
+        .map_err(|err| explain_home(path, &err))?;
     // SAFETY: a libc call on a fd this function owns.
     let taken = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
     if taken != 0 {
-        anyhow::bail!("store home is already open");
+        // Drop this description before looking. The holder is the process
+        // that still has the file open.
+        drop(file);
+        return Err(lock_held(path));
     }
     Ok(HomeLock(file))
+}
+
+/// Why `path` could not be the pack home, and the next command.
+fn explain_home(path: &Path, err: &std::io::Error) -> anyhow::Error {
+    let next =
+        "set PACKSET_HOME to a directory this user can write, or fix that path's permissions";
+    if path.is_file() || err.kind() == std::io::ErrorKind::AlreadyExists {
+        anyhow::anyhow!(
+            "cannot use {} as the pack home ({err}); remove it if it should be a directory, or {next}",
+            path.display()
+        )
+    } else if err.kind() == std::io::ErrorKind::PermissionDenied {
+        anyhow::anyhow!("cannot write {} ({err}); {next}", path.display())
+    } else {
+        anyhow::anyhow!(
+            "cannot open the pack home {} ({err}); {next}",
+            path.display()
+        )
+    }
+}
+
+/// The process that still has `path` open, when this user can see it.
+#[cfg(unix)]
+fn lock_holder(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    let dev = meta.dev();
+    let ino = meta.ino();
+    let entries = fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|raw| raw.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(stat) = fs::metadata(fd.path()) else {
+                continue;
+            };
+            if stat.dev() == dev && stat.ino() == ino {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn lock_holder(_path: &Path) -> Option<u32> {
+    None
+}
+
+/// `comm` for `pid`, when the kernel will say it.
+fn process_comm(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let name = text.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The lock is held. Name the process, and the command that starts again
+/// after that process is gone.
+fn lock_held(path: &Path) -> anyhow::Error {
+    match lock_holder(path) {
+        Some(pid) => {
+            let name = process_comm(pid)
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default();
+            anyhow::anyhow!(
+                "{p} is already open by pid {pid}{name}; stop that process, then run packset ensure",
+                p = path.display()
+            )
+        }
+        None => anyhow::anyhow!(
+            "{p} is already open by another process; stop that writer, then run packset ensure",
+            p = path.display()
+        ),
+    }
 }
 
 /// The `flock` on `packsetd.lock`, released on drop.
@@ -2828,6 +2931,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn a_second_open_names_the_process_and_the_next_command() {
+        let (dir, _store) = store();
+        let err = match Store::open(dir.path()) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a second open took the lock"),
+        };
+        assert!(
+            err.contains(&std::process::id().to_string()),
+            "the holder is unnamed: {err}"
+        );
+        assert!(
+            err.contains("stop that process, then run packset ensure"),
+            "{err}"
+        );
+        assert!(err.contains("packsetd.lock"), "{err}");
+    }
+
+    #[test]
+    fn a_file_where_the_home_should_be_names_the_path_and_the_next_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-dir");
+        fs::write(&path, b"x").unwrap();
+        let err = match Store::open(&path) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a file opened as a pack home"),
+        };
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("is a file"), "{err}");
+        assert!(err.contains("PACKSET_HOME"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_parent_names_the_path_and_the_next_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("closed");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+        let home = parent.join("pack");
+        let err = match Store::open(&home) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("an unwritable parent opened"),
+        };
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.contains(&parent.display().to_string()), "{err}");
+        assert!(err.contains("Permission denied"), "{err}");
+        assert!(err.contains("PACKSET_HOME"), "{err}");
     }
 
     #[cfg(unix)]

@@ -100,10 +100,11 @@ fn run() -> anyhow::Result<()> {
     match verb {
         "ensure" => {
             let owned = args.switch("--owned");
-            if procfs::listening(port) && !is_ours(port) {
-                anyhow::bail!("port {port} is held by something else; set PACKSET_PORT");
+            let already = procfs::listening(port);
+            if already && !is_ours(port) {
+                anyhow::bail!("{}", held_by(port));
             }
-            let held = if procfs::listening(port) {
+            let held = if already {
                 if owned {
                     eprintln!(
                         "packset: a writer is already listening on 127.0.0.1:{port}; --owned leaves it running"
@@ -114,6 +115,16 @@ fn run() -> anyhow::Result<()> {
                 start(port, owned)?
             };
             wait_healthy(port)?;
+            // A writer this call just started is the binary and the home
+            // this process passed it. Asking it for status would scan the
+            // pack, and an upgrade open has to answer inside the startup
+            // budget. A writer that was already up can be another home or
+            // another build, and that question is one status.
+            if already {
+                if let Some(line) = writer_problem(port) {
+                    anyhow::bail!("{line}");
+                }
+            }
             print_url(port);
             if let Some(held) = held {
                 wait_for_owned(held)?;
@@ -138,8 +149,7 @@ fn run() -> anyhow::Result<()> {
         }
         "migrate-home" => migrate_home(port),
         "which" => {
-            let daemon = resolve_daemon()
-                .ok_or_else(|| anyhow::anyhow!("no packsetd binary; cargo build --release"))?;
+            let daemon = resolve_daemon().ok_or_else(missing_daemon)?;
             println!("{}", daemon.display());
             Ok(())
         }
@@ -575,6 +585,127 @@ struct OwnedHold {
     pipe: std::io::PipeWriter,
 }
 
+/// The build that produces `packset` and `packsetd` together.
+const BUILD_HINT: &str = "cargo build --release -p packset";
+
+/// `packsetd` is not beside this binary and not on `PATH`.
+fn missing_daemon() -> anyhow::Error {
+    anyhow::anyhow!("no packsetd binary beside packset; {BUILD_HINT}")
+}
+
+/// Who holds `port`, and what to run instead.
+fn held_by(port: u16) -> String {
+    match procfs::pid_on_port(port) {
+        Some(pid) => {
+            let name = procfs::process_name(pid)
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default();
+            format!(
+                "port {port} is held by pid {pid}{name}; stop that process, or set PACKSET_PORT to a free port and run packset ensure"
+            )
+        }
+        None => format!(
+            "port {port} is held by another process; stop that process, or set PACKSET_PORT to a free port and run packset ensure"
+        ),
+    }
+}
+
+/// Whether `a` and `b` are the same directory, following links when both exist.
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// The running writer's build against this binary. `None` when they match,
+/// or when the writer did not name a build.
+fn build_mismatch(
+    ours_version: &str,
+    ours_commit: &str,
+    status: &serde_json::Value,
+) -> Option<String> {
+    let theirs_v = status
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let theirs_c = status
+        .get("commit")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if theirs_v.is_empty() && theirs_c.is_empty() {
+        return None;
+    }
+    if theirs_v == ours_version && (theirs_c.is_empty() || theirs_c == ours_commit) {
+        return None;
+    }
+    let shown = if theirs_c.is_empty() {
+        "no commit"
+    } else {
+        theirs_c
+    };
+    Some(format!(
+        "writer is packsetd {theirs_v} ({shown}); this client is {ours_version} ({ours_commit}); packset stop && packset ensure replaces the writer"
+    ))
+}
+
+/// The running writer's home against the one this client would open.
+fn home_mismatch_line(port: u16, theirs: &str, ours: &Path) -> Option<String> {
+    if theirs.is_empty() || same_path(Path::new(theirs), ours) {
+        return None;
+    }
+    Some(format!(
+        "writer on 127.0.0.1:{port} has home {theirs}; this client uses {}; packset stop && packset ensure starts a writer for this home, or set PACKSET_HOME={theirs}",
+        ours.display()
+    ))
+}
+
+/// The token on this home was refused by the writer already on `port`.
+fn refused_token(port: u16) -> String {
+    let home = packset_core::home::resolve()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the default pack home".to_string());
+    format!(
+        "writer on 127.0.0.1:{port} refused the token for {home}; it was started for another pack. packset stop && packset ensure starts a writer for this home, or set PACKSET_PORT to a free port"
+    )
+}
+
+/// Why this client should not keep the writer already on `port`.
+///
+/// A transport error is not one of those reasons: `/health` already
+/// answered, and a status that failed for another cause leaves ensure
+/// to print the URL.
+fn writer_problem(port: u16) -> Option<String> {
+    let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
+    match client.status(None) {
+        Ok(status) => {
+            let mut lines = Vec::new();
+            if let Some(theirs) = status.get("home").and_then(serde_json::Value::as_str) {
+                if let Some(ours) = packset_core::home::resolve() {
+                    if let Some(line) = home_mismatch_line(port, theirs, &ours) {
+                        lines.push(line);
+                    }
+                }
+            }
+            if let Some(line) =
+                build_mismatch(env!("CARGO_PKG_VERSION"), env!("PACKSET_COMMIT"), &status)
+            {
+                lines.push(line);
+            }
+            if lines.is_empty() {
+                None
+            } else {
+                Some(lines.join("\n"))
+            }
+        }
+        Err(err) if err.to_string().contains("401") => Some(refused_token(port)),
+        Err(_) => None,
+    }
+}
+
 /// Start the daemon and wait for it to bind.
 ///
 /// `owned` keeps the returned pipe open in this process and passes the read
@@ -587,16 +718,28 @@ fn start(port: u16, owned: bool) -> anyhow::Result<Option<OwnedHold>> {
             eprintln!("packset: already listening on 127.0.0.1:{port}");
             return Ok(None);
         }
-        anyhow::bail!("port {port} is held by something else; set PACKSET_PORT");
+        anyhow::bail!("{}", held_by(port));
     }
-    let daemon = resolve_daemon().ok_or_else(|| {
-        anyhow::anyhow!("no packsetd binary; cargo build --release -p packset-daemon")
-    })?;
+    let daemon = resolve_daemon().ok_or_else(missing_daemon)?;
     let log = log_path();
     if let Some(dir) = log.parent() {
-        fs::create_dir_all(dir)?;
+        fs::create_dir_all(dir).map_err(|err| {
+            anyhow::anyhow!(
+                "cannot write the log directory {} ({err}); set PACKSET_LOG or XDG_STATE_HOME to a directory this user can write",
+                dir.display()
+            )
+        })?;
     }
-    let out = OpenOptions::new().create(true).append(true).open(&log)?;
+    let out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "cannot write the log {} ({err}); set PACKSET_LOG to a file this user can write",
+                log.display()
+            )
+        })?;
     let errs = out.try_clone()?;
 
     let mut command = Command::new(&daemon);
@@ -718,12 +861,16 @@ fn tail(log: &Path) -> String {
 
 fn stop(port: u16) -> anyhow::Result<()> {
     if !is_ours(port) {
+        if procfs::listening(port) {
+            anyhow::bail!("{}", held_by(port));
+        }
         eprintln!("packset: nothing of ours to stop on {port}");
         return Ok(());
     }
     let Some(pid) = procfs::pid_on_port(port) else {
-        eprintln!("packset: listening on {port} but the holder is not visible");
-        return Ok(());
+        anyhow::bail!(
+            "listening on {port} but the holder is not visible; the port stays taken until that process exits"
+        );
     };
     procfs::terminate(pid)?;
     // A writer flushes on the signal before it lets the port go; `stop`
@@ -798,16 +945,23 @@ fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
     // port gates only when the URL did not name one.
     if client.base() == format!("http://127.0.0.1:{port}") {
         if !procfs::listening(port) {
-            anyhow::bail!("down");
+            anyhow::bail!("writer is not running on 127.0.0.1:{port}; packset ensure starts it");
         }
         if !is_ours(port) {
-            anyhow::bail!("port {port} is held by another process");
+            anyhow::bail!("{}", held_by(port));
         }
     }
-    let health = client.health().unwrap_or_default();
-    if health.is_empty() {
-        anyhow::bail!("down");
-    }
+    let health = match client.health() {
+        Ok(health) if !health.trim().is_empty() => health,
+        Ok(_) => anyhow::bail!(
+            "writer at {} did not answer /health; check PACKSET_URL, or packset ensure when it is the local writer",
+            client.base()
+        ),
+        Err(err) => anyhow::bail!(
+            "writer at {} did not answer ({err}); check PACKSET_URL, or packset ensure when it is the local writer",
+            client.base()
+        ),
+    };
     println!("packset: up on {} ({})", client.base(), health.trim());
     if all && given.is_some() {
         anyhow::bail!("status: --all counts every workspace; drop the workspace or the flag");
@@ -947,14 +1101,18 @@ fn search(args: &Args) -> anyhow::Result<()> {
     }
     let workspace = workspace(args.value("--workspace"))?;
     eprintln!("packset: workspace {workspace}");
-    for hit in client()?.search_ranked(
+    let hits = client()?.search_ranked(
         &workspace,
         &query,
         10,
         args.value("--as-of"),
         args.switch("--rerank"),
         args.value("--rank"),
-    )? {
+    )?;
+    if hits.is_empty() {
+        eprintln!("packset: no claims matched {query:?} in {workspace}");
+    }
+    for hit in hits {
         let id = hit.id.as_deref().unwrap_or("-");
         // The fifth column is the cross-encoder score, and only when the
         // stage scored this hit. A search without it keeps the four columns.
@@ -1034,15 +1192,30 @@ fn retract(args: &Args) -> anyhow::Result<()> {
 fn due(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
     let now = packset_core::clock::utcnow();
-    let mut atoms: Vec<serde_json::Value> = client()?
-        .atoms_as_of(&workspace, None)?
-        .into_iter()
+    let held = client()?.atoms_as_of(&workspace, None)?;
+    let mut atoms: Vec<serde_json::Value> = held
+        .iter()
         .filter(|a| {
             a["due_at"]
                 .as_str()
                 .is_some_and(|d| !d.is_empty() && d <= now.as_str())
         })
+        .cloned()
         .collect();
+    if atoms.is_empty() {
+        let next = held
+            .iter()
+            .filter_map(|atom| atom["due_at"].as_str())
+            .filter(|due| !due.is_empty())
+            .min();
+        match next {
+            Some(next) => {
+                eprintln!("packset: nothing is due in {workspace}; the next review is {next}")
+            }
+            None => eprintln!("packset: nothing is due in {workspace}"),
+        }
+        return Ok(());
+    }
     atoms.sort_by(|a, b| a["due_at"].as_str().cmp(&b["due_at"].as_str()));
     for atom in atoms {
         println!(
@@ -1485,5 +1658,50 @@ mod tests {
             Some(v) => std::env::set_var("INSIDE_MEMORY_URL", v),
             None => std::env::remove_var("INSIDE_MEMORY_URL"),
         }
+    }
+
+    #[test]
+    fn a_different_build_names_the_two_versions_and_the_next_command() {
+        let status = serde_json::json!({"version": "0.9.21", "commit": "deadbeef"});
+        let line = super::build_mismatch("0.17.10", "84a2b0f0", &status).unwrap();
+        assert!(line.contains("0.9.21"), "{line}");
+        assert!(line.contains("deadbeef"), "{line}");
+        assert!(line.contains("0.17.10"), "{line}");
+        assert!(line.contains("84a2b0f0"), "{line}");
+        assert!(line.contains("packset stop && packset ensure"), "{line}");
+        assert!(super::build_mismatch(
+            "0.17.10",
+            "84a2b0f0",
+            &serde_json::json!({"version": "0.17.10", "commit": "84a2b0f0"})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_different_home_names_both_paths_and_the_next_command() {
+        let line = super::home_mismatch_line(
+            8761,
+            "/tmp/other/pack",
+            std::path::Path::new("/tmp/this/pack"),
+        )
+        .unwrap();
+        assert!(line.contains("/tmp/other/pack"), "{line}");
+        assert!(line.contains("/tmp/this/pack"), "{line}");
+        assert!(line.contains("packset stop && packset ensure"), "{line}");
+        assert!(line.contains("PACKSET_HOME=/tmp/other/pack"), "{line}");
+        assert!(super::home_mismatch_line(
+            8761,
+            "/tmp/this/pack",
+            std::path::Path::new("/tmp/this/pack")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_missing_daemon_names_the_packset_package() {
+        let err = super::missing_daemon().to_string();
+        assert!(err.contains("cargo build --release -p packset"), "{err}");
+        assert!(!err.contains("packset-daemon"), "{err}");
+        assert!(!err.contains("packset-cli"), "{err}");
     }
 }

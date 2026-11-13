@@ -16,5 +16,5 @@ for candidate in "${PACKSET_CLI:-}" \
     [ -x "$candidate" ] && exec "$candidate" "$@"
 done
 
-echo "packset: no packset binary; cargo build --release -p packset-cli" >&2
+echo "packset: no packset binary; cargo build --release -p packset" >&2
 exit 1

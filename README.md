@@ -20,11 +20,17 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 ## Install
 
 ```console
-$ cargo binstall packset
-# or: cargo binstall --locked packset
-# or: cargo install --locked packset
+$ cargo install --locked packset
+# or, when cargo-binstall is already installed: cargo binstall --locked packset
 $ packset ensure
 ```
+
+`cargo install` and `cargo binstall` both reach crates.io, so they need a
+network. Without one, cargo reports that `packset` is not in the registry.
+A checkout of this repository builds with `cargo build --release -p packset`,
+and `bin/packset` runs that binary. `cargo build --release -p packset-cli`
+and `-p packset-daemon` do not produce it: the package is `packset`, and
+`packset-daemon` is the library.
 
 `cargo binstall packset` downloads `packset-v<version>-<target>.tar.gz`.
 Hosts are aarch64-apple-darwin and x86_64-apple-darwin.
@@ -45,13 +51,19 @@ answers without the encoder, and search stays lexical.
 ## First minute
 
 ```console
-$ packset remember "BM25+ is the default lexical scorer. It beat BM25 by two points."
+$ packset remember --workspace demo "BM25+ is the default lexical scorer. It beat BM25 by two points."
 3f9c...	lesson	due 2026-09-13T08:54:37.394Z
-$ packset search lexical scorer
-7.0000	lesson	3f9c...	BM25+ is the default lexical scorer. It beat BM25 by two points.
-$ packset due            # tomorrow: what to review
+$ packset search --workspace demo lexical scorer
+packset: workspace demo
+1.0000	lesson	3f9c...	BM25+ is the default lexical scorer. It beat BM25 by two points.
+$ packset due demo       # the same day: nothing is due, and the next review
 $ packset island fusing two ballots     # the memories a task activates
 ```
+
+The id is 32 hex digits. The transcript shortens it. The score is the
+panel's; one fresh claim that shares the question's words scores 1.0000,
+and the number moves as the review clock runs. The same day, `due` names
+the next review instead of listing a claim.
 
 ## What holds
 

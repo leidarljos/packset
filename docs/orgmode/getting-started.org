@@ -12,26 +12,33 @@ stays lexical, and a sitting still opens on those ballots.
 an Open Neural Network Exchange (ONNX) Runtime you compile.
 
 #+begin_src console
-$ cargo binstall --locked packset
+$ cargo install --locked packset
 #+end_src
+
+=cargo binstall --locked packset= is the same install when =cargo-binstall=
+is already on the machine. Both reach crates.io, so they need a network.
+A checkout of this repository builds with =cargo build --release -p packset=,
+and =bin/packset= runs that binary.
 
 * 1. Start the writer
 
 #+begin_src console
 $ packset ensure
+packset: listening on 127.0.0.1:8761
 PACKSET_URL=http://127.0.0.1:8761
 INSIDE_MEMORY_URL=http://127.0.0.1:8761
 $ export PACKSET_URL=http://127.0.0.1:8761
 $ packset status demo
-packset: up on 127.0.0.1:8761 (packsetd ok)
-{
-  "workspace": "demo",
-  "live_by_kind": {}
-}
+packset: up on http://127.0.0.1:8761 (packsetd ok)
 #+end_src
 
-=packset ensure= prints two assignment lines. Do not capture it with
-=$(...)=. If a writer is already on 8761, use a scratch port instead.
+=packset ensure= prints two assignment lines, and =listening= when it
+started the writer. Do not capture it with =$(...)=. If a writer is already
+on 8761, set a free port and start again: =PACKSET_PORT=8762 packset ensure=.
+The error names the process on 8761. The status line is followed by
+one JSON object. Read =live_by_kind=. The object also names =home=,
+=version= and =commit=. A writer whose version or commit is not this
+client's names =packset stop && packset ensure=.
 
 One process owns the store. A second =packsetd= on the same file refuses
 to start and names the process with the lock.
@@ -46,7 +53,7 @@ dump is stored with the label =flag:tool-dump=.
 $ packset remember --workspace demo "The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25."
 $ packset prefer --workspace demo "CombMNZ over RRF for fusing two ballots."
 $ packset status demo
-packset: up on 127.0.0.1:8761 (packsetd ok)
+packset: up on http://127.0.0.1:8761 (packsetd ok)
 {
   "live_by_kind": {
     "lesson": 1,
@@ -61,9 +68,16 @@ lesson closes the old one's validity window.
 * 3. Ask what the seat knows
 
 #+begin_src console
-$ packset search --workspace demo which fusion
-9.1000	preference	3f9c...	CombMNZ over RRF for fusing two ballots.
+$ packset search --workspace demo ballots BM25
+packset: workspace demo
+2.0000	preference	63df91bbea2b5e4e146866db0a85b4c6	CombMNZ over RRF for fusing two ballots.
+1.0000	lesson	ee17d2a07cbf1569e54e0d80496fdecf	The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
 #+end_src
+
+The id is the one =prefer= or =remember= printed. Right after those two
+writes the scores are 2.0000 and 1.0000; the number moves as the review
+clock runs. A question that shares no words prints =no claims matched=
+and the workspace.
 
 The score is the panel's, not one scorer's. Two ballots, a prefix-and-edit
 scan and BM25+ over an index, are fused by CombMNZ; see
@@ -71,7 +85,9 @@ scan and BM25+ over an index, are fused by CombMNZ; see
 
 * 4. Review before you forget
 
-Every new claim is due for review after one day. Tomorrow:
+Every new claim is due for review after one day. The same day,
+=packset due demo= prints =nothing is due in demo= and the next review.
+Tomorrow:
 
 #+begin_src console
 $ packset due demo

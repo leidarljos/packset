@@ -128,6 +128,27 @@ pub fn pid_on_port(port: u16) -> Option<u32> {
         .find_map(|line| line.trim().parse().ok())
 }
 
+/// The short name of `pid`, from the kernel. `None` off Linux, or when
+/// the process is gone.
+#[must_use]
+pub fn process_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let name = text.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Ask `pid` to stop.
 ///
 /// # Errors
@@ -175,5 +196,7 @@ mod tests {
         let port = socket.local_addr().unwrap().port();
         assert!(listening(port));
         assert_eq!(pid_on_port(port), Some(std::process::id()));
+        let name = process_name(std::process::id()).unwrap();
+        assert!(!name.is_empty(), "{name}");
     }
 }

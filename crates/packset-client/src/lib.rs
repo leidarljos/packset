@@ -577,7 +577,8 @@ fn refused(url: &str, e: Box<ureq::Error>) -> Error {
             if code == 401 {
                 return Error::Bad(format!(
                     "{url}: 401: {reason}; this seat's token does not match the writer's, \
-                     so it is another user's writer or PACKSET_HOME names another pack"
+                     so it is another user's writer or PACKSET_HOME names another pack; \
+                     packset stop && packset ensure if the writer is yours, or set PACKSET_HOME to that pack"
                 ));
             }
             if reason.is_empty() {

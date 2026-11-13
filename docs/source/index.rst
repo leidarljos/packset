@@ -36,7 +36,7 @@ Install
 
 .. code:: console
 
-   $ cargo binstall --locked packset          # packset, packsetd and packset-mcp
+   $ cargo install --locked packset            # packset, packsetd and packset-mcp
    $ packset ensure
 
 First minute
@@ -48,7 +48,7 @@ First minute
    ee17d2a07cbf1569e54e0d80496fdecf    lesson  due 2026-09-28T16:52:09.119Z
    $ packset prefer --workspace demo "CombMNZ over RRF for fusing two ballots."
    63df91bbea2b5e4e146866db0a85b4c6    preference  due 2026-09-28T16:52:09.149Z
-   $ packset search --workspace demo which fusion
+   $ packset search --workspace demo ballots BM25
    packset: workspace demo
    2.0000  preference  63df91bbea2b5e4e146866db0a85b4c6    CombMNZ over RRF for fusing two ballots.
    1.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf    The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
