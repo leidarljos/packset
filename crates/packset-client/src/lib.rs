@@ -1691,24 +1691,43 @@ mod tests {
 
     #[test]
     fn a_request_carries_the_end_of_its_budget() {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::Shutdown;
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let client = PacksetClient::new(format!("http://{}", listener.local_addr().unwrap()));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut reader = BufReader::new(&stream);
             let mut deadline = String::new();
+            let mut length = 0usize;
             let mut line = String::new();
-            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
-                let lower = line.to_ascii_lowercase();
-                if let Some(value) = lower.strip_prefix("x-packset-deadline:") {
-                    deadline = value.trim().to_string();
-                }
+            loop {
                 line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line.trim().is_empty() => break,
+                    Ok(_) => {
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(value) = lower.strip_prefix("x-packset-deadline:") {
+                            deadline = value.trim().to_string();
+                        } else if let Some(value) = lower.strip_prefix("content-length:") {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
             }
+            // The body is read before the reply. Closing with it unread
+            // resets the connection, and the client reports a header error.
+            let mut body = vec![0u8; length];
+            let read = reader.read_exact(&mut body);
+            drop(reader);
             let _ = tx.send(deadline);
+            if read.is_err() {
+                return;
+            }
             let text = r#"{"ok":true}"#;
             let _ = (&stream).write_all(
                 format!(
@@ -1717,6 +1736,18 @@ mod tests {
                 )
                 .as_bytes(),
             );
+            let _ = (&stream).flush();
+            let _ = stream.shutdown(Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut discard = [0u8; 256];
+            loop {
+                match (&stream).read(&mut discard) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
         });
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

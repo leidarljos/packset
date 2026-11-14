@@ -4,8 +4,8 @@
 //! port, another pack on that port, a different build, a search that
 //! matched nothing, a review that is not due yet, and a writer that is down.
 
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -61,38 +61,80 @@ fn wait_health(port: u16) {
 }
 
 /// One short HTTP answer per connection. `path` is the request target.
+///
+/// The request is read through before the reply: the headers, then exactly
+/// the `Content-Length` body. The write side is shut down and the socket is
+/// drained until the client closes. Closing with the body still unread
+/// resets the connection, and the client reports that reset as a header
+/// error instead of the status.
 fn serve(handler: impl Fn(&str) -> (u16, &'static str) + Send + 'static) -> u16 {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
-            let mut conn = conn;
-            let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 1024];
-            loop {
-                match conn.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                }
-            }
-            let text = String::from_utf8_lossy(&buf);
-            let path = text.split_whitespace().nth(1).unwrap_or("/");
-            let (code, body) = handler(path);
-            let reason = if code == 200 { "OK" } else { "No" };
-            let resp = format!(
-                "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = conn.write_all(resp.as_bytes());
+            answer(conn, &handler);
         }
     });
     port
+}
+
+fn answer(conn: TcpStream, handler: &impl Fn(&str) -> (u16, &'static str)) {
+    let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut reader = BufReader::new(conn);
+    let Some((path, length)) = read_head(&mut reader) else {
+        return;
+    };
+    let mut body = vec![0u8; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let (code, text) = handler(&path);
+    let reason = if code == 200 { "OK" } else { "No" };
+    let resp = format!(
+        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+        text.len()
+    );
+    let mut conn = reader.into_inner();
+    let _ = conn.write_all(resp.as_bytes());
+    let _ = conn.flush();
+    let _ = conn.shutdown(Shutdown::Write);
+    let _ = conn.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut discard = [0u8; 256];
+    loop {
+        match conn.read(&mut discard) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+}
+
+/// The request target and `Content-Length`, once the blank line has been read.
+fn read_head(reader: &mut BufReader<TcpStream>) -> Option<(String, usize)> {
+    let mut line = String::new();
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+    let mut length = 0usize;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).ok()?;
+        if n == 0 {
+            return None;
+        }
+        if line.trim().is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    Some((path, length))
 }
 
 #[test]
