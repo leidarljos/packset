@@ -123,19 +123,37 @@ fn jitter_salt(asked: u32) -> u64 {
     nanos ^ u64::from(asked)
 }
 
-/// Send `req`, with `body` when there is one, inside `budget`. A connection
-/// refused, a 429, or a 503 is asked again for every wait that fits in the
-/// budget. A 503 or 429 that carries `Retry-After` waits at least that long.
-/// The waits that are charged are what the budget spends. A slow round trip
-/// does not drop an ask. The writer answers 503 before any of the request
-/// runs, so a write sent again is not stored twice. Each ask carries
-/// `X-Packset-Deadline` at the end of this budget. The first refusal of a
-/// loopback writer starts the local daemon once, when this seat has a home
-/// and a `packsetd` binary.
+/// What a refused connection means for this call.
+enum Refused {
+    /// Ask again inside the budget. The first refusal of a loopback writer
+    /// starts the local daemon once, when this seat has a home and a binary.
+    Retry,
+    /// The refusal is the answer. Search uses this: it must not wait out
+    /// the budget, and it must not start a writer.
+    Once,
+}
+
+/// Send `req`, with `body` when there is one, inside `budget`. A 429 or a
+/// 503 is asked again for every wait that fits in the budget, and so is a
+/// refused connection when `refused` is [`Refused::Retry`]. A 503 or 429
+/// that carries `Retry-After` waits at least that long. The waits that are
+/// charged are what the budget spends. A slow round trip does not drop an
+/// ask. The writer answers 503 before any of the request runs, so a write
+/// sent again is not stored twice. Each ask carries `X-Packset-Deadline`
+/// at the end of this budget.
 fn send(
     req: ureq::Request,
     body: Option<&serde_json::Value>,
     budget: Duration,
+) -> Result<ureq::Response, Attempt> {
+    dispatch(req, body, budget, Refused::Retry)
+}
+
+fn dispatch(
+    req: ureq::Request,
+    body: Option<&serde_json::Value>,
+    budget: Duration,
+    refused: Refused,
 ) -> Result<ureq::Response, Attempt> {
     let deadline = std::time::SystemTime::now() + budget;
     let deadline_ms = deadline
@@ -175,6 +193,9 @@ fn send(
                 }
             }
             Err(err) if connect_refused(&err) => {
+                if matches!(refused, Refused::Once) {
+                    return Err(Attempt::Plain(not_running(req.url())));
+                }
                 match pause_for(wait, None, waited, budget, jitter_salt(asked)) {
                     Some(pause) => {
                         if !started_daemon {
@@ -184,9 +205,7 @@ fn send(
                         waited = waited.saturating_add(pause.charge);
                         wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
                     }
-                    None => {
-                        return Err(Attempt::Plain("packsetd is not running.".to_string()));
-                    }
+                    None => return Err(Attempt::Plain(not_running(req.url()))),
                 }
             }
             other => return other.map_err(|err| Attempt::Ureq(Box::new(err))),
@@ -213,6 +232,17 @@ fn busy_line(response: ureq::Response) -> String {
         format!("packsetd is busy: {reason}")
     } else {
         format!("packsetd is busy: {reason}.")
+    }
+}
+
+/// The writer is down. The same sentence `packset status` prints for the
+/// local port, and it names the command that starts one.
+fn not_running(url: &str) -> String {
+    match loopback_port(url) {
+        Some(port) => {
+            format!("writer is not running on 127.0.0.1:{port}; packset ensure starts it")
+        }
+        None => format!("writer at {url} is not running; packset ensure starts it"),
     }
 }
 
@@ -726,6 +756,20 @@ impl PacksetClient {
         Ok(body)
     }
 
+    /// One `/health` probe. A refused connection is the answer: this does
+    /// not retry it and does not start a writer. `packset stop` uses it.
+    ///
+    /// # Errors
+    ///
+    /// The request's, including a writer that is not listening.
+    pub fn health_once(&self) -> Result<String, Error> {
+        let url = format!("{}/health", self.base);
+        let body = dispatch(authorize(ureq::get(&url)), None, timeout(), Refused::Once)
+            .map_err(|e| into_error(&url, e))?
+            .into_string()?;
+        Ok(body)
+    }
+
     /// Queue depth, shed counts and the current limits. `line` is `ok`, or
     /// `busy, retrying` when work is waiting.
     ///
@@ -892,7 +936,7 @@ impl PacksetClient {
         if let Some(rank) = rank.map(str::trim).filter(|s| !s.is_empty()) {
             req = req.query("rank", rank);
         }
-        let body: serde_json::Value = send(req, None, budget)
+        let body: serde_json::Value = dispatch(req, None, budget, Refused::Once)
             .map_err(|e| into_error(&url, e))?
             .into_json()?;
         let hits = body
@@ -1529,9 +1573,43 @@ mod tests {
         let took = started.elapsed();
         restore_env(saved);
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(err, "packsetd is not running.", "{err}");
+        assert_eq!(
+            err,
+            format!("writer is not running on 127.0.0.1:{port}; packset ensure starts it"),
+            "{err}"
+        );
         assert!(took >= Duration::from_millis(40), "no backoff: {took:?}");
         assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn a_search_answers_a_refused_connection_at_once() {
+        use std::time::Instant;
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = save_env(&["PACKSET_TIMEOUT_MS", "PACKSET_HOME", "PACKSET_BIN"]);
+        unsafe {
+            env::set_var("PACKSET_TIMEOUT_MS", "30000");
+            env::remove_var("PACKSET_HOME");
+            env::remove_var("PACKSET_BIN");
+        }
+        let port = support::free_port();
+        let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
+        let started = Instant::now();
+        let err = client
+            .search_ranked("demo", "ballots", 10, None, false, None)
+            .unwrap_err()
+            .to_string();
+        let took = started.elapsed();
+        restore_env(saved);
+        assert_eq!(
+            err,
+            format!("writer is not running on 127.0.0.1:{port}; packset ensure starts it"),
+            "{err}"
+        );
+        assert!(
+            took < Duration::from_secs(5),
+            "a refusal waited out the budget: {took:?} {err}"
+        );
     }
 
     #[test]

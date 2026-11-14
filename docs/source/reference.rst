@@ -34,6 +34,11 @@ Verb                                                              Does
 A workspace argument defaults to ``PACKSET_WORKSPACE``, else the git remote of
 the working directory, else ``default``.
 
+``packset stop`` with nothing listening says ``nothing of ours to stop`` at
+once and does not start a writer. ``packset search`` with nothing listening
+returns at once with the same sentence as ``status``:
+``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
+
 Every verb takes ``-h`` or ``--help``: it prints that verb's usage and runs
 nothing, wherever it appears before ``--``. A flag the verb does not take is
 refused rather than read as a workspace, an id or a word of the text. ``--``

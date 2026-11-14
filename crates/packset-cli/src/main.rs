@@ -491,8 +491,10 @@ fn client() -> anyhow::Result<PacksetClient> {
 /// purpose: writer management answers about the port even when a named
 /// PACKSET_URL points the data commands elsewhere.
 fn is_ours(port: u16) -> bool {
+    // One probe. The retrying health call waits out the client budget on a
+    // refused connection and starts a writer when PACKSET_HOME is set.
     PacksetClient::new(format!("http://127.0.0.1:{port}"))
-        .health()
+        .health_once()
         .is_ok_and(|body| OURS.iter().any(|name| body.trim_start().starts_with(name)))
 }
 
@@ -918,12 +920,15 @@ fn tail(log: &Path) -> String {
 }
 
 fn stop(port: u16) -> anyhow::Result<()> {
-    if !is_ours(port) {
-        if procfs::listening(port) {
-            anyhow::bail!("{}", held_by(port));
-        }
+    // Nothing is listening. Ask nothing: a health probe would retry the
+    // refusal for the whole budget, and with PACKSET_HOME set it would
+    // start a writer and then this command would kill it.
+    if !procfs::listening(port) {
         eprintln!("packset: nothing of ours to stop on {port}");
         return Ok(());
+    }
+    if !is_ours(port) {
+        anyhow::bail!("{}", held_by(port));
     }
     let Some(pid) = procfs::pid_on_port(port) else {
         anyhow::bail!(
@@ -992,6 +997,11 @@ fn home_is_held(home: &std::path::Path) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
 }
 
+/// What `status` and `search` say when the local writer is not listening.
+fn writer_down(port: u16) -> String {
+    format!("writer is not running on 127.0.0.1:{port}; packset ensure starts it")
+}
+
 fn print_url(port: u16) {
     println!("PACKSET_URL=http://127.0.0.1:{port}");
     println!("INSIDE_MEMORY_URL=http://127.0.0.1:{port}");
@@ -1003,7 +1013,7 @@ fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
     // port gates only when the URL did not name one.
     if client.base() == format!("http://127.0.0.1:{port}") {
         if !procfs::listening(port) {
-            anyhow::bail!("writer is not running on 127.0.0.1:{port}; packset ensure starts it");
+            anyhow::bail!("{}", writer_down(port));
         }
         if !is_ours(port) {
             anyhow::bail!("{}", held_by(port));
@@ -1160,9 +1170,15 @@ fn search(args: &Args) -> anyhow::Result<()> {
     if query.is_empty() {
         anyhow::bail!("search: pass a question");
     }
+    let held = client()?;
+    // Before the workspace lookup. That lookup asks the writer, and a
+    // refused connection there would wait out the budget.
+    if held.base() == format!("http://127.0.0.1:{}", port()) && !procfs::listening(port()) {
+        anyhow::bail!("{}", writer_down(port()));
+    }
     let workspace = workspace(args.value("--workspace"))?;
     eprintln!("packset: workspace {workspace}");
-    let hits = client()?.search_ranked(
+    let hits = held.search_ranked(
         &workspace,
         &query,
         10,

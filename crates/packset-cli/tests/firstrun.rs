@@ -500,3 +500,66 @@ fn a_second_port_on_an_open_home_names_a_new_home() {
         "ensure waited out startup with no extra news: {elapsed:?}\n{stderr}"
     );
 }
+
+/// Long enough that a slow start still passes, and short of the client
+/// budget a refused connection used to spend.
+const QUICK: Duration = Duration::from_secs(5);
+
+#[test]
+fn stop_with_nothing_listening_returns_at_once_and_starts_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let port = common::free_port();
+    let started = Instant::now();
+    let (ok, stdout, stderr) = output(
+        packset(home.path(), port)
+            .env("PACKSET_TIMEOUT_MS", "30000")
+            .arg("stop"),
+    );
+    let elapsed = started.elapsed();
+    assert!(ok, "{stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+    assert!(
+        stderr.contains(&format!("nothing of ours to stop on {port}")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("stopped"), "{stderr}");
+    assert!(
+        elapsed < QUICK,
+        "stop waited on a closed port: {elapsed:?} {stderr}"
+    );
+    let pack = home.path().join("pack");
+    assert!(
+        !pack.join("token").exists(),
+        "stop wrote a token in {pack:?}"
+    );
+    assert!(!pack.join("port").exists(), "stop wrote a port file");
+    assert!(!pack.join("memory.lmdb").exists(), "stop opened a store");
+}
+
+#[test]
+fn search_with_nothing_listening_names_ensure_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let port = common::free_port();
+    let started = Instant::now();
+    let (ok, _, stderr) = output(
+        packset(home.path(), port)
+            .env("PACKSET_TIMEOUT_MS", "30000")
+            .args(["search", "--workspace", "demo", "ballots"]),
+    );
+    let elapsed = started.elapsed();
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "writer is not running on 127.0.0.1:{port}; packset ensure starts it"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        elapsed < QUICK,
+        "search waited on a closed port: {elapsed:?} {stderr}"
+    );
+    assert!(
+        !home.path().join("pack").join("token").exists(),
+        "search started a writer"
+    );
+}

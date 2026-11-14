@@ -90,7 +90,10 @@ lesson closes the old one's validity window.
 The id is the one ``prefer`` or ``remember`` printed. Right after those two
 writes the scores are 2.0000 and 1.0000; the number moves as the review
 clock runs. A question that shares no words prints ``no claims matched``
-and the workspace.
+and the workspace. When no writer is listening, search returns at once
+with ``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
+``packset stop`` with nothing listening says ``nothing of ours to stop``
+at once, and it does not start a writer.
 
 The score is the panel's, not one scorer's. Two ballots, a prefix-and-edit
 scan and BM25+ over an index, are fused by CombMNZ; see
