@@ -9,6 +9,10 @@ use crate::{clock, record};
 
 /// A query token shorter than this matches exactly or not at all.
 pub const SHORT_EXACT: usize = 4;
+/// The most a proper prefix can score before coverage scales it down.
+/// Exact is 4. This cap plus a full point of recency stays under that,
+/// so a fresh prefix cannot tie an exact word that has aged out.
+const PREFIX_CAP: f64 = 2.5;
 /// Days over which a hit's recency weight halves.
 pub const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 
@@ -74,10 +78,9 @@ pub const STOP: &[&str] = &[
 /// One atom.
 pub type Record = Map<String, Value>;
 
-/// Lowercase tokens with the stopwords dropped.
-#[must_use]
 /// Whether the lexical path folds a word to its stem. On by default;
 /// `PACKSET_STEM=off` turns it off. Measured in the README's retrieval table.
+#[must_use]
 fn stemming() -> bool {
     !matches!(
         std::env::var("PACKSET_STEM")
@@ -96,46 +99,147 @@ fn stemmer() -> &'static rust_stemmers::Stemmer {
     ENGLISH.get_or_init(|| rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English))
 }
 
+/// `_`, `-`, `.` and `/` stay inside an identifier and also divide it.
+fn is_connector(byte: u8) -> bool {
+    matches!(byte, b'_' | b'-' | b'.' | b'/')
+}
+
 /// Fold one token to its stem. Applied to both index and query, or neither.
 #[must_use]
 pub fn fold(token: &str) -> String {
     if !stemming() {
         return token.to_string();
     }
-    // Digits or a hyphen mark an identifier, version or accession: not stemmed.
-    if token
-        .bytes()
-        .any(|b| b.is_ascii_digit() || b == b'-' || b == b'_')
-    {
+    // A digit or a connector marks an identifier, version or accession.
+    if token.bytes().any(|b| b.is_ascii_digit() || is_connector(b)) {
         return token.to_string();
     }
     stemmer().stem(token).into_owned()
 }
 
-pub fn tokens(text: &str) -> Vec<String> {
-    let lower = text.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_alphanumeric() {
-            let start = i;
-            i += 1;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
-            {
-                i += 1;
+/// A camelCase or letter/digit boundary falls just before `index`.
+fn splits_before(bytes: &[u8], index: usize) -> bool {
+    let prev = bytes[index - 1];
+    let cur = bytes[index];
+    if is_connector(prev) || is_connector(cur) {
+        return false;
+    }
+    let prev_letter = prev.is_ascii_alphabetic();
+    let cur_letter = cur.is_ascii_alphabetic();
+    if (prev_letter && cur.is_ascii_digit()) || (prev.is_ascii_digit() && cur_letter) {
+        return true;
+    }
+    if prev.is_ascii_lowercase() && cur.is_ascii_uppercase() {
+        return true;
+    }
+    // `HTTPResponse` splits before the last capital of the run. A single
+    // lower letter before a digit, as in `IPv6`, stays with the run.
+    if prev.is_ascii_uppercase() && cur.is_ascii_uppercase() {
+        let Some(&next) = bytes.get(index + 1) else {
+            return false;
+        };
+        if !next.is_ascii_lowercase() {
+            return false;
+        }
+        let mut end = index + 1;
+        while end < bytes.len() && bytes[end].is_ascii_lowercase() {
+            end += 1;
+        }
+        return end - (index + 1) > 1 || bytes.get(end).is_some_and(u8::is_ascii_alphabetic);
+    }
+    false
+}
+
+/// The pieces of one identifier. Connectors are the boundaries, not pieces.
+fn identifier_parts(span: &str) -> Vec<&str> {
+    let bytes = span.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut index = 1usize;
+    while index < bytes.len() {
+        if is_connector(bytes[index]) {
+            if start < index {
+                parts.push(&span[start..index]);
             }
-            let token = &lower[start..i];
-            // Stopwords are dropped before folding, because the list is of
-            // words as written and a stemmer would not leave them matching it.
-            if !STOP.contains(&token) {
-                out.push(fold(token));
+            index += 1;
+            while index < bytes.len() && is_connector(bytes[index]) {
+                index += 1;
+            }
+            start = index;
+            continue;
+        }
+        if splits_before(bytes, index) {
+            parts.push(&span[start..index]);
+            start = index;
+        }
+        index += 1;
+    }
+    if start < bytes.len() {
+        parts.push(&span[start..]);
+    }
+    parts
+}
+
+/// Each maximal identifier in `text`, with connectors trimmed off the ends.
+fn for_each_span(text: &str, mut each: impl FnMut(&str)) {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_alphanumeric() || is_connector(bytes[index]) {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || is_connector(bytes[index]))
+            {
+                index += 1;
+            }
+            let mut from = start;
+            let mut to = index;
+            while from < to && is_connector(bytes[from]) {
+                from += 1;
+            }
+            while to > from && is_connector(bytes[to - 1]) {
+                to -= 1;
+            }
+            if from < to {
+                each(&text[from..to]);
             }
         } else {
-            i += 1;
+            index += 1;
         }
     }
+}
+
+/// Lowercase tokens with the stopwords dropped.
+///
+/// An identifier is kept whole and also split on `_`, `-`, `.`, `/`, a
+/// letter/digit edge and a camelCase boundary. `list_scans` and `list scans`
+/// share `list` and the stem of `scans`, and `SHA-1` shares its pieces with
+/// `sha1`. The joined form is the name as written, so a query that spells
+/// the identifier still matches it exactly. The lexical index is built from
+/// these tokens when a pack is searched. The atoms on disk are unchanged,
+/// so an existing pack needs no rebuild.
+#[must_use]
+pub fn tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for_each_span(text, |span| {
+        let parts = identifier_parts(span);
+        if parts.len() > 1 {
+            let joined = span.to_ascii_lowercase();
+            // The joined form is a name, so it is not stemmed.
+            if !STOP.contains(&joined.as_str()) {
+                out.push(joined);
+            }
+        }
+        for part in parts {
+            let lower = part.to_ascii_lowercase();
+            // Stopwords are dropped before folding. The list is the words
+            // as written, and a stemmer would not leave them matching it.
+            if !STOP.contains(&lower.as_str()) {
+                out.push(fold(&lower));
+            }
+        }
+    });
     out
 }
 
@@ -225,7 +329,10 @@ pub fn token_score(query: &str, hay: &str) -> f64 {
         return 0.0;
     }
     if hay.starts_with(query) {
-        return 3.0;
+        // Four letters of a long identifier cover little of it and score
+        // far under a word. A near-complete prefix stays under the cap.
+        let coverage = query.len() as f64 / hay.len() as f64;
+        return PREFIX_CAP * coverage;
     }
     if hay.contains(query) {
         return 2.0;
@@ -584,8 +691,10 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
 
 /// The tokens one atom is searchable by: its text and its entities.
 ///
-/// One definition, because the corpus that counts terms and the document that
-/// is scored against those counts have to agree about what a document is.
+/// Text and entities both go through [`tokens`], so an identifier in either
+/// place keeps its joined form and its pieces. One definition, because the
+/// corpus that counts terms and the document that is scored against those
+/// counts have to agree about what a document is.
 #[must_use]
 pub fn atom_tokens(atom: &Record) -> Vec<String> {
     let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1299,15 +1408,66 @@ mod tests {
         }
     }
 
-    /// A stemmer is for words. An accession, a version or an identifier is a
-    /// name, and stripping a suffix off one merges two distinct things.
+    /// A stemmer is for words. The joined identifier is a name, and stripping
+    /// a suffix off it merges two distinct things. A word split out of it
+    /// may fold.
     #[test]
     fn a_name_is_not_stemmed() {
-        for name in ["deed-patch-notes", "sha256:abc", "v0_9_3", "utf8"] {
-            for token in tokens(name) {
-                assert_eq!(fold(&token), token, "{name} was folded through {token}");
-            }
+        let notes = tokens("deed-patch-notes");
+        assert!(
+            notes.iter().any(|token| token == "deed-patch-notes"),
+            "{notes:?}"
+        );
+        assert_eq!(fold("deed-patch-notes"), "deed-patch-notes");
+        let hash = tokens("sha256:abc");
+        assert!(hash.iter().any(|token| token == "sha256"), "{hash:?}");
+        assert_eq!(fold("sha256"), "sha256");
+        let version = tokens("v0_9_3");
+        assert!(version.iter().any(|token| token == "v0_9_3"), "{version:?}");
+        assert_eq!(fold("v0_9_3"), "v0_9_3");
+        let utf = tokens("utf8");
+        assert!(utf.iter().any(|token| token == "utf8"), "{utf:?}");
+        assert_eq!(fold("utf8"), "utf8");
+    }
+
+    /// `list_scans` and `list scans` share the words, and the identifier is
+    /// still there for a query that spells it that way. The same split joins
+    /// `SHA-1` with `sha1` and `HTTP/2` with `http2`.
+    #[test]
+    fn an_identifier_matches_its_words_and_its_joined_form() {
+        let scans = tokens("list_scans");
+        assert!(scans.iter().any(|token| token == "list_scans"), "{scans:?}");
+        for word in tokens("list scans") {
+            assert!(scans.contains(&word), "{word} missing from {scans:?}");
         }
+        let camel = tokens("listScans");
+        assert!(camel.iter().any(|token| token == "listscans"), "{camel:?}");
+        for word in tokens("list scans") {
+            assert!(camel.contains(&word), "{word} missing from {camel:?}");
+        }
+        let response = tokens("HTTPResponse");
+        assert!(response.iter().any(|token| token == "http"), "{response:?}");
+        assert!(
+            response.iter().any(|token| token == "respons"),
+            "{response:?}"
+        );
+        assert!(response.iter().all(|token| token.len() > 1), "{response:?}");
+        let broken = tokens("SHA-1");
+        let joined = tokens("sha1");
+        assert!(
+            broken.contains(&"sha".to_string()) && joined.contains(&"sha".to_string()),
+            "{broken:?} vs {joined:?}"
+        );
+        assert!(broken.contains(&"1".to_string()) && joined.contains(&"1".to_string()));
+        let slash = tokens("HTTP/2");
+        let digits = tokens("http2");
+        assert!(
+            slash.contains(&"http".to_string()) && digits.contains(&"http".to_string()),
+            "{slash:?} vs {digits:?}"
+        );
+        let address = tokens("IPv6");
+        assert!(address.iter().any(|token| token == "ipv6"), "{address:?}");
+        assert!(address.iter().any(|token| token == "ipv"), "{address:?}");
     }
 
     /// Only the terms both sides carry count, and the pass depends on both
@@ -1452,10 +1612,21 @@ mod tests {
         // "pr" is not a prefix of "prefers", or every query matches everything.
         assert_eq!(token_score("pr", "prefers"), 0.0);
         assert_eq!(token_score("pr", "pr"), 4.0);
-        assert_eq!(token_score("pref", "prefers"), 3.0);
+        let near = token_score("prefer", "prefers");
+        let early = token_score("pref", "prefers");
+        assert!(near > early, "{near} vs {early}");
+        // A fresh prefix carries at most one point of recency. That point
+        // must leave it under an exact word.
+        assert!(near + 1.0 < token_score("prefers", "prefers"), "{near}");
         assert_eq!(token_score("efer", "prefers"), 2.0);
-        assert_eq!(token_score("prefer", "prefers"), 3.0);
+        assert!(near > token_score("efer", "prefers"), "{near}");
         assert_eq!(token_score("prefrs", "prefers"), 1.5, "one edit");
+        let identifier = "scanxxxx_configuration_module_extra";
+        let short = token_score("scan", identifier);
+        assert!(
+            short + 1.0 < token_score("scan", "scan"),
+            "a four-letter prefix tied the word: {short}"
+        );
     }
 
     #[test]
@@ -1938,24 +2109,16 @@ pub fn merge_ballots_ranked(
 /// Dropping them here would make two hits that share nothing but "the" look
 /// alike to the diversifier.
 fn raw_tokens(text: &str) -> std::collections::HashSet<String> {
-    let lower = text.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
     let mut out = std::collections::HashSet::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_alphanumeric() {
-            let start = i;
-            i += 1;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
-            {
-                i += 1;
-            }
-            out.insert(lower[start..i].to_string());
-        } else {
-            i += 1;
+    for_each_span(text, |span| {
+        let parts = identifier_parts(span);
+        if parts.len() > 1 {
+            out.insert(span.to_ascii_lowercase());
         }
-    }
+        for part in parts {
+            out.insert(part.to_ascii_lowercase());
+        }
+    });
     out
 }
 
