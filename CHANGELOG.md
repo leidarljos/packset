@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.18.2 (2026-11-14)
+
+- A search with no encoder splits an identifier on `_`, `-`, `.` and `/`, on a letter next to a digit, and on a camelCase boundary, and it keeps the joined form.
+  `list scans` meets `list_scans`, `sha1` meets `SHA-1`, and `http2` meets `HTTP/2`.
+  A prefix is scored by how much of the token it covers, and it stays below an exact word, so four letters of a long name stay under that word at the cut.
+  The index is built from the atoms when the pack is searched, so an existing pack needs no rebuild.
+
 ## 0.18.1 (2026-11-14)
 
 - `packsetd` starts the query encoder when it begins listening, so the first search is not the one that loads the model.
