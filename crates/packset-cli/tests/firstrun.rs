@@ -467,6 +467,47 @@ fn an_unwritable_log_directory_names_the_path_and_the_next_command() {
 }
 
 #[test]
+fn the_readme_installs_the_checkout_at_the_package_path() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    let path = "crates/packset-cli";
+    assert!(
+        readme.contains(&format!("cargo install --locked --path {path}")),
+        "checkout install does not use the package path"
+    );
+    assert!(readme.contains("cargo install --locked packset"));
+    assert!(readme.contains("cargo build --release -p packset"));
+    assert!(readme.contains("bin/packset"));
+    assert!(
+        readme.contains("`cargo install --locked --path .` does not"),
+        "the workspace root is not the package"
+    );
+    let manifest = std::fs::read_to_string(root.join(path).join("Cargo.toml")).unwrap();
+    let name = manifest.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("name = ")
+            .map(|rest| rest.trim_matches('"'))
+    });
+    assert_eq!(name, Some("packset"));
+    for doc in [
+        "docs/source/getting-started.rst",
+        "docs/orgmode/getting-started.org",
+        "docs/source/index.rst",
+        "docs/orgmode/index.org",
+    ] {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        assert!(
+            text.contains("cargo install --locked --path crates/packset-cli"),
+            "{doc} disagrees with the checkout path"
+        );
+        assert!(
+            text.contains("cargo install --locked packset"),
+            "{doc} drops the crates.io install"
+        );
+    }
+}
+
+#[test]
 fn the_checkout_wrapper_names_the_packset_package() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let script = std::fs::read_to_string(root.join("bin/packset")).unwrap();

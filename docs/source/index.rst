@@ -36,7 +36,8 @@ Install
 
 .. code:: console
 
-   $ cargo install --locked packset            # packset, packsetd and packset-mcp
+   $ cargo install --locked packset                      # crates.io: packset, packsetd and packset-mcp
+   $ cargo install --locked --path crates/packset-cli   # this checkout; the package name is packset
    $ packset ensure
 
 First minute

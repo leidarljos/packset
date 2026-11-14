@@ -11,14 +11,27 @@ stays lexical, and a sitting still opens on those ballots.
 [[file:howto.org][How-to]] covers building the encoder from source against
 an Open Neural Network Exchange (ONNX) Runtime you compile.
 
+From crates.io, which needs a network:
+
 #+begin_src console
 $ cargo install --locked packset
 #+end_src
 
 =cargo binstall --locked packset= is the same install when =cargo-binstall=
-is already on the machine. Both reach crates.io, so they need a network.
-A checkout of this repository builds with =cargo build --release -p packset=,
-and =bin/packset= runs that binary.
+is already on the machine. Both reach crates.io. Without a network, cargo
+reports that =packset= is not in the registry. =cargo install --locked packset=
+does not build a checkout of this repository.
+
+The package in a checkout is =packset=, and its path is =crates/packset-cli=:
+
+#+begin_src console
+$ cargo install --locked --path crates/packset-cli
+#+end_src
+
+=cargo build --release -p packset= builds that same package in the tree,
+and =bin/packset= runs the binary. =cargo install --locked --path .= does
+not: the workspace root is not a package. =cargo build --release -p packset-cli=
+does not produce it. There is no package named =packset-cli=.
 
 * 1. Start the writer
 

@@ -19,18 +19,27 @@ The seat that sits on this pack is documented at https://leidarljos.github.io.
 
 ## Install
 
+From crates.io, which needs a network:
+
 ```console
 $ cargo install --locked packset
 # or, when cargo-binstall is already installed: cargo binstall --locked packset
 $ packset ensure
 ```
 
-`cargo install` and `cargo binstall` both reach crates.io, so they need a
-network. Without one, cargo reports that `packset` is not in the registry.
-A checkout of this repository builds with `cargo build --release -p packset`,
-and `bin/packset` runs that binary. `cargo build --release -p packset-cli`
-and `-p packset-daemon` do not produce it: the package is `packset`, and
-`packset-daemon` is the library.
+Without a network, cargo reports that `packset` is not in the registry.
+`cargo install --locked packset` does not build a checkout of this repository.
+
+The package in a checkout is `packset`, and its path is `crates/packset-cli`:
+
+```console
+$ cargo install --locked --path crates/packset-cli
+```
+
+`cargo build --release -p packset` builds that same package in the tree, and `bin/packset` runs the binary.
+`cargo install --locked --path .` does not: the workspace root is not a package.
+`cargo build --release -p packset-cli` and `-p packset-daemon` do not produce it.
+There is no package named `packset-cli`, and `packset-daemon` is the library.
 
 `cargo binstall packset` downloads `packset-v<version>-<target>.tar.gz`.
 Hosts are aarch64-apple-darwin and x86_64-apple-darwin.
