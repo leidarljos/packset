@@ -51,11 +51,11 @@ First minute
    63df91bbea2b5e4e146866db0a85b4c6    preference  due 2026-09-28T16:52:09.149Z
    $ packset search --workspace demo ballots BM25
    packset: workspace demo
-   2.0000  preference  63df91bbea2b5e4e146866db0a85b4c6    CombMNZ over RRF for fusing two ballots.
-   1.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf    The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
+   2.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf    The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
+   1.0000  preference  63df91bbea2b5e4e146866db0a85b4c6    CombMNZ over RRF for fusing two ballots.
 
 Two claims, written on purpose, each with a review date a day out. A search
-lists the standing choice first, then the lesson. The :doc:`tutorial <getting-started>`
+lists the lesson first, then the standing choice. The :doc:`tutorial <getting-started>`
 goes on from these two claims to review and handover.
 
 ``packset ensure`` starts the writer when it is down. With nothing set, every

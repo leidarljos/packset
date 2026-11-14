@@ -103,13 +103,13 @@ lesson closes the old one's validity window.
 
    $ packset search --workspace demo ballots BM25
    packset: workspace demo
-   2.0000  preference  63df91bbea2b5e4e146866db0a85b4c6  CombMNZ over RRF for fusing two ballots.
-   1.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf  The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
+   2.0000  lesson  ee17d2a07cbf1569e54e0d80496fdecf  The lexical default is BM25+. It scored 0.635 hit@1 against 0.615 for BM25.
+   1.0000  preference  63df91bbea2b5e4e146866db0a85b4c6  CombMNZ over RRF for fusing two ballots.
 
 The id is the one ``prefer`` or ``remember`` printed. Right after those two
-writes the scores are 2.0000 and 1.0000; the number moves as the review
-clock runs. A question that shares no words prints ``no claims matched``
-and the workspace. When no writer is listening, search returns at once
+writes the lesson scores 2.0000 and the preference scores 1.0000; the
+number moves as the review clock runs. A question that shares no words
+prints ``no claims matched`` and the workspace. When no writer is listening, search returns at once
 with ``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
 ``packset stop`` with nothing listening says ``nothing of ours to stop``
 at once, and it does not start a writer.
