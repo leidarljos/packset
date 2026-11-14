@@ -1,1 +1,0 @@
-On macOS, a second writer names the process that has the pack open, and a taken port names that process. When the kernel will not say which process it is, the message stays the one that names another process and the next command.
