@@ -2,6 +2,7 @@
 //! learned ballots, and the fuse that merges them.
 
 use std::borrow::Borrow;
+use std::collections::HashSet;
 
 use serde_json::{json, Map, Value};
 
@@ -79,7 +80,7 @@ pub const STOP: &[&str] = &[
 pub type Record = Map<String, Value>;
 
 /// Whether the lexical path folds a word to its stem. On by default;
-/// `PACKSET_STEM=off` turns it off. Measured in the README's retrieval table.
+/// `PACKSET_STEM=off` turns it off.
 #[must_use]
 fn stemming() -> bool {
     !matches!(
@@ -91,6 +92,26 @@ fn stemming() -> bool {
         "off" | "0" | "no" | "false"
     )
 }
+
+/// The lexical index this process builds.
+///
+/// `stem-en-1` is Snowball English. `surface-1` is `PACKSET_STEM=off`.
+/// The writer stores the name. A pack indexed another way is rebuilt from
+/// its stored text, and the writer says so once.
+#[must_use]
+pub fn index_scheme() -> &'static str {
+    if stemming() {
+        "stem-en-1"
+    } else {
+        "surface-1"
+    }
+}
+
+/// Added for each query word that appears as written. It sits under one
+/// exact token on the scan (4) and under a second stemmed term, so a
+/// claim that covers another word still leads. It is enough to put the
+/// exact form ahead of a claim that only shares the stem.
+const EXACT_BONUS: f64 = 0.25;
 
 /// The stemmer, built once. Snowball's English, which is Porter's suffix
 /// stripping as its author later revised it (doi:10.1108/eb046814).
@@ -216,11 +237,25 @@ fn for_each_span(text: &str, mut each: impl FnMut(&str)) {
 /// letter/digit edge and a camelCase boundary. `list_scans` and `list scans`
 /// share `list` and the stem of `scans`, and `SHA-1` shares its pieces with
 /// `sha1`. The joined form is the name as written, so a query that spells
-/// the identifier still matches it exactly. The lexical index is built from
-/// these tokens when a pack is searched. The atoms on disk are unchanged,
-/// so an existing pack needs no rebuild.
+/// the identifier still matches it exactly. Words are folded to their
+/// English stem, on the index and the query together. The lexical index is
+/// built from these tokens when a pack is searched. The atoms on disk are
+/// unchanged, so an existing pack is indexed from its text.
 #[must_use]
 pub fn tokens(text: &str) -> Vec<String> {
+    collect_tokens(text, true)
+}
+
+/// The same split as [`tokens`], with each word left as written.
+///
+/// This is what an exact form is. A stem match does not count here, so a
+/// claim that says `run` does not take the exact bonus of a question that
+/// says `running`.
+fn surface_tokens(text: &str) -> Vec<String> {
+    collect_tokens(text, false)
+}
+
+fn collect_tokens(text: &str, fold_words: bool) -> Vec<String> {
     let mut out = Vec::new();
     for_each_span(text, |span| {
         let parts = identifier_parts(span);
@@ -236,11 +271,61 @@ pub fn tokens(text: &str) -> Vec<String> {
             // Stopwords are dropped before folding. The list is the words
             // as written, and a stemmer would not leave them matching it.
             if !STOP.contains(&lower.as_str()) {
-                out.push(fold(&lower));
+                if fold_words {
+                    out.push(fold(&lower));
+                } else {
+                    out.push(lower);
+                }
             }
         }
     });
     out
+}
+
+/// Query words as written, when stemming is on. Empty when it is off, so
+/// the bonus does not move a pack that asked for the surface forms only.
+fn query_surface(query: &str) -> HashSet<String> {
+    if !stemming() {
+        return HashSet::new();
+    }
+    surface_tokens(query).into_iter().collect()
+}
+
+/// The surface forms of one atom: its text and its entities, the same
+/// fields [`atom_tokens`] indexes, without the stem.
+fn atom_surface(atom: &Record) -> Vec<String> {
+    let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+    let mut out = surface_tokens(text);
+    if let Some(Value::Array(items)) = atom.get("entities") {
+        for item in items {
+            let name = item
+                .as_str()
+                .map_or_else(|| item.to_string(), str::to_string);
+            out.extend(surface_tokens(&name));
+        }
+    }
+    out
+}
+
+/// How much to add for query words that appear as written.
+fn exact_bonus(query: &HashSet<String>, hay: &[String]) -> f64 {
+    if query.is_empty() {
+        return 0.0;
+    }
+    let matched = query
+        .iter()
+        .filter(|term| hay.iter().any(|token| token == *term))
+        .count();
+    matched as f64 * EXACT_BONUS
+}
+
+/// `relevance`, plus the exact-form bonus when the stem already matched.
+/// A bonus alone is not a hit: the stem path is what recalls.
+fn add_exact(relevance: f64, query: &HashSet<String>, hay: impl FnOnce() -> Vec<String>) -> f64 {
+    if relevance == 0.0 || query.is_empty() {
+        return relevance;
+    }
+    relevance + exact_bonus(query, &hay())
 }
 
 /// Paragraphs, or lines when the text is one block.
@@ -386,11 +471,17 @@ fn atom_in_set(atom: &Record, set: Option<&str>) -> bool {
     }
 }
 
-fn file_hits(field: &str, text: &str, qtoks: &[String], bias: f64) -> Vec<Value> {
+fn file_hits(
+    field: &str,
+    text: &str,
+    qtoks: &[String],
+    surface: &HashSet<String>,
+    bias: f64,
+) -> Vec<Value> {
     paragraphs(text)
         .into_iter()
         .filter_map(|para| {
-            let score = text_score(qtoks, &para);
+            let score = add_exact(text_score(qtoks, &para), surface, || surface_tokens(&para));
             (score != 0.0).then(|| {
                 // A card is a file the person edits, so its labels are read
                 // off the paragraph rather than stored beside it.
@@ -647,10 +738,11 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
     if qtoks.is_empty() {
         return Vec::new();
     }
+    let surface = query_surface(query);
     // The seat card outranks the workspace card at equal relevance, because a
     // standing preference applies wherever the question came from.
-    let mut hits = file_hits("user", user, &qtoks, 0.5);
-    hits.extend(file_hits("memory", memory, &qtoks, 0.25));
+    let mut hits = file_hits("user", user, &qtoks, &surface, 0.5);
+    hits.extend(file_hits("memory", memory, &qtoks, &surface, 0.25));
 
     let mut best = TopK::new(limit);
     let mut owned: Vec<String>;
@@ -666,7 +758,7 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
                 &owned
             }
         };
-        let relevance = tokens_score(&qtoks, hay);
+        let relevance = add_exact(tokens_score(&qtoks, hay), &surface, || atom_surface(atom));
         let due = record::is_due(atom, now);
         if relevance == 0.0 {
             continue;
@@ -827,7 +919,7 @@ fn bm25_hits<R: Borrow<Record>>(
         user,
         memory,
         atoms,
-        query: _,
+        query: asked,
         limit,
         set,
         kind,
@@ -836,11 +928,16 @@ fn bm25_hits<R: Borrow<Record>>(
     if query.is_empty() || index.is_empty() {
         return Vec::new();
     }
+    let surface = query_surface(asked);
 
     let mut hits: Vec<Value> = Vec::new();
     for (field, text, bias) in [("user", user, 0.5), ("memory", memory, 0.25)] {
         for para in paragraphs(text) {
-            let relevance = index.score_foreign_weighted_by(scorer, query, &tokens(&para));
+            let relevance = add_exact(
+                index.score_foreign_weighted_by(scorer, query, &tokens(&para)),
+                &surface,
+                || surface_tokens(&para),
+            );
             if relevance == 0.0 {
                 continue;
             }
@@ -866,6 +963,7 @@ fn bm25_hits<R: Borrow<Record>>(
             continue;
         }
         let ts = atom.get("ts").and_then(Value::as_str);
+        let relevance = add_exact(relevance, &surface, || atom_surface(atom));
         best.offer(Candidate {
             score: relevance + 0.1 * trust_of(atom) + age_weight(ts, now, rank),
             tie: Tie::of_atom(atom),
@@ -1391,6 +1489,119 @@ mod tests {
             asked.iter().any(|t| said.contains(t)),
             "{asked:?} shares nothing with {said:?}"
         );
+    }
+
+    /// `running` and `run` share a stem, and so do `tests` and `test`.
+    /// The surface form is what the exact bonus ranks above that stem.
+    #[test]
+    fn obvious_inflections_share_a_stem_and_keep_their_surface() {
+        assert_eq!(fold("running"), fold("run"));
+        assert_ne!(fold("running"), "running");
+        assert_eq!(fold("tests"), fold("test"));
+        assert_ne!(fold("tests"), "tests");
+        assert!(tokens("running").contains(&"run".to_string()));
+        assert!(tokens("tests").contains(&"test".to_string()));
+    }
+
+    fn lesson(id: &str, text: &str) -> Record {
+        atom(json!({
+            "id": id,
+            "kind": "lesson",
+            "text": text,
+            "ts": NOW,
+            "trust": 1.0,
+        }))
+    }
+
+    /// Prefix scan, BM25+, and the fused panel, each as an id list.
+    fn lexical_orders(atoms: &[Record], query: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let documents: Vec<Vec<String>> = atoms.iter().map(atom_tokens).collect();
+        let index = crate::bm25::Index::build(documents.iter().map(Vec::as_slice));
+        let asked = ask("", "", atoms, query, atoms.len(), None);
+        let ids = |hits: &[Value]| -> Vec<String> {
+            hits.iter()
+                .filter_map(|hit| hit["id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let scan = search_linear_with_ranked(&asked, &documents, Rank::Relevance);
+        let terms = search_bm25_ranked(&asked, &index, Rank::Relevance);
+        let fused = merge_ballots_ranked(
+            &[scan.clone(), terms.clone()],
+            atoms.len(),
+            &crate::panel::Panel::named("combmnz", "none", "off").expect("panel"),
+            NOW,
+            Rank::Relevance,
+        );
+        (ids(&scan), ids(&terms), ids(&fused))
+    }
+
+    fn leads(order: &[String], id: &str, label: &str) {
+        assert_eq!(
+            order.first().map(String::as_str),
+            Some(id),
+            "{label}: {order:?}"
+        );
+    }
+
+    /// A question finds the other inflection, and the claim that uses the
+    /// question's own form ranks first on both lexical ballots.
+    #[test]
+    fn a_stem_recalls_and_the_exact_form_ranks_first() {
+        let run = lesson("exact-run", "The daily run finished.");
+        let running = lesson("stem-run", "The daily running finished.");
+        let test = lesson("exact-test", "The unit test passed.");
+        let tests = lesson("stem-tests", "The unit tests passed.");
+        let atoms = [run, running, test, tests];
+
+        let (scan, terms, fused) = lexical_orders(&atoms, "running");
+        for (label, order) in [("scan", &scan), ("bm25", &terms), ("fused", &fused)] {
+            assert!(
+                order.iter().any(|id| id == "exact-run"),
+                "{label} missed run: {order:?}"
+            );
+            leads(order, "stem-run", label);
+        }
+
+        let (scan, terms, fused) = lexical_orders(&atoms, "run");
+        for (label, order) in [("scan", &scan), ("bm25", &terms), ("fused", &fused)] {
+            assert!(
+                order.iter().any(|id| id == "stem-run"),
+                "{label} missed running: {order:?}"
+            );
+            leads(order, "exact-run", label);
+        }
+
+        let (scan, terms, fused) = lexical_orders(&atoms, "tests");
+        for (label, order) in [("scan", &scan), ("bm25", &terms), ("fused", &fused)] {
+            assert!(
+                order.iter().any(|id| id == "exact-test"),
+                "{label} missed test: {order:?}"
+            );
+            leads(order, "stem-tests", label);
+        }
+
+        let (scan, terms, fused) = lexical_orders(&atoms, "test");
+        for (label, order) in [("scan", &scan), ("bm25", &terms), ("fused", &fused)] {
+            assert!(
+                order.iter().any(|id| id == "stem-tests"),
+                "{label} missed tests: {order:?}"
+            );
+            leads(order, "exact-test", label);
+        }
+    }
+
+    /// One exact word does not outrank a claim that stems to both words
+    /// of the question. The bonus is a tie between inflections, not a
+    /// second term.
+    #[test]
+    fn a_second_stemmed_word_still_outranks_one_exact_word() {
+        let one = lesson("one-exact", "The running marker is noted.");
+        let both = lesson("both-stems", "The run test finished.");
+        let atoms = [one, both];
+        let (scan, terms, fused) = lexical_orders(&atoms, "running tests");
+        for (label, order) in [("scan", &scan), ("bm25", &terms), ("fused", &fused)] {
+            leads(order, "both-stems", label);
+        }
     }
 
     /// Both sides fold or neither.

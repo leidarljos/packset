@@ -7,7 +7,8 @@ By the end you will have a pack that remembers two claims and ranks them.
 It will tell you when to review them, and export them for another seat.
 
 Install the writer. The encoder is a separate binary. Without it search
-stays lexical, and a sitting still opens on those ballots.
+stays lexical, and a sitting still opens on those ballots. Lexical search
+stems English, and an exact word ranks above another form of it.
 :doc:`How-to <howto>` covers building the encoder from source against
 an Open Neural Network Exchange (ONNX) Runtime you compile.
 
@@ -115,7 +116,8 @@ with ``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
 at once, and it does not start a writer.
 
 The score is the panel's, not one scorer's. Two ballots, a prefix-and-edit
-scan and BM25+ over an index, are fused by CombMNZ; see
+scan and BM25+ over an index, are fused by CombMNZ. Both stem English, and
+an exact word ranks above another form of it. See
 :doc:`Explanation <explanation>` for what was measured.
 
 4. Review before you forget

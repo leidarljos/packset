@@ -40,6 +40,9 @@ returns at once with the same sentence as ``status``:
 ``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
 The first ``packset ensure`` on a new home names that directory. With no
 ``packset-embed`` binary it also says search is lexical (no embeddings).
+That lexical search stems English, and an exact word ranks above another
+form of it. The index is built from the stored text, so an existing pack
+is indexed on open and its records stay as they were. The writer says so once.
 ``packset island`` prints one row per activated claim. When none activated
 it prints one line, ``nothing to show``, and why.
 
@@ -251,7 +254,7 @@ Variable                                                   Read by              
 ``PACKSET_TRACE_WRITES``                                   writer                    a file that receives one line per write with the time each stage took
 ``PACKSET_EMBED_QUERY_WORKERS``                            writer                    ignored. One encoder child is kept, so a cold start cannot load the model twice. Concurrent searches wait on that child. It still stops after ``PACKSET_EMBED_IDLE_MIN`` with no call
 ``PACKSET_APPEND_LOG_MB``                                  ``packsetd``              cap on the append log that records small writes admitted under memory pressure, in mebibytes, default 8. The log is synced before the answer. Past the cap a small append is answered 503 with ``Retry-After``. The log is folded once pressure clears, and replayed when the pack opens
-``PACKSET_STEM``                                           writer                    ``off`` turns lexical stemming off
+``PACKSET_STEM``                                           writer                    ``off`` turns lexical stemming off. On, an inflected word matches its stem and an exact word ranks above that match
 ``PACKSET_EMBED``                                          writer                    the encoder binary; else beside the writer, else on ``PATH``
 ``PACKSET_EMBED_CACHE``                                    encoder                   where models live; default ``$XDG_CACHE_HOME/packset/embed``
 ``PACKSET_EMBED_MODEL_PATH``                               encoder                   hub layout of the named model (``onnx/model.onnx`` and the tokenizer files); a present directory is used as-is

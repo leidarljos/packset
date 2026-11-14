@@ -16,7 +16,9 @@ closed or retracted with the deed that showed it wrong.
 
 Two lexical ballots always run: a prefix-and-one-edit scan that finds a
 claim through a typo, and BM25+ over an inverted index that weighs a word by
-how much it narrows the pack. A dense ballot runs when an encoder is
+how much it narrows the pack. Both fold an English word to its stem, so a
+question about running finds a claim that says run, and an exact word ranks
+above that match. A dense ballot runs when an encoder is
 present. It orders by cosine plus a tenth of trust. Age is not in
 that score: a client reads =dense_rank= as the encoder's order, and
 one day of age is about the gap between the first cosine and the

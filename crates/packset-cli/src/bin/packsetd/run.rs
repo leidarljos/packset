@@ -103,7 +103,11 @@ pub fn run() -> anyhow::Result<()> {
         panel.decay.as_str()
     );
     if !crate::embed::enabled() {
-        eprintln!("packsetd: encoder off; search is lexical");
+        if packset_core::search::index_scheme() == "stem-en-1" {
+            eprintln!("packsetd: encoder off; search is lexical and stems English");
+        } else {
+            eprintln!("packsetd: encoder off; search is lexical");
+        }
     }
 
     let service = Arc::new(Service::open(Home::new(&root))?);

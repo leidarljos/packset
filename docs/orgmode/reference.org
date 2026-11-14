@@ -33,6 +33,9 @@ the working directory, else =default=.
 
 The first =packset ensure= on a new home names that directory. With no
 =packset-embed= binary it also says search is lexical (no embeddings).
+That lexical search stems English, and an exact word ranks above another
+form of it. The index is built from the stored text, so an existing pack
+is indexed on open and its records stay as they were. The writer says so once.
 =packset island= prints one row per activated claim. When none activated
 it prints one line, =nothing to show=, and why.
 
@@ -199,7 +202,7 @@ a search score by =R=, floored at 0.25; cards are never scaled.
 | =PACKSET_TRACE_WRITES= | writer | a file that receives one line per write with the time each stage took |
 | =PACKSET_EMBED_QUERY_WORKERS= | writer | ignored. One encoder child is kept, so a cold start cannot load the model twice. Concurrent searches wait on that child. It still stops after =PACKSET_EMBED_IDLE_MIN= with no call |
 | =PACKSET_APPEND_LOG_MB= | =packsetd= | cap on the append log that records small writes admitted under memory pressure, in mebibytes, default 8. The log is synced before the answer. Past the cap a small append is answered 503 with =Retry-After=. The log is folded once pressure clears, and replayed when the pack opens |
-| =PACKSET_STEM= | writer | =off= turns lexical stemming off |
+| =PACKSET_STEM= | writer | =off= turns lexical stemming off. On, an inflected word matches its stem and an exact word ranks above that match |
 | =PACKSET_EMBED= | writer | the encoder binary; else beside the writer, else on =PATH= |
 | =INSIDE_EMBED= | writer | =off= (also =0=, =none=, =false=, =no=) or =packsetd --no-embed= starts no encoder: no dense ballot, no rerank, lexical search answers, and =/v1/status= reads =embedder.enabled= false and =embedder.available= false. Unset, the encoder stays on |
 | =PACKSET_EMBED_CACHE= | encoder | where models live; default =$XDG_CACHE_HOME/packset/embed= |

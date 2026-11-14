@@ -179,7 +179,8 @@ directory is the Hugging Face fetch for a model the runtime knows.
 files only, under ``user/e5-large-v2/``.
 
 The pack stays on the lexical ballots without the model files or the
-binary. ``/v1/status`` then reads ``embedder.available`` false. A sitting
+binary. Those ballots stem English, and an exact word ranks above another
+form of it. ``/v1/status`` then reads ``embedder.available`` false. A sitting
 still opens: doctor reads that status, and recall, island and search run
 on the lexical ballots.
 

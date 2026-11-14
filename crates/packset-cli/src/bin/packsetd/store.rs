@@ -606,6 +606,14 @@ pub fn workspace_prefix(workspace: &str) -> Vec<u8> {
 /// record's key, and no workspace prefix reaches one.
 const TOMBSTONE_INDEX: u8 = 0xFF;
 
+/// The lexical scheme, stored beside the atoms. The byte is not UTF-8, so
+/// the key is not a workspace, and the value is not JSON, so a scan skips it.
+const LEXICAL_MARK_KEY: &[u8] = b"\xfelexical";
+
+/// What the writer says the one time it rebuilds a pack onto English stemming.
+const LEXICAL_REBUILD: &str =
+    "packsetd: rebuilt the lexical index from the stored claims; search stems English";
+
 /// The index entry for a record key, or for a workspace prefix: the same
 /// bytes behind [`TOMBSTONE_INDEX`]. The value is empty. Every reader that
 /// walks the whole database skips a value that is not JSON.
@@ -671,6 +679,9 @@ pub struct Store {
     cache_used: Mutex<HashMap<String, u64>>,
     /// `memory.lmdb`, so an idle release can advise its pages.
     db_dir: std::path::PathBuf,
+    /// Set when this open rebuilt an existing pack onto the stemming scheme
+    /// and said so. A later open of the same pack finds the mark and stays quiet.
+    said_lexical_rebuild: AtomicBool,
     #[cfg(test)]
     counted: AtomicU64,
     #[cfg(test)]
@@ -717,6 +728,9 @@ impl Store {
         let lock = take_lock(&root.join("packsetd.lock"))?;
         let db_path = root.join("memory.lmdb");
         fs::create_dir_all(&db_path).map_err(|err| explain_home(&db_path, &err))?;
+        // Before LMDB creates `data.mdb`. A pack that already has one was
+        // written by an older open; a fresh directory was not.
+        let prior_store = db_path.join("data.mdb").is_file();
         // SAFETY: LMDB maps the file; the contract is that no other process
         // writes it, which the lock above is what enforces. The map starts
         // from the file's size and grows when a write needs room; the file
@@ -748,7 +762,7 @@ impl Store {
         // database; the rest can go back to the filesystem. A later write
         // extends the file from the last page.
         trim_to_used_pages(&env, db, &db_path)?;
-        Ok(Self {
+        let store = Self {
             env,
             db,
             map_gate: RwLock::new(()),
@@ -768,12 +782,49 @@ impl Store {
             cache_clock: AtomicU64::new(1),
             cache_used: Mutex::new(HashMap::new()),
             db_dir: db_path,
+            said_lexical_rebuild: AtomicBool::new(false),
             #[cfg(test)]
             counted: AtomicU64::new(0),
             #[cfg(test)]
             scanned: AtomicU64::new(0),
             #[cfg(test)]
             tombstones_read: AtomicU64::new(0),
+        };
+        store.note_lexical_index(prior_store);
+        Ok(store)
+    }
+
+    /// Record [`packset_core::search::index_scheme`]. An existing pack whose
+    /// mark is missing or older is rebuilt from its stored text: the index
+    /// is not a second copy of the claims. The writer says that once.
+    /// A full disk leaves the mark unwritten, and the next open tries again.
+    fn note_lexical_index(&self, prior_store: bool) {
+        let scheme = packset_core::search::index_scheme();
+        let previous = match self.lexical_mark() {
+            Ok(mark) => mark,
+            Err(_) => return,
+        };
+        if prior_store && scheme == "stem-en-1" && previous.as_deref() != Some(scheme) {
+            eprintln!("{LEXICAL_REBUILD}");
+            self.said_lexical_rebuild.store(true, Ordering::Release);
+        }
+        if previous.as_deref() != Some(scheme) {
+            let _ = self.write_lexical_mark(scheme);
+        }
+    }
+
+    fn lexical_mark(&self) -> anyhow::Result<Option<String>> {
+        let _gate = self.gate();
+        let txn = self.env.read_txn()?;
+        let raw = self.db.get(&txn, LEXICAL_MARK_KEY)?;
+        Ok(raw.map(|bytes| String::from_utf8_lossy(bytes).into_owned()))
+    }
+
+    fn write_lexical_mark(&self, scheme: &str) -> anyhow::Result<()> {
+        let db = self.db;
+        self.write(|txn| {
+            db.put(txn, LEXICAL_MARK_KEY, scheme.as_bytes())?;
+            Ok(())
         })
     }
 
@@ -3222,6 +3273,7 @@ extern "C" {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::Ordering;
 
     fn record(value: Value) -> Record {
         value.as_object().unwrap().clone()
@@ -3231,6 +3283,146 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         (dir, store)
+    }
+
+    /// A fresh directory has nothing to rebuild.
+    #[test]
+    fn a_new_pack_does_not_announce_a_lexical_rebuild() {
+        let (_dir, store) = store();
+        assert!(!store.said_lexical_rebuild.load(Ordering::Acquire));
+        assert_eq!(
+            store.lexical_mark().unwrap().as_deref(),
+            Some(packset_core::search::index_scheme())
+        );
+    }
+
+    /// Claims written before this scheme have no mark. Opening indexes them
+    /// from the stored text, says so once, and leaves the claims as written.
+    #[test]
+    fn an_existing_pack_is_indexed_from_its_text_and_said_once() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_unstemmed_pack(dir.path());
+        let now = "2026-06-01T00:00:00.000Z";
+        let store = Store::open(dir.path()).unwrap();
+        assert!(store.said_lexical_rebuild.load(Ordering::Acquire));
+        assert!(LEXICAL_REBUILD.contains("rebuilt the lexical index"));
+        assert!(LEXICAL_REBUILD.contains("search stems English"));
+        assert!(!LEXICAL_REBUILD.contains('\n'));
+
+        let order = |store: &Store, query: &str| -> Vec<String> {
+            let (atoms, index, documents, _) = store.searchable("w").unwrap();
+            let ask = packset_core::search::Ask {
+                user: "",
+                memory: "",
+                atoms: atoms.as_slice(),
+                query,
+                limit: 10,
+                set: None,
+                kind: None,
+                now,
+            };
+            let scan = packset_core::search::search_linear_with_ranked(
+                &ask,
+                &documents,
+                packset_core::search::Rank::Relevance,
+            );
+            let terms = packset_core::search::search_bm25_ranked(
+                &ask,
+                &index,
+                packset_core::search::Rank::Relevance,
+            );
+            let hits = packset_core::search::merge_ballots_ranked(
+                &[scan, terms],
+                10,
+                &packset_core::panel::Panel::named("combmnz", "none", "off").unwrap(),
+                now,
+                packset_core::search::Rank::Relevance,
+            );
+            hits.iter()
+                .filter_map(|hit| hit["id"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        let running = order(&store, "running");
+        assert_eq!(
+            running.first().map(String::as_str),
+            Some("running-form"),
+            "{running:?}"
+        );
+        assert!(running.iter().any(|id| id == "run-form"), "{running:?}");
+        let run = order(&store, "run");
+        assert_eq!(run.first().map(String::as_str), Some("run-form"), "{run:?}");
+        let tests = order(&store, "tests");
+        assert_eq!(
+            tests.first().map(String::as_str),
+            Some("tests-form"),
+            "{tests:?}"
+        );
+        assert!(tests.iter().any(|id| id == "test-form"), "{tests:?}");
+        let test = order(&store, "test");
+        assert_eq!(
+            test.first().map(String::as_str),
+            Some("test-form"),
+            "{test:?}"
+        );
+
+        assert_eq!(
+            store.get("w", "run-form").unwrap().unwrap()["text"],
+            json!("The daily run finished.")
+        );
+        assert_eq!(
+            store.get("w", "running-form").unwrap().unwrap()["text"],
+            json!("The daily running finished.")
+        );
+        assert!(store
+            .get("w", "run-form")
+            .unwrap()
+            .unwrap()
+            .get("stem")
+            .is_none());
+        drop(store);
+
+        let again = Store::open(dir.path()).unwrap();
+        assert!(!again.said_lexical_rebuild.load(Ordering::Acquire));
+        assert_eq!(again.lexical_mark().unwrap().as_deref(), Some("stem-en-1"));
+        let running = order(&again, "running");
+        assert_eq!(
+            running.first().map(String::as_str),
+            Some("running-form"),
+            "{running:?}"
+        );
+    }
+
+    /// A pack whose database holds the claims and no lexical mark.
+    fn plant_unstemmed_pack(root: &Path) {
+        let db_dir = root.join("memory.lmdb");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(MAP_FLOOR)
+                .max_dbs(1)
+                .open(&db_dir)
+                .unwrap()
+        };
+        {
+            let mut txn = env.write_txn().unwrap();
+            let db: Database<Bytes, Bytes> = env.create_database(&mut txn, None).unwrap();
+            let rows = [
+                ("run-form", "The daily run finished."),
+                ("running-form", "The daily running finished."),
+                ("test-form", "The unit test passed."),
+                ("tests-form", "The unit tests passed."),
+            ];
+            for (id, text) in rows {
+                let record = format!(
+                    r#"{{"schema":"inside.atom/v1","kind":"lesson","level":"explicit","text":"{text}","workspace":"w","origin":"user-declared","id":"{id}","ts":"2026-06-01T00:00:00.000Z","tombstone":false}}"#
+                );
+                db.put(&mut txn, format!("w\0{id}").as_bytes(), record.as_bytes())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let _closing = env.prepare_for_closing();
     }
 
     #[test]
