@@ -214,6 +214,9 @@ fn dispatch(
 }
 
 /// The writer's own reason, as one sentence.
+///
+/// The body may already start with `packsetd is busy`. That prefix is
+/// kept once. A second copy is the same sentence said twice.
 fn busy_line(response: ureq::Response) -> String {
     let text = response.into_string().unwrap_or_default();
     let reason = serde_json::from_str::<serde_json::Value>(&text)
@@ -225,14 +228,38 @@ fn busy_line(response: ureq::Response) -> String {
                 .map(str::to_string)
         })
         .unwrap_or(text);
+    one_busy_line(reason.trim())
+}
+
+/// `packsetd is busy` once, then the writer's reason, as one sentence.
+fn one_busy_line(reason: &str) -> String {
     let reason = reason.trim();
     if reason.is_empty() || reason.eq_ignore_ascii_case("busy") {
-        "packsetd is busy.".to_string()
-    } else if reason.ends_with('.') {
-        format!("packsetd is busy: {reason}")
-    } else {
-        format!("packsetd is busy: {reason}.")
+        return "packsetd is busy.".to_string();
     }
+    let body = strip_busy_prefix(reason);
+    if body.is_empty() {
+        return "packsetd is busy.".to_string();
+    }
+    if body.ends_with('.') {
+        format!("packsetd is busy: {body}")
+    } else {
+        format!("packsetd is busy: {body}.")
+    }
+}
+
+/// Drop a leading `packsetd is busy`, however many times it was written.
+fn strip_busy_prefix(mut reason: &str) -> &str {
+    const PREFIX: &str = "packsetd is busy";
+    while let Some(head) = reason.get(..PREFIX.len()) {
+        if !head.eq_ignore_ascii_case(PREFIX) {
+            break;
+        }
+        reason = reason[PREFIX.len()..]
+            .trim_start_matches([':', ' ', '.'])
+            .trim();
+    }
+    reason
 }
 
 /// The writer is down. The same sentence `packset status` prints for the
@@ -1458,12 +1485,25 @@ mod tests {
         PacksetClient,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) {
+        busy_body(busy, retry_after, r#"{"error":"busy"}"#)
+    }
+
+    /// [`busy_for`] with `error` as the 503 body.
+    fn busy_body(
+        busy: usize,
+        retry_after: Option<u64>,
+        error: &str,
+    ) -> (
+        PacksetClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::sync::atomic::Ordering;
         let listener = support::bind();
         let client = PacksetClient::new(format!("http://{}", listener.local_addr().unwrap()));
         let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = std::sync::Arc::clone(&seen);
+        let error = error.to_string();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(&stream);
@@ -1478,7 +1518,7 @@ mod tests {
                 let mut body = vec![0u8; length];
                 let _ = reader.read_exact(&mut body);
                 let (status, text) = if counted.fetch_add(1, Ordering::SeqCst) < busy {
-                    ("503 Service Unavailable", r#"{"error":"busy"}"#)
+                    ("503 Service Unavailable", error.as_str())
                 } else {
                     ("200 OK", r#"{"ok":true}"#)
                 };
@@ -1514,6 +1554,56 @@ mod tests {
             2,
             "the write was not sent again"
         );
+    }
+
+    #[test]
+    fn a_busy_prefix_is_printed_once_and_the_pressure_line_says_what_is_next() {
+        let next = "memory pressure; wait, then run the command again";
+        let once = one_busy_line(next);
+        assert_eq!(once, format!("packsetd is busy: {next}."));
+        assert_eq!(once.matches("packsetd is busy").count(), 1, "{once}");
+        let doubled = one_busy_line(&format!("packsetd is busy: packsetd is busy: {next}"));
+        assert_eq!(doubled, once, "{doubled}");
+        let already = one_busy_line(&format!("packsetd is busy: {next}"));
+        assert_eq!(already, once, "{already}");
+        let large = one_busy_line(
+            "packsetd is busy: memory pressure; a large write is shed. Wait, or send a smaller write",
+        );
+        assert_eq!(
+            large,
+            "packsetd is busy: memory pressure; a large write is shed. Wait, or send a smaller write."
+        );
+        assert_eq!(large.matches("packsetd is busy").count(), 1, "{large}");
+        assert!(large.contains("send a smaller write"), "{large}");
+        assert_eq!(one_busy_line("packsetd is busy."), "packsetd is busy.");
+        assert_eq!(one_busy_line("busy"), "packsetd is busy.");
+    }
+
+    /// The writer already prefixes the 503. The client must not prefix it again.
+    #[test]
+    fn a_writer_busy_body_keeps_one_prefix_and_the_next_step() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = env::var_os("PACKSET_TIMEOUT_MS");
+        unsafe { env::set_var("PACKSET_TIMEOUT_MS", "700") };
+        let (client, seen) = busy_body(
+            usize::MAX,
+            Some(1),
+            r#"{"error":"packsetd is busy: packsetd is busy: memory pressure; wait, then run the command again"}"#,
+        );
+        let err = client.status(None).unwrap_err().to_string();
+        unsafe {
+            match old {
+                Some(value) => env::set_var("PACKSET_TIMEOUT_MS", value),
+                None => env::remove_var("PACKSET_TIMEOUT_MS"),
+            }
+        }
+        assert_eq!(
+            err,
+            "packsetd is busy: memory pressure; wait, then run the command again."
+        );
+        assert_eq!(err.matches("packsetd is busy").count(), 1, "{err}");
+        assert!(err.contains("wait, then run the command again"), "{err}");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1, "{err}");
     }
 
     #[test]

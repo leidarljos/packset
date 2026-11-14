@@ -14,13 +14,18 @@ use std::path::{Path, PathBuf};
 /// bytes, so a burst fits and a further one waits instead of growing.
 pub const DEFAULT_CAP: usize = 8 * 1024 * 1024;
 
+/// What a full append log tells the client, and the next thing to do.
+/// The `packsetd is busy` prefix is added once, when the answer is written.
+pub const FULL_REASON: &str =
+    "the append log is full; wait for it to drain, then run the command again";
+
 /// The append would pass the cap. Nothing was written.
 #[derive(Debug)]
 pub struct Full;
 
 impl std::fmt::Display for Full {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the append log is full; try again")
+        f.write_str(FULL_REASON)
     }
 }
 
@@ -221,6 +226,17 @@ impl std::error::Error for AppendFailure {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_log_names_the_wait_and_not_the_busy_prefix() {
+        let err = Full.to_string();
+        assert_eq!(err, FULL_REASON);
+        assert!(
+            err.contains("wait for it to drain, then run the command again"),
+            "{err}"
+        );
+        assert_eq!(err.matches("packsetd is busy").count(), 0, "{err}");
+    }
 
     #[test]
     fn a_full_log_refuses_and_a_replay_reads_what_was_synced() {

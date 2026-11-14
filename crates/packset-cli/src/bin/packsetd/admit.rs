@@ -940,20 +940,25 @@ impl<T> Control<T> {
     }
 
     /// A small write under pressure is journaled and run. Anything else
-    /// this mode refuses is named here.
+    /// this mode refuses is named here, with the next thing to do.
+    /// The `packsetd is busy` prefix is added once, when the answer is written.
     fn pressure_refusal(&self, class: Class, bytes: usize) -> Option<&'static str> {
         if class == Class::Maintenance && self.smooth.heavy {
-            return Some("maintenance is paused; try again");
+            return Some(
+                "memory pressure; maintenance is paused. Wait, then run the command again",
+            );
         }
         if class == Class::Read && self.smooth.reads {
-            return Some("memory pressure; try again");
+            return Some("memory pressure; wait, then run the command again");
         }
         if class == Class::Write && self.smooth.heavy {
             if bytes > SMALL_APPEND_MAX {
-                return Some("memory pressure; a large write is shed");
+                return Some(
+                    "memory pressure; a large write is shed. Wait, or send a smaller write",
+                );
             }
             if !self.log.fits(bytes) {
-                return Some("the append log is full; try again");
+                return Some(crate::journal::FULL_REASON);
             }
         }
         None
@@ -1072,7 +1077,7 @@ impl<T> Control<T> {
     fn note_transition(&mut self, was_heavy: bool) {
         if self.smooth.heavy && !was_heavy && !self.logged_pressure {
             eprintln!(
-                "packsetd: memory pressure; maintenance and large writes are shed, small appends are journaled"
+                "packsetd: memory pressure; maintenance and large writes are shed, small appends are journaled. Wait, or send a smaller write"
             );
             self.logged_pressure = true;
         }
@@ -1443,14 +1448,24 @@ mod tests {
                 ..
             } => {
                 assert_eq!(retry_after, 1);
-                assert!(reason.contains("large"), "{reason}");
+                assert_eq!(
+                    reason, "memory pressure; a large write is shed. Wait, or send a smaller write",
+                    "{reason}"
+                );
+                assert_eq!(reason.matches("packsetd is busy").count(), 0, "{reason}");
             }
             other => panic!("{}", label(&other)),
         }
-        assert!(matches!(
-            control.arrive(job(Class::Maintenance, "seat", 5), NOW),
-            Decision::Shed { .. }
-        ));
+        match control.arrive(job(Class::Maintenance, "seat", 5), NOW) {
+            Decision::Shed { reason, .. } => {
+                assert_eq!(
+                    reason,
+                    "memory pressure; maintenance is paused. Wait, then run the command again",
+                    "{reason}"
+                );
+            }
+            other => panic!("{}", label(&other)),
+        }
         assert!(matches!(
             control.arrive(job(Class::Read, "seat", 6), NOW),
             Decision::Run { .. }
@@ -1471,7 +1486,11 @@ mod tests {
         small.bytes = 64;
         match control.arrive(small, NOW) {
             Decision::Shed { reason, .. } => {
-                assert!(reason.contains("append log"), "{reason}");
+                assert_eq!(reason, crate::journal::FULL_REASON, "{reason}");
+                assert!(
+                    reason.contains("wait for it to drain, then run the command again"),
+                    "{reason}"
+                );
             }
             other => panic!("{}", label(&other)),
         }
@@ -1479,10 +1498,15 @@ mod tests {
 
         // Reads stop only when the machine is stalled for everyone.
         control.pin_pressure(Psi::steady(30.0, 80.0, 0.0));
-        assert!(matches!(
-            control.arrive(job(Class::Read, "seat", 9), NOW),
-            Decision::Shed { .. }
-        ));
+        match control.arrive(job(Class::Read, "seat", 9), NOW) {
+            Decision::Shed { reason, .. } => {
+                assert_eq!(
+                    reason, "memory pressure; wait, then run the command again",
+                    "{reason}"
+                );
+            }
+            other => panic!("{}", label(&other)),
+        }
         let snap = control.snapshot();
         assert!(snap.pressure_sheds >= 3);
         assert!(snap.busy);
