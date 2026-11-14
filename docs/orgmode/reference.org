@@ -57,7 +57,7 @@ carry the port the kernel assigned.
 |---+---|
 | =GET /health= | =packsetd ok=, or =packsetd ok, busy= when work is waiting. No token |
 | =GET /stats= | queue depth, shed counts and the current limits, as JSON. =line= is =ok=, or =busy, retrying= when work is waiting or writes are being turned away. No token |
-| =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave), and =search.ranks= (the top-k cuts this writer honours; an older writer omits =search=) |
+| =GET /v1/status?workspace== | counts, pin, index and dense state; =live_cap=, =forgotten_by_reason= (=neglect=, =the live cap=, or the reason a forget gave), and =search.ranks= (the top-k cuts this writer honours; an older writer omits =search=). While the encoder is loading, =embedder.answering= is null and =embedder.remaining_ms= is set; the field is absent once the encoder is answering or unavailable |
 | =GET /v1/workspaces= | names with live counts |
 | =POST /v1/atoms= | store one claim; returns the stored record, or the live duplicate; a post that names a live id writes over it and, like an update, cannot raise its =origin= or =source.basis=. A post that names an id a tombstone still holds is stored under a fresh id, with one =warning= naming the retired id; the tombstone keeps that id |
 | =GET /v1/atoms?workspace=&as_of== | live claims, or those live at =as_of= |
@@ -81,6 +81,20 @@ carry the port the kernel assigned.
 | =GET/POST /v1/user=, =/v1/memory= | the seat card, the workspace card |
 | =POST /v1/attach= | hold one body for the next turn |
 | =GET/POST /v1/proposals=, =POST /v1/proposals/accept=, =POST /v1/compact= | proposals a person accepts into claims |
+
+=packsetd= starts the query encoder when the listener is bound, on its
+own thread, so =GET /health= does not wait for the model. The first
+search is ranked by words until that load answers. =embedder.remaining_ms=
+is the milliseconds the writer still expects the load to take. The budget
+is the last cold start that answered: the time from spawning
+=packset-embed= to its first vector, written as one integer to =load-ms=
+in the embed cache (=PACKSET_EMBED_CACHE=, else
+=$XDG_CACHE_HOME/packset/embed=, else =~/.cache/packset/embed=). The
+estimate is that budget minus the time already spent, and zero when the
+budget is spent and the load is still running. Until a cold start has
+been recorded, the budget is one second. That one second is a ceiling,
+not a measurement of this seat. A missing binary starts nothing. A binary
+that does not answer is logged once, and search stays lexical.
 
 A refusal is a 4xx with =error= as one line: the reason a claim was not
 stored, quoted back.

@@ -50,8 +50,13 @@ used when that probe does not succeed.
 `PACKSET_EMBED_MODEL_PATH`, or `user/<model>/` under the cache, is a hub
 checkout (`onnx/model.onnx` and the four tokenizer files). When those
 files are present the model is not fetched. `HF_HUB_OFFLINE=1` refuses
-the fetch. An absent encoder leaves search, island and recall on the
-lexical ballots; `ljos doctor` reads `embedder.available: false`.
+the fetch. `packsetd` starts the encoder when it begins listening.
+While that load runs, `/v1/status` reports `embedder.remaining_ms`: the
+last cold start in `load-ms` under the embed cache, minus the time
+already spent, or one second when the file is absent. The field is
+absent once the encoder is answering or unavailable. An absent encoder
+leaves search, island and recall on the lexical ballots; `ljos doctor`
+reads `embedder.available: false`.
 
 ## Architecture
 

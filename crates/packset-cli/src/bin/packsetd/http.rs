@@ -222,6 +222,14 @@ pub fn serve(
     eprintln!(
         "packsetd: listening on http://{host}:{port} with {workers} workers, {slots} at once, and room for {queue} waiting"
     );
+    // The socket is bound. The encoder starts on its own thread, so the
+    // port file, the accept loop and /health do not wait on the model.
+    // A missing binary starts nothing. A binary that cannot answer logs
+    // once and search stays lexical.
+    // Library tests share this process's encoder slots, so they do not
+    // warm here. The packsetd binary does.
+    #[cfg(not(test))]
+    crate::embed::warm_at_listen();
     // Replaced whole, so a reader never sees a partial port. The name is
     // `port` because that is the word a seat already uses for this number.
     let port_path = service.home().root().join("port");

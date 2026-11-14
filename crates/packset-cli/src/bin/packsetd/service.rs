@@ -3467,6 +3467,10 @@ impl Service {
 
     /// Seat home, atom counts by kind, pin, index and embedder.
     ///
+    /// While the encoder is loading, `embedder.remaining_ms` is the
+    /// estimated milliseconds left. The field is absent once the encoder
+    /// is answering or unavailable.
+    ///
     /// # Errors
     ///
     /// The scan's.
@@ -3490,6 +3494,18 @@ impl Service {
         let pin = workspace.map(|w| self.pin(w)).unwrap_or_default();
         let answering_binary =
             crate::embed::binary().is_some() && crate::embed::last_dense() != Some(false);
+        // A binary that did not answer its last call is not available,
+        // whatever is on disk: the ranking is lexical until it does.
+        // `remaining_ms` is only present while a load is still running.
+        let mut embedder = json!({
+            "enabled": embed_enabled(),
+            "binary": crate::embed::binary().map(|path| path.display().to_string()),
+            "available": embed_enabled() && answering_binary,
+            "answering": crate::embed::last_dense(),
+        });
+        if let Some(ms) = crate::embed::remaining_ms() {
+            embedder["remaining_ms"] = json!(ms);
+        }
         Ok(json!({
             "home": self.home.root().display().to_string(),
             // Which build is answering. The version does not move between
@@ -3513,14 +3529,7 @@ impl Service {
                 "index_dir": milli_dir.display().to_string(),
                 "index_ready": index_ready,
             },
-            "embedder": {
-                "enabled": embed_enabled(),
-                "binary": crate::embed::binary().map(|path| path.display().to_string()),
-                // A binary that did not answer its last call is not available,
-                // whatever is on disk: the ranking is lexical until it does.
-                "available": embed_enabled() && answering_binary,
-                "answering": crate::embed::last_dense(),
-            },
+            "embedder": embedder,
             // Off unless the host asked. The locomo cost lives in the README;
             // status only says whether this writer will spend it.
             "rerank": {
@@ -6345,6 +6354,63 @@ mod tests {
         assert_eq!(after["embedder"]["answering"], json!(false), "{after}");
         assert_eq!(after["embedder"]["available"], json!(false), "{after}");
         assert_eq!(after["rerank"]["available"], json!(false), "{after}");
+    }
+
+    /// `remaining_ms` is there while a load is running, and gone once the
+    /// encoder is answering or unavailable. The clock is set, so this does
+    /// not wait on a model.
+    #[test]
+    fn status_reports_remaining_ms_only_while_the_encoder_loads() {
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::embed::reset_for_test();
+        let old_inside = std::env::var_os("INSIDE_EMBED");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        crate::embed::set_load_for_test(now.saturating_sub(200), 5_000);
+        let (_dir, svc) = service();
+        let panel = packset_core::Panel::default();
+        let loading = svc.status(None, &panel).unwrap();
+        crate::embed::set_dense_for_test(Some(true));
+        let answering = svc.status(None, &panel).unwrap();
+        crate::embed::set_dense_for_test(Some(false));
+        let failed = svc.status(None, &panel).unwrap();
+        crate::embed::reset_for_test();
+        unsafe { std::env::set_var("INSIDE_EMBED", "off") };
+        let off = svc.status(None, &panel).unwrap();
+        unsafe {
+            match old_inside {
+                Some(value) => std::env::set_var("INSIDE_EMBED", value),
+                None => std::env::remove_var("INSIDE_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        drop(_guard);
+
+        assert!(loading["embedder"]["answering"].is_null(), "{loading}");
+        let ms = loading["embedder"]["remaining_ms"]
+            .as_u64()
+            .expect("remaining_ms while loading");
+        assert!((4_000..=5_000).contains(&ms), "{ms} from {loading}");
+        assert_eq!(
+            answering["embedder"]["answering"],
+            json!(true),
+            "{answering}"
+        );
+        assert!(
+            answering["embedder"].get("remaining_ms").is_none(),
+            "{answering}"
+        );
+        assert_eq!(failed["embedder"]["answering"], json!(false), "{failed}");
+        assert_eq!(failed["embedder"]["available"], json!(false), "{failed}");
+        assert!(failed["embedder"].get("remaining_ms").is_none(), "{failed}");
+        assert!(off["embedder"]["answering"].is_null(), "{off}");
+        assert_eq!(off["embedder"]["enabled"], json!(false), "{off}");
+        assert_eq!(off["embedder"]["available"], json!(false), "{off}");
+        assert!(off["embedder"].get("remaining_ms").is_none(), "{off}");
     }
 
     /// `INSIDE_EMBED=off` leaves the encoder unstarted. An encoder is named

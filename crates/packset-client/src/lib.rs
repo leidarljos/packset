@@ -862,6 +862,10 @@ impl PacksetClient {
 
     /// Seat home, atom counts by kind, pin, index and embedder.
     ///
+    /// While the encoder is loading, `embedder.remaining_ms` is the
+    /// estimated milliseconds left. The field is absent once the encoder
+    /// is answering or unavailable.
+    ///
     /// # Errors
     ///
     /// The request's, or a body that is not JSON.

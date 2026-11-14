@@ -2,7 +2,8 @@
 //! direction. An absent encoder is a supported state: every failure falls
 //! back to the lexical scorers. `INSIDE_EMBED=off` and `--no-embed` are
 //! that state on purpose: no child is started. A vector is derivable from
-//! the text, never the store.
+//! the text, never the store. The writer starts the child when it binds
+//! its listener ([`warm_at_listen`]), so the first search is not the load.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -655,13 +656,20 @@ fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     touch_embed();
     let mut held = lock_dense()?;
     for _ in 0..2 {
-        if held.as_mut().is_none_or(|running| !running.alive()) {
+        // A child that is already up is not a load. Only a spawn is timed,
+        // and only when it answers: that is the next cold start's budget.
+        let cold = held.as_mut().is_none_or(|running| !running.alive());
+        let started = std::time::Instant::now();
+        if cold {
             *held = Encoder::start(&binary, query);
         }
         let Some(running) = held.as_mut() else {
             break;
         };
         if let Some(vectors) = running.encode_batch(texts, query) {
+            if cold {
+                remember_load(started.elapsed());
+            }
             LAST_DENSE.store(1, Ordering::Relaxed);
             return Some(vectors);
         }
@@ -778,18 +786,163 @@ fn encode_if_up(
     }
 }
 
+/// One warm at a time. Cleared when that warm's thread ends, including
+/// when it panics, so a later search can start the encoder again.
+static STARTING: AtomicBool = AtomicBool::new(false);
+/// Unix milliseconds when the current load began. Zero means it is not
+/// loading: not started, already answered, or it failed.
+static LOAD_STARTED_MS: AtomicU64 = AtomicU64::new(0);
+/// Last cold-start budget, in milliseconds. Zero means it has not been
+/// read yet. A positive value is either [`UNMEASURED_LOAD_MS`] or the
+/// number in the cache file.
+static LOAD_BUDGET_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Budget used until this seat has recorded a cold start.
+///
+/// One second. It is a ceiling for an encoder that has not been timed
+/// here, not a measurement of this load. The first cold start that
+/// answers writes its own milliseconds over it.
+pub const UNMEASURED_LOAD_MS: u64 = 1_000;
+
+/// Clears the warm flag when the start thread ends.
+struct StopWarm;
+
+impl Drop for StopWarm {
+    fn drop(&mut self) {
+        LOAD_STARTED_MS.store(0, Ordering::Release);
+        STARTING.store(false, Ordering::Release);
+    }
+}
+
+fn mark_loading() {
+    LOAD_STARTED_MS.store(unix_ms().max(1), Ordering::Release);
+}
+
+/// The embed cache, matching `packset-embed`: `PACKSET_EMBED_CACHE`, else
+/// `$XDG_CACHE_HOME/packset/embed`, else `~/.cache/packset/embed`.
+fn embed_cache_dir() -> Option<PathBuf> {
+    if let Some(named) = std::env::var_os("PACKSET_EMBED_CACHE").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(named));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(xdg).join("packset").join("embed"));
+    }
+    let home = std::env::var_os("HOME").filter(|d| !d.is_empty())?;
+    Some(
+        PathBuf::from(home)
+            .join(".cache")
+            .join("packset")
+            .join("embed"),
+    )
+}
+
+fn load_file() -> Option<PathBuf> {
+    Some(embed_cache_dir()?.join("load-ms"))
+}
+
+/// Milliseconds in `load-ms`, when the file holds a positive integer.
+fn read_load_file() -> Option<u64> {
+    let text = std::fs::read_to_string(load_file()?).ok()?;
+    let ms: u64 = text.trim().parse().ok()?;
+    (ms > 0).then_some(ms)
+}
+
+fn load_budget_ms() -> u64 {
+    let cached = LOAD_BUDGET_MS.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let ms = read_load_file().unwrap_or(UNMEASURED_LOAD_MS);
+    match LOAD_BUDGET_MS.compare_exchange(0, ms, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => ms,
+        Err(current) => current,
+    }
+}
+
+/// Remember a cold start that answered. The next load estimates from this.
+///
+/// The file is one decimal integer and a newline, replaced by rename so a
+/// reader never sees a partial write. A unit test that has not named a
+/// cache does not write one: the file belongs to a seat.
+fn remember_load(elapsed: Duration) {
+    let ms = u64::try_from(elapsed.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    LOAD_BUDGET_MS.store(ms, Ordering::Relaxed);
+    #[cfg(test)]
+    if std::env::var_os("PACKSET_EMBED_CACHE").is_none() {
+        return;
+    }
+    let Some(path) = load_file() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, format!("{ms}\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// `budget` minus the time already spent, or zero when the budget is used up.
+fn estimate_remaining(budget_ms: u64, elapsed_ms: u64) -> u64 {
+    budget_ms.saturating_sub(elapsed_ms)
+}
+
+/// Estimated milliseconds left in the encoder load, while it is running
+/// and has not answered.
+///
+/// The budget is the last cold start that answered, read from `load-ms`
+/// in the embed cache: the milliseconds from spawning the encoder to its
+/// first vector. The estimate is that budget minus the time since this
+/// load began, and zero when the budget is already spent. With no file
+/// yet, the budget is [`UNMEASURED_LOAD_MS`], a ceiling, not a measurement.
+///
+/// `None` once the encoder has answered, once it has failed, and when no
+/// load is running. A missing binary never starts a load.
+#[must_use]
+pub fn remaining_ms() -> Option<u64> {
+    if last_dense().is_some() {
+        return None;
+    }
+    let started = LOAD_STARTED_MS.load(Ordering::Acquire);
+    if started == 0 {
+        return None;
+    }
+    let elapsed = unix_ms().saturating_sub(started);
+    Some(estimate_remaining(load_budget_ms(), elapsed))
+}
+
+/// Start the query encoder now that the listener is bound.
+///
+/// Returns at once. The model load runs on `packset-embed-start`, so the
+/// accept loop and `/health` do not wait. The encoder switched off starts
+/// nothing. A missing binary starts nothing and is not logged: search
+/// stays lexical. A binary that does not answer is logged once, from the
+/// warm, and search stays lexical.
+pub fn warm_at_listen() {
+    if !enabled() {
+        return;
+    }
+    warm_in_background();
+}
+
 /// Start the encoder off the request that asked. One start at a time.
 /// A failure stays recorded, so the next search does not spawn again.
 fn warm_in_background() {
-    static STARTING: AtomicBool = AtomicBool::new(false);
     if STARTING.swap(true, Ordering::AcqRel) {
         return;
     }
     let spawned = std::thread::Builder::new()
         .name("packset-embed-start".into())
-        .spawn(move || {
+        .spawn(|| {
+            let _done = StopWarm;
+            if binary().is_none() {
+                return;
+            }
+            mark_loading();
             let _ = encode_now(std::slice::from_ref(&".".to_string()), true);
-            STARTING.store(false, Ordering::Release);
         });
     if spawned.is_err() {
         STARTING.store(false, Ordering::Release);
@@ -1131,11 +1284,33 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
 #[cfg(test)]
 pub fn reset_for_test() {
     LAST_DENSE.store(0, Ordering::Relaxed);
+    LOAD_STARTED_MS.store(0, Ordering::Relaxed);
+    LOAD_BUDGET_MS.store(0, Ordering::Relaxed);
+    STARTING.store(false, Ordering::Relaxed);
     for slot in [dense_slot(), rerank_slot(), late_slot(), sparse_slot()] {
         if let Ok(mut held) = slot.lock() {
             *held = None;
         }
     }
+}
+
+/// A load already underway, for a status test. `budget_ms` of zero means
+/// the next read comes from the cache file again.
+#[cfg(test)]
+pub fn set_load_for_test(started_unix_ms: u64, budget_ms: u64) {
+    LOAD_STARTED_MS.store(started_unix_ms, Ordering::Release);
+    LOAD_BUDGET_MS.store(budget_ms, Ordering::Relaxed);
+}
+
+/// What the last dense call did, for a status test.
+#[cfg(test)]
+pub fn set_dense_for_test(answered: Option<bool>) {
+    let value = match answered {
+        Some(true) => 1,
+        Some(false) => 2,
+        None => 0,
+    };
+    LAST_DENSE.store(value, Ordering::Relaxed);
 }
 
 /// Held while a test points `PACKSET_EMBED` at a stub, so two tests cannot
@@ -1643,6 +1818,99 @@ for line in sys.stdin:
             !sentinel.exists(),
             "the encoder child was started with the switch off"
         );
+    }
+
+    /// Listening does not start a child the seat switched off, and status
+    /// has nothing to count down.
+    #[test]
+    fn a_switched_off_encoder_is_not_warmed_at_listen() {
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let old_embed = std::env::var_os("PACKSET_EMBED");
+        let old_inside = std::env::var_os("INSIDE_EMBED");
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("started");
+        let stub = dir.path().join("stub-embed");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nexit 1\n",
+                sentinel.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&stub, perm).unwrap();
+        unsafe {
+            std::env::set_var("PACKSET_EMBED", &stub);
+            std::env::set_var("INSIDE_EMBED", "off");
+        }
+        reset_for_test();
+        warm_at_listen();
+        std::thread::sleep(Duration::from_millis(50));
+        let left = remaining_ms();
+        let started = sentinel.exists();
+        unsafe {
+            match old_embed {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+            match old_inside {
+                Some(value) => std::env::set_var("INSIDE_EMBED", value),
+                None => std::env::remove_var("INSIDE_EMBED"),
+            }
+        }
+        reset_for_test();
+        drop(_held);
+        assert!(
+            left.is_none(),
+            "a switched-off encoder was loading: {left:?}"
+        );
+        assert!(
+            !started,
+            "the encoder child was started with the switch off"
+        );
+    }
+
+    /// The countdown is the recorded cold start minus the time already
+    /// spent. Zero once that budget is gone. The file is what the next
+    /// process reads; with none, the budget is the documented ceiling.
+    #[test]
+    fn remaining_time_is_the_recorded_cold_start_minus_elapsed() {
+        assert_eq!(estimate_remaining(1_000, 400), 600);
+        assert_eq!(estimate_remaining(1_000, 1_000), 0);
+        assert_eq!(estimate_remaining(1_000, 1_500), 0);
+
+        let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let old_cache = std::env::var_os("PACKSET_EMBED_CACHE");
+        unsafe { std::env::set_var("PACKSET_EMBED_CACHE", dir.path()) };
+        reset_for_test();
+        let unmeasured = load_budget_ms();
+        std::fs::write(dir.path().join("load-ms"), "400\n").unwrap();
+        LOAD_BUDGET_MS.store(0, Ordering::Relaxed);
+        let recorded = load_budget_ms();
+        std::fs::write(dir.path().join("load-ms"), "nope\n").unwrap();
+        LOAD_BUDGET_MS.store(0, Ordering::Relaxed);
+        let garbage = load_budget_ms();
+        remember_load(Duration::from_millis(250));
+        LOAD_BUDGET_MS.store(0, Ordering::Relaxed);
+        let written = load_budget_ms();
+        let file = std::fs::read_to_string(dir.path().join("load-ms")).unwrap();
+        unsafe {
+            match old_cache {
+                Some(value) => std::env::set_var("PACKSET_EMBED_CACHE", value),
+                None => std::env::remove_var("PACKSET_EMBED_CACHE"),
+            }
+        }
+        reset_for_test();
+        drop(_held);
+        assert_eq!(unmeasured, UNMEASURED_LOAD_MS);
+        assert_eq!(recorded, 400);
+        assert_eq!(garbage, UNMEASURED_LOAD_MS);
+        assert_eq!(written, 250);
+        assert_eq!(file.trim(), "250");
     }
 
     /// The second stage is off unless the host asks. An unset env is the
