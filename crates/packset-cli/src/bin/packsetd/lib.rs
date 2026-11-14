@@ -26,3 +26,12 @@ pub use store::Store;
 
 pub mod run;
 pub use run::run;
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod test_support {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/harness.rs"
+    ));
+}

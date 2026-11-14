@@ -6,8 +6,9 @@
 //! on stderr and a four-column search line; those bytes stay.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
 use std::process::{Child, Command, Output, Stdio};
+
+mod common;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -33,11 +34,7 @@ impl Drop for Writer {
 
 fn writer() -> Writer {
     let home = tempfile::tempdir().unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
         .args(["--port", &port.to_string(), "--home"])
         .arg(home.path().join("pack"))

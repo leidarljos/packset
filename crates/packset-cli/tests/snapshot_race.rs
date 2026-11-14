@@ -4,6 +4,8 @@
 //! `embedding: null` and dropped the dense ballot.
 
 use std::process::{Child, Command, Stdio};
+
+mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,16 +65,8 @@ fn text(workspace: usize, n: usize) -> String {
 fn start() -> Writer {
     let home = tempfile::tempdir().unwrap();
     let encoder = home.path().join("fake-embed.py");
-    std::fs::write(&encoder, FAKE_ENCODER).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&encoder).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&encoder, perms).unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    common::write_executable(&encoder, FAKE_ENCODER);
+    let port = common::free_port();
     let err_path = home.path().join("packsetd.err");
     let err = std::fs::File::create(&err_path).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_packsetd"));

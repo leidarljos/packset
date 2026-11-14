@@ -5,8 +5,9 @@
 //! record. Read back, `ts` has not moved, and a recency-ranked search
 //! still puts the claim written first below the one written after it.
 
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+
+mod common;
 use std::time::{Duration, Instant};
 
 use packset_core::clock;
@@ -36,11 +37,7 @@ impl Drop for Writer {
 
 fn writer() -> Writer {
     let home = tempfile::tempdir().unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
         .args(["--port", &port.to_string(), "--home"])
         .arg(home.path().join("pack"))

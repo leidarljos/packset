@@ -5,8 +5,9 @@
 //! `--help` is seeded first: before the parser, `packset forget --help`
 //! forgot it and `packset stop --help` stopped the writer.
 
-use std::net::TcpListener;
 use std::path::Path;
+
+mod common;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -25,11 +26,7 @@ impl Drop for Writer {
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    common::free_port()
 }
 
 fn writer() -> Writer {

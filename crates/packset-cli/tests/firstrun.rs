@@ -5,10 +5,12 @@
 //! matched nothing, a review that is not due yet, and a writer that is down.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod common;
 
 fn packset(home: &Path, port: u16) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_packset"));
@@ -28,11 +30,7 @@ fn packset(home: &Path, port: u16) -> Command {
 }
 
 fn output(cmd: &mut Command) -> (bool, String, String) {
-    let out = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let out = common::output(cmd.stdout(Stdio::piped()).stderr(Stdio::piped())).unwrap();
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -40,24 +38,22 @@ fn output(cmd: &mut Command) -> (bool, String, String) {
     )
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn wait_health(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn wait_health(port: u16, child: &mut std::process::Child, log: &Path) {
+    // The same budget the other writer tests use. A cold debug build, with
+    // several of those tests opening a store at once, does not fit in less.
+    let deadline = Instant::now() + Duration::from_secs(20);
     let url = format!("http://127.0.0.1:{port}/health");
     while Instant::now() < deadline {
         if ureq::get(&url).call().is_ok() {
             return;
         }
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(30));
     }
-    panic!("writer did not answer on {port}");
+    let logged = std::fs::read_to_string(log).unwrap_or_default();
+    panic!("writer did not answer on {port}\n{logged}");
 }
 
 /// One short HTTP answer per connection. `path` is the request target.
@@ -68,7 +64,7 @@ fn wait_health(port: u16) {
 /// resets the connection, and the client reports that reset as a header
 /// error instead of the status.
 fn serve(handler: impl Fn(&str) -> (u16, &'static str) + Send + 'static) -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let listener = common::bind();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
@@ -140,8 +136,10 @@ fn read_head(reader: &mut BufReader<TcpStream>) -> Option<(String, usize)> {
 #[test]
 fn a_clean_home_remembers_and_says_when_nothing_is_due() {
     let home = tempfile::tempdir().unwrap();
-    let port = free_port();
-    let (ok, stdout, stderr) = output(packset(home.path(), port).arg("ensure"));
+    let (port, ok, stdout, stderr) = common::with_port(|port| {
+        let (ok, stdout, stderr) = output(packset(home.path(), port).arg("ensure"));
+        (port, ok, stdout, stderr)
+    });
     assert!(ok, "{stderr}");
     assert!(
         stdout.contains(&format!("PACKSET_URL=http://127.0.0.1:{port}")),
@@ -184,7 +182,7 @@ fn a_clean_home_remembers_and_says_when_nothing_is_due() {
 #[test]
 fn a_taken_port_names_the_holder_and_the_next_command() {
     let home = tempfile::tempdir().unwrap();
-    let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = common::bind();
     let port = socket.local_addr().unwrap().port();
     let (ok, _, stderr) = output(packset(home.path(), port).arg("ensure"));
     assert!(!ok, "{stderr}");
@@ -203,19 +201,23 @@ fn a_writer_for_another_home_names_both_homes_and_the_next_command() {
     let theirs = root.path().join("theirs");
     let mine = root.path().join("mine");
     std::fs::create_dir_all(&theirs).unwrap();
-    let port = free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
-        .args(["--port", &port.to_string(), "--home"])
-        .arg(&theirs)
-        .env("PACKSET_AUTH", "off")
-        .env("HOME", root.path())
-        .env_remove("PACKSET_HOME")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    wait_health(port);
+    let err_path = root.path().join("packsetd.err");
+    let (port, mut child) = common::with_port(|port| {
+        let err = std::fs::File::create(&err_path).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(&theirs)
+            .env("PACKSET_AUTH", "off")
+            .env("HOME", root.path())
+            .env_remove("PACKSET_HOME")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(err))
+            .spawn()
+            .unwrap();
+        wait_health(port, &mut child, &err_path);
+        (port, child)
+    });
     let (ok, _, stderr) = output(
         packset(root.path(), port)
             .env("PACKSET_HOME", &mine)
@@ -279,26 +281,20 @@ fn a_missing_packsetd_names_the_packset_package() {
     let bin_dir = home.path().join("bin");
     std::fs::create_dir(&bin_dir).unwrap();
     let copied = bin_dir.join("packset");
-    std::fs::copy(env!("CARGO_BIN_EXE_packset"), &copied).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut mode = std::fs::metadata(&copied).unwrap().permissions();
-        mode.set_mode(0o755);
-        std::fs::set_permissions(&copied, mode).unwrap();
-    }
-    let port = free_port();
-    let (ok, _, stderr) = output(
-        Command::new(&copied)
-            .arg("ensure")
-            .env("HOME", home.path())
-            .env("PACKSET_HOME", home.path().join("pack"))
-            .env("PACKSET_PORT", port.to_string())
-            .env("XDG_STATE_HOME", home.path().join("state"))
-            .env("PATH", "/usr/bin:/bin")
-            .env_remove("PACKSET_URL")
-            .env_remove("PACKSET_BIN"),
-    );
+    common::copy_executable(Path::new(env!("CARGO_BIN_EXE_packset")), &copied);
+    let (ok, _, stderr) = common::with_port(|port| {
+        output(
+            Command::new(&copied)
+                .arg("ensure")
+                .env("HOME", home.path())
+                .env("PACKSET_HOME", home.path().join("pack"))
+                .env("PACKSET_PORT", port.to_string())
+                .env("XDG_STATE_HOME", home.path().join("state"))
+                .env("PATH", "/usr/bin:/bin")
+                .env_remove("PACKSET_URL")
+                .env_remove("PACKSET_BIN"),
+        )
+    });
     assert!(!ok, "{stderr}");
     assert!(
         stderr.contains("cargo build --release -p packset"),
@@ -318,8 +314,8 @@ fn an_unwritable_log_directory_names_the_path_and_the_next_command() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
     }
-    let port = free_port();
-    let (ok, _, stderr) = output(packset(home.path(), port).arg("ensure"));
+    let (ok, _, stderr) =
+        common::with_port(|port| output(packset(home.path(), port).arg("ensure")));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -341,20 +337,14 @@ fn the_checkout_wrapper_names_the_packset_package() {
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let path = bin.join("packset");
-    std::fs::write(&path, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut mode = std::fs::metadata(&path).unwrap().permissions();
-        mode.set_mode(0o755);
-        std::fs::set_permissions(&path, mode).unwrap();
-    }
-    let out = Command::new(&path)
-        .arg("ensure")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    common::write_executable(&path, script);
+    let out = common::output(
+        Command::new(&path)
+            .arg("ensure")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{stderr}");
     assert!(

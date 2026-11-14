@@ -1362,19 +1362,14 @@ mod tests {
         let _restore = Restore(previous);
         let dir = tempfile::tempdir().unwrap();
         let stub = dir.path().join("packset-embed");
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             r#"#!/usr/bin/env python3
 import json, sys
 for line in sys.stdin:
     print(json.dumps({"v": [0.25, 0.5]}), flush=True)
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         let started = Encoder::start(&stub, true).expect("the stub starts");
         {
             let mut slot = dense_slot().lock().unwrap_or_else(|err| err.into_inner());
@@ -1560,11 +1555,7 @@ for line in sys.stdin:
         let _held = EMBED.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let plant = dir.path().join("packset-embed");
-        std::fs::write(&plant, "#!/bin/sh\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&plant).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&plant, perm).unwrap();
+        crate::test_support::write_executable(&plant, "#!/bin/sh\nexit 1\n");
         let old_path = std::env::var_os("PATH");
         let mut paths = vec![dir.path().to_path_buf()];
         if let Some(old) = &old_path {
@@ -1594,7 +1585,7 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let pids = dir.path().join("pids");
         let stub = dir.path().join("packset-embed");
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             format!(
                 r#"#!/usr/bin/env python3
@@ -1614,12 +1605,7 @@ for line in sys.stdin:
 "#,
                 log = pids.display()
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         // SAFETY: EMBED is held, so no other test reads this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
         *dense_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1778,18 +1764,13 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("started");
         let stub = dir.path().join("stub-embed");
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             format!(
                 "#!/bin/sh\nprintf started > '{}'\nexit 1\n",
                 sentinel.display()
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         // SAFETY: EMBED is held, so no other test reads these variables.
         unsafe {
             std::env::set_var("PACKSET_EMBED", &stub);
@@ -1830,18 +1811,13 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("started");
         let stub = dir.path().join("stub-embed");
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             format!(
                 "#!/bin/sh\nprintf started > '{}'\nexit 1\n",
                 sentinel.display()
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         unsafe {
             std::env::set_var("PACKSET_EMBED", &stub);
             std::env::set_var("INSIDE_EMBED", "off");
@@ -1989,19 +1965,10 @@ for line in sys.stdin:
             "    d = req.get('d', [])\n",
             "    print(json.dumps({'id': req.get('id', 'q'), 's': list(range(len(d)))}), flush=True)\n",
         );
-        if std::fs::write(&script, body).is_err() {
-            return;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
-        }
-        let Ok(mut child) = Command::new(&script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-        else {
+        crate::test_support::write_executable(&script, body);
+        let mut cmd = Command::new(&script);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let Ok(mut child) = crate::test_support::spawn(&mut cmd) else {
             let _ = std::fs::remove_file(&script);
             return;
         };

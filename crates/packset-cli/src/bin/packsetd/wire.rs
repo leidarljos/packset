@@ -959,7 +959,6 @@ fn read_chunked(reader: &mut BufReader<Deadline<'_>>) -> Result<Vec<u8>, ReadErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A server on a free port with `workers` and `queue`, answering with
@@ -968,7 +967,7 @@ mod tests {
     where
         H: Fn(&Request) -> Response + Send + Sync + 'static,
     {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = crate::test_support::bind();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || serve(&listener, workers, queue, handle));
         port
@@ -1081,7 +1080,7 @@ mod tests {
 
     /// Both ends of one loopback connection, the accepted end first.
     fn pair() -> (TcpStream, TcpStream) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = crate::test_support::bind();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
         (server, client)
@@ -1310,7 +1309,7 @@ mod tests {
     where
         H: Fn(&Request) -> Response + Send + Sync + 'static,
     {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = crate::test_support::bind();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || serve_with(&listener, gate, handle));
         port

@@ -3,8 +3,9 @@
 //! A real `packsetd` on a free loopback port over a temporary home. Another
 //! local user is a client whose home holds another token, or none.
 
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+
+mod common;
 use std::time::{Duration, Instant};
 
 struct Writer {
@@ -22,11 +23,7 @@ impl Drop for Writer {
 
 fn writer(auth_off: bool) -> Writer {
     let home = tempfile::tempdir().unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_packsetd"));
     cmd.args(["--port", &port.to_string(), "--home"])
         .arg(home.path().join("pack"))

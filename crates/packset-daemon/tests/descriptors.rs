@@ -6,7 +6,15 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
+
+#[allow(dead_code)]
+mod harness {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/harness.rs"
+    ));
+}
 use std::time::{Duration, Instant};
 
 use packset_daemon::wire::{self, Request, Response};
@@ -26,7 +34,7 @@ fn ask(port: u16) -> std::io::Result<String> {
 
 #[test]
 fn accepting_resumes_once_descriptors_come_back() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let listener = harness::bind();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         wire::serve(&listener, 1, 4, |_: &Request| Response::text(200, "up"));

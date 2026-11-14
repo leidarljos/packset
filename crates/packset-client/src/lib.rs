@@ -1254,6 +1254,14 @@ impl PacksetClient {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
+    mod support {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test_support/harness.rs"
+        ));
+    }
+
     // Both workspace tests below rewrite process-global environment, so
     // they hold this lock: without it the runner's parallel threads
     // interleave one test's set-and-restore with the other's read, and
@@ -1286,7 +1294,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_port_this_user_holds_is_not_foreign() {
-        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let held = support::bind();
         let port = held.local_addr().unwrap().port();
         assert!(!foreign_listener(&format!(
             "http://127.0.0.1:{port}/health"
@@ -1366,7 +1374,7 @@ mod tests {
     ) {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::sync::atomic::Ordering;
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = support::bind();
         let client = PacksetClient::new(format!("http://{}", listener.local_addr().unwrap()));
         let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = std::sync::Arc::clone(&seen);
@@ -1472,9 +1480,7 @@ mod tests {
             env::remove_var("PACKSET_BIN");
             env::set_var("PACKSET_TIMEOUT_MS", "250");
         }
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let port = support::free_port();
         let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
         let started = Instant::now();
         let err = client.status(None).unwrap_err().to_string();
@@ -1501,22 +1507,14 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let log = dir.join("starts");
         let stub = dir.join("packsetd-stub");
-        std::fs::write(
+        support::write_executable(
             &stub,
             format!(
                 "#!/bin/sh\necho start >> \"{}\"\necho pid $$ >> \"{}\"\nexec python3 - \"$@\" << 'PY'\nimport sys\nargs = sys.argv[1:]\nport = int(args[args.index('--port') + 1])\nhome = args[args.index('--home') + 1]\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = b'{{\"ok\":true}}'\n        self.send_response(200)\n        self.send_header('Content-Type', 'application/json')\n        self.send_header('Content-Length', str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n    def log_message(self, *args):\n        pass\nHTTPServer(('127.0.0.1', port), Handler).serve_forever()\nPY\n",
                 log.display(),
                 log.display(),
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut mode = std::fs::metadata(&stub).unwrap().permissions();
-            mode.set_mode(0o755);
-            std::fs::set_permissions(&stub, mode).unwrap();
-        }
+        );
         let saved = save_env(&[
             "HOME",
             "PACKSET_HOME",
@@ -1536,9 +1534,7 @@ mod tests {
             env::set_var("PACKSET_TIMEOUT_MS", "5000");
         }
         let reap = Reap(log.clone());
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let port = support::free_port();
         let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
         let body = client.status(None).expect("the stub should answer");
         let text = std::fs::read_to_string(&log).unwrap_or_default();
@@ -1694,7 +1690,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::Shutdown;
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let listener = support::bind();
         let client = PacksetClient::new(format!("http://{}", listener.local_addr().unwrap()));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

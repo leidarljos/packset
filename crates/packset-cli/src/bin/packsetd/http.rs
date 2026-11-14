@@ -1564,11 +1564,7 @@ mod tests {
     fn write_embed_stub(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("packset-embed");
-        std::fs::write(&path, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&path).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&path, perm).unwrap();
+        crate::test_support::write_executable(&path, body);
         (dir, path)
     }
 

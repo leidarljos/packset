@@ -3,8 +3,9 @@
 //! A stub stands in for `packset-embed`, so the test does not need the
 //! ONNX runtime and runs on macOS the same way. No search is issued.
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+
+mod common;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -24,18 +25,7 @@ impl Drop for Writer {
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perm = std::fs::metadata(path).unwrap().permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(path, perm).unwrap();
+    common::free_port()
 }
 
 fn program_on_path(name: &str) -> PathBuf {
@@ -108,7 +98,7 @@ fn the_encoder_warms_when_the_writer_starts_listening() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("asked");
     let stub = dir.path().join("stub-embed");
-    std::fs::write(
+    common::write_executable(
         &stub,
         format!(
             r#"#!/usr/bin/env python3
@@ -127,9 +117,7 @@ for line in sys.stdin:
 "#,
             log = log.display()
         ),
-    )
-    .unwrap();
-    executable(&stub);
+    );
     let cache = dir.path().join("cache");
     std::fs::create_dir_all(&cache).unwrap();
     // A recorded cold start, so the countdown is this number and not the
@@ -200,15 +188,13 @@ fn remaining_ms_is_absent_when_the_encoder_is_off_or_down() {
     let dir = tempfile::tempdir().unwrap();
     let sentinel = dir.path().join("started");
     let stub = dir.path().join("stub-embed");
-    std::fs::write(
+    common::write_executable(
         &stub,
         format!(
             "#!/bin/sh\nprintf started > '{}'\nexit 1\n",
             sentinel.display()
         ),
-    )
-    .unwrap();
-    executable(&stub);
+    );
     let cache = dir.path().join("cache");
     std::fs::create_dir_all(&cache).unwrap();
     let off = spawn(&dir.path().join("off"), &stub, "off", &cache);

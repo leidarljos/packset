@@ -14,6 +14,8 @@
 #![cfg(target_os = "linux")]
 
 use std::process::{Child, Command, Stdio};
+
+mod common;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -96,11 +98,7 @@ fn settled(pid: u32) -> Sample {
 
 fn writer() -> Writer {
     let home = tempfile::tempdir().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_packsetd"));
     cmd.args(["--port", &port.to_string(), "--home"])
         .arg(home.path().join("pack"))
@@ -320,22 +318,14 @@ for line in sys.stdin:
 
 fn write_encoder(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("fake-embed.py");
-    std::fs::write(&path, FAKE_ENCODER).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
+    common::write_executable(&path, FAKE_ENCODER);
     path
 }
 
 fn field_writer() -> Writer {
     let home = tempfile::tempdir().unwrap();
     let encoder = write_encoder(home.path());
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = common::free_port();
     let bin = std::env::var("PACKSET_SOAK_BIN")
         .unwrap_or_else(|_| env!("CARGO_BIN_EXE_packsetd").to_string());
     let mut cmd = Command::new(bin);
@@ -549,16 +539,8 @@ fn steady_text(workspace: usize, n: usize, window: usize) -> String {
 fn steady_writer() -> Writer {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("fake-embed.py");
-    std::fs::write(&path, VARIED_ENCODER).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    common::write_executable(&path, VARIED_ENCODER);
+    let port = common::free_port();
     let bin = std::env::var("PACKSET_SOAK_BIN")
         .unwrap_or_else(|_| env!("CARGO_BIN_EXE_packsetd").to_string());
     let mut cmd = Command::new(bin);

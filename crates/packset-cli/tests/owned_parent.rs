@@ -8,6 +8,8 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+
+mod common;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -61,11 +63,7 @@ impl Drop for Reader {
 }
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    common::free_port()
 }
 
 fn packset(home: &Path, port: u16) -> Command {

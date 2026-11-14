@@ -6,8 +6,9 @@
 
 #![cfg(target_os = "linux")]
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+
+mod common;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
@@ -43,11 +44,7 @@ struct Seat {
 
 impl Seat {
     fn new(home: PathBuf, log: PathBuf) -> Self {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = common::free_port();
         Self { port, home, log }
     }
 

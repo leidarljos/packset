@@ -2975,6 +2975,7 @@ dependencies = [
 name = "packset-client"
 version = "0.18.2"
 dependencies = [
+ "libc",
  "packset-core",
  "serde",
  "serde_json",

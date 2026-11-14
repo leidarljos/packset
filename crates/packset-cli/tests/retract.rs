@@ -1,11 +1,13 @@
 //! `packset retract` withdraws one claim from a shell.
 //!
-//! A writer on `--port 0` over a temporary home. `remember` stores a
+//! A writer on a port of its own, over a temporary home. `remember` stores a
 //! claim, `retract` names the deed, search no longer lists it, and
 //! `atoms --as-of` from before the retraction still does.
 
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+
+mod common;
 use std::time::{Duration, Instant};
 
 /// A private writer, stopped when the test ends.
@@ -22,13 +24,13 @@ impl Drop for Writer {
     }
 }
 
-/// `--port 0` asks the kernel for a port. The writer writes that port
-/// beside the database; the socket is already bound when the file appears.
+/// A port of this test's own. The writer is up when `/health` answers.
 fn writer() -> Writer {
     let home = tempfile::tempdir().unwrap();
     let pack = home.path().join("pack");
+    let port = common::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
-        .args(["--port", "0", "--no-embed", "--home"])
+        .args(["--port", &port.to_string(), "--no-embed", "--home"])
         .arg(&pack)
         .env("HOME", home.path())
         .env_remove("PACKSET_EMBED")

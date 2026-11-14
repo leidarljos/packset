@@ -6428,7 +6428,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("started");
         let stub = dir.path().join("stub-embed");
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             format!(
                 r#"#!/usr/bin/env python3
@@ -6451,12 +6451,7 @@ else:
 "#,
                 sentinel = sentinel.display()
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         let old_embed = std::env::var_os("PACKSET_EMBED");
         let old_inside = std::env::var_os("INSIDE_EMBED");
         // SAFETY: EMBED is held, so no other test reads these variables.
@@ -6708,7 +6703,7 @@ else:
         let stub = dir.path().join("packset-embed");
         // The dense ballot still asks its encoder; only a `--rerank`
         // invocation may touch the sentinel.
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             format!(
                 r#"#!/usr/bin/env python3
@@ -6721,12 +6716,7 @@ for line in sys.stdin:
 "#,
                 sentinel = sentinel.display()
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         let old = std::env::var_os("PACKSET_EMBED");
         // Safety: EMBED is held, so no other test mutates this variable.
         unsafe { std::env::set_var("PACKSET_EMBED", &stub) };
@@ -6924,11 +6914,7 @@ for line in sys.stdin:
     fn write_stub(body: &str) -> StubEmbed {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("packset-embed");
-        std::fs::write(&path, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&path).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&path, perm).unwrap();
+        crate::test_support::write_executable(&path, body);
         StubEmbed { path, _dir: dir }
     }
 

@@ -201,23 +201,26 @@ pub fn executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+
+    #[allow(dead_code)]
+    mod support {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test_support/harness.rs"
+        ));
+    }
 
     #[test]
     fn a_port_nobody_bound_is_not_listening() {
-        // Bind to learn a free port, then drop it: the number is now free and
-        // the kernel has not handed it out again.
-        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // Below the ephemeral range, and not issued again, so another test's
+        // bind(0) cannot land on it once this probe has closed the socket.
+        let port = support::free_port();
         assert!(!listening(port));
     }
 
     #[test]
     fn the_holder_of_a_port_is_this_process() {
-        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let socket = support::bind();
         let port = socket.local_addr().unwrap().port();
         assert!(listening(port));
         let pid = pid_on_port(port);

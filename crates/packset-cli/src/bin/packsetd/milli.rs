@@ -776,11 +776,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let plant = dir.path().join("packset-milli");
-        std::fs::write(&plant, "#!/bin/sh\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&plant).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&plant, perm).unwrap();
+        crate::test_support::write_executable(&plant, "#!/bin/sh\nexit 1\n");
         let old_path = std::env::var_os("PATH");
         let mut paths = vec![dir.path().to_path_buf()];
         if let Some(old) = &old_path {
@@ -814,18 +810,13 @@ mod tests {
         std::fs::write(index.join("data.mdb"), "").unwrap();
         let log = dir.path().join("calls.log");
         let stub = dir.path().join("packset-milli");
-        std::fs::write(
+        crate::test_support::write_executable(
             &stub,
             format!(
                 "#!/bin/sh\ncat >/dev/null\necho \"$1 $3\" >> '{}'\necho '{{\"hits\":[]}}'\n",
                 log.display()
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&stub).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&stub, perm).unwrap();
+        );
         let old = std::env::var_os("PACKSET_MILLI");
         // SAFETY: the lock is held, so no other test reads this variable.
         unsafe { std::env::set_var("PACKSET_MILLI", &stub) };
