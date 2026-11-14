@@ -27,6 +27,7 @@ and ``bin/packset`` runs that binary.
 
    $ packset ensure
    packset: listening on 127.0.0.1:8761
+   packset: home is ~/.local/share/packset; search is lexical (no embeddings)
    PACKSET_URL=http://127.0.0.1:8761
    INSIDE_MEMORY_URL=http://127.0.0.1:8761
    $ export PACKSET_URL=http://127.0.0.1:8761
@@ -34,7 +35,12 @@ and ``bin/packset`` runs that binary.
    packset: up on http://127.0.0.1:8761 (packsetd ok)
 
 ``packset ensure`` prints two assignment lines, and ``listening`` when it
-started the writer. Do not capture it with ``$(...)``. If a writer is already
+started the writer. The first time, on a new home, it names that directory.
+The printed path is absolute; the line above shortens ``$HOME``. With no
+``packset-embed`` binary it adds that search is lexical (no embeddings).
+When that binary is beside ``packset``, named by ``PACKSET_EMBED``, or on
+``PATH``, the lexical clause is left off. Do not capture the command with
+``$(...)``. If a writer is already
 on 8761, the error names that process and a free port:
 
 .. code:: text

@@ -100,6 +100,10 @@ fn run() -> anyhow::Result<()> {
     match verb {
         "ensure" => {
             let owned = args.switch("--owned");
+            let home = pack_home();
+            // Taken before start: the writer creates the database, and a
+            // later ensure on that home is not the first one.
+            let fresh = home_is_fresh(&home);
             let already = procfs::listening(port);
             if already && !is_ours(port) {
                 anyhow::bail!("{}", held_by(port));
@@ -124,6 +128,9 @@ fn run() -> anyhow::Result<()> {
                 if let Some(line) = writer_problem(port) {
                     anyhow::bail!("{line}");
                 }
+            }
+            if !already && fresh {
+                eprintln!("{}", first_run_line(&home, embed_present()));
             }
             print_url(port);
             if let Some(held) = held {
@@ -1007,6 +1014,89 @@ fn print_url(port: u16) {
     println!("INSIDE_MEMORY_URL=http://127.0.0.1:{port}");
 }
 
+/// The directory this ensure will open. The same resolution the writer uses.
+fn pack_home() -> PathBuf {
+    packset_core::home::resolve().unwrap_or_else(|| PathBuf::from(".").join("packset"))
+}
+
+/// A home that has never held a pack. The writer creates `data.mdb` on start.
+fn home_is_fresh(home: &Path) -> bool {
+    !home.join("memory.lmdb").join("data.mdb").is_file()
+}
+
+/// What the first ensure on a new home says.
+///
+/// The directory is where the pack lives. Search stays lexical until the
+/// embed component is present: `packset-embed` beside this binary, named by
+/// `PACKSET_EMBED`, or on `PATH`, and not switched off.
+fn first_run_line(home: &Path, embed: bool) -> String {
+    if embed {
+        format!("packset: home is {}", home.display())
+    } else {
+        format!(
+            "packset: home is {}; search is lexical (no embeddings)",
+            home.display()
+        )
+    }
+}
+
+/// Whether this seat has an encoder to run.
+///
+/// The same places the writer looks: an explicit path, beside this binary,
+/// the checkout's build, then `PATH`. `INSIDE_EMBED` set off means the
+/// component is not in use, and search stays lexical.
+fn embed_present() -> bool {
+    embed_present_from(
+        env::var("INSIDE_EMBED").ok().as_deref(),
+        env::var_os("PACKSET_EMBED").as_deref(),
+        env::current_exe().ok().as_deref(),
+        env::var_os("PATH").as_deref(),
+    )
+}
+
+fn embed_present_from(
+    inside_embed: Option<&str>,
+    named: Option<&std::ffi::OsStr>,
+    exe: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> bool {
+    if inside_embed.is_some_and(embed_switched_off) {
+        return false;
+    }
+    if named.is_some_and(|raw| procfs::executable(Path::new(raw))) {
+        return true;
+    }
+    if let Some(exe) = exe {
+        if exe
+            .parent()
+            .is_some_and(|dir| procfs::executable(&dir.join("packset-embed")))
+        {
+            return true;
+        }
+        if let Some(root) = exe.parent().and_then(Path::parent).and_then(Path::parent) {
+            for candidate in [
+                root.join("bin/packset-embed"),
+                root.join("crates/packset-embed/target/release/packset-embed"),
+            ] {
+                if procfs::executable(&candidate) {
+                    return true;
+                }
+            }
+        }
+    }
+    path.is_some_and(|path| {
+        env::split_paths(path).any(|dir| procfs::executable(&dir.join("packset-embed")))
+    })
+}
+
+/// `INSIDE_EMBED=off` and the other spellings the writer already accepts.
+fn embed_switched_off(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "off" | "none" | "false" | "no"
+    )
+}
+
 fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
     let client = client()?;
     // A named PACKSET_URL points the read at that writer; the loopback
@@ -1824,6 +1914,71 @@ mod tests {
             std::path::Path::new("/tmp/this/pack")
         )
         .is_none());
+    }
+
+    #[test]
+    fn the_first_run_line_names_the_home_and_lexical_search_without_an_embedder() {
+        let home = std::path::Path::new("/tmp/pack");
+        let lexical = super::first_run_line(home, false);
+        assert_eq!(
+            lexical,
+            "packset: home is /tmp/pack; search is lexical (no embeddings)"
+        );
+        assert_eq!(lexical.lines().count(), 1, "{lexical}");
+        let present = super::first_run_line(home, true);
+        assert_eq!(present, "packset: home is /tmp/pack");
+        assert!(
+            !present.contains("lexical") && !present.contains("embeddings"),
+            "{present}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::home_is_fresh(dir.path()));
+        std::fs::create_dir_all(dir.path().join("memory.lmdb")).unwrap();
+        assert!(super::home_is_fresh(dir.path()));
+        std::fs::write(dir.path().join("memory.lmdb").join("data.mdb"), b"x").unwrap();
+        assert!(!super::home_is_fresh(dir.path()));
+    }
+
+    #[test]
+    fn an_embedder_is_present_on_path_or_by_name_and_absent_when_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("packset-embed");
+        std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+        }
+        let path = dir.path().as_os_str();
+        assert!(super::embed_present_from(None, None, None, Some(path)));
+        for off in ["off", "0", "none", "false", "no", "OFF"] {
+            assert!(
+                !super::embed_present_from(Some(off), None, None, Some(path)),
+                "{off}"
+            );
+        }
+        assert!(super::embed_present_from(
+            Some("on"),
+            None,
+            None,
+            Some(path)
+        ));
+        let missing = dir.path().join("missing-embed");
+        let nowhere = std::ffi::OsStr::new("/no/such/packset/path");
+        assert!(!super::embed_present_from(
+            None,
+            Some(missing.as_os_str()),
+            None,
+            Some(nowhere)
+        ));
+        assert!(super::embed_present_from(
+            None,
+            Some(bin.as_os_str()),
+            None,
+            Some(nowhere)
+        ));
     }
 
     #[test]

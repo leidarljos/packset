@@ -145,6 +145,99 @@ fn read_head(reader: &mut BufReader<TcpStream>) -> Option<(String, usize)> {
     Some((path, length))
 }
 
+fn executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// An encoder the `packset` binary would see with `PATH` empty and
+/// `PACKSET_EMBED` unset: beside that binary, or the checkout paths it checks.
+fn packset_sees_embedder() -> bool {
+    let exe = Path::new(env!("CARGO_BIN_EXE_packset"));
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe.parent() {
+        candidates.push(dir.join("packset-embed"));
+    }
+    if let Some(root) = exe.parent().and_then(Path::parent).and_then(Path::parent) {
+        candidates.push(root.join("bin/packset-embed"));
+        candidates.push(root.join("crates/packset-embed/target/release/packset-embed"));
+    }
+    candidates.iter().any(|path| executable(path))
+}
+
+#[test]
+fn the_first_ensure_names_the_home_and_says_when_search_is_lexical() {
+    let home = tempfile::tempdir().unwrap();
+    let pack = home.path().join("pack");
+    let empty = home.path().join("empty-path");
+    std::fs::create_dir(&empty).unwrap();
+    let (port, ok, stdout, stderr) = common::with_port(|port| {
+        let (ok, stdout, stderr) = output(
+            packset(home.path(), port)
+                .env("PATH", &empty)
+                .env_remove("PACKSET_EMBED")
+                .env_remove("INSIDE_EMBED")
+                .arg("ensure"),
+        );
+        (port, ok, stdout, stderr)
+    });
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains(&format!("PACKSET_URL=http://127.0.0.1:{port}")),
+        "{stdout}"
+    );
+    let home_line = format!("packset: home is {}", pack.display());
+    assert!(stderr.contains(&home_line), "{stderr}");
+    if packset_sees_embedder() {
+        assert!(!stderr.contains("no embeddings"), "{stderr}");
+    } else {
+        assert!(
+            stderr.contains(&format!("{home_line}; search is lexical (no embeddings)")),
+            "{stderr}"
+        );
+    }
+    let (ok, _, again) = output(packset(home.path(), port).arg("ensure"));
+    assert!(ok, "{again}");
+    assert!(!again.contains("home is"), "{again}");
+    assert!(!again.contains("lexical"), "{again}");
+    let _ = output(packset(home.path(), port).arg("stop"));
+}
+
+#[test]
+fn the_first_ensure_skips_the_lexical_line_when_an_embedder_is_on_path() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    common::write_executable(&bin.join("packset-embed"), "#!/bin/sh\nexit 0\n");
+    let pack = home.path().join("pack");
+    let (port, ok, stderr) = common::with_port(|port| {
+        let (ok, _, stderr) = output(
+            packset(home.path(), port)
+                .env("PATH", &bin)
+                .env_remove("PACKSET_EMBED")
+                .env_remove("INSIDE_EMBED")
+                .arg("ensure"),
+        );
+        (port, ok, stderr)
+    });
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains(&format!("packset: home is {}", pack.display())),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("lexical"), "{stderr}");
+    assert!(!stderr.contains("no embeddings"), "{stderr}");
+    let _ = output(packset(home.path(), port).env("PATH", &bin).arg("stop"));
+}
+
 #[test]
 fn a_clean_home_remembers_and_says_when_nothing_is_due() {
     let home = tempfile::tempdir().unwrap();
