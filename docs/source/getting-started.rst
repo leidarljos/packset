@@ -144,9 +144,10 @@ in the ranking as its retrievability falls.
    $ packset export --into /tmp/bag/data/atoms demo
    2 atoms to /tmp/bag/data/atoms/demo.jsonl
 
-The file is one JSON object a line, the same shape as the store's records. Every
-deed accession the atoms cite is printed on stdout, so a deed store can be
-asked for the products in the same pipe:
+That count is on stderr. Stdout is the cited accessions, one a line, and
+nothing else, so a pipe stays a list a deed store can read. These two
+claims cite none, and stdout is empty. The file is one JSON object a line,
+the same shape as the store's records.
 
 .. code:: console
 

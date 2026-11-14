@@ -28,7 +28,7 @@ Verb                                                              Does
 ``packset accessions [WS]``                                       deed accessions the live claims cite
 ``packset atoms [--as-of TS] [WS]``                               live-now claims, or those live at ``TS``
 ``packset citers ACCESSION [WS]``                                 the live claims citing one accession
-``packset export --into DIR [WS]``                                claims to ``DIR/<ws>.jsonl``; cited accessions to stdout
+``packset export --into DIR [WS]``                                claims to ``DIR/<ws>.jsonl``; the count on stderr; cited accessions on stdout
 ================================================================= =========================================================================================================================================================================================================================================================================================
 
 A workspace argument defaults to ``PACKSET_WORKSPACE``, else the git remote of

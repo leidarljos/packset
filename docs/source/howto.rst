@@ -233,8 +233,10 @@ Export for a handover, import from one
 
    $ packset export --into bag/data/atoms seat | deedar export --into bag/data/deeds -
 
-Import is one POST per line of the ``.jsonl``; the seat's ``ljos receive``
-with ``--import`` does that after checking the bag. Trust rows travel the same way.
+The count is on stderr. Stdout is the cited accessions, one a line, and
+nothing else, which is what the pipe reads. Import is one POST per line
+of the ``.jsonl``; the seat's ``ljos receive`` with ``--import`` does that
+after checking the bag. Trust rows travel the same way.
 
 Serve many agents
 =================

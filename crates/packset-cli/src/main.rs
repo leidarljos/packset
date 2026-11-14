@@ -456,7 +456,7 @@ fn usage() -> String {
          accessions [WORKSPACE] deed accessions live atoms cite\n\
          atoms [--as-of TS] [WS] live-now atoms, or those live at TS\n\
          citers ACCESSION [WS]  the live atoms citing one accession\n\
-         export --into DIR [WS] atoms to a satchel; cited accessions to stdout"
+         export --into DIR [WS] atoms to a satchel; the count on stderr; cited accessions on stdout"
         .to_string()
 }
 
@@ -1176,15 +1176,17 @@ fn citers(accession: Option<&str>, given: Option<&str>) -> anyhow::Result<()> {
 ///
 /// What a seat learned is the third thing a handover carries, beside the work
 /// and what the work produced. The atoms go in as one JSON object a line,
-/// which is what every other export in this stack is, and the accessions they
-/// cite go to stdout so a deed store can be handed them on a pipe:
+/// which is what every other export in this stack is. The count
+/// (`N atoms to PATH`) goes to stderr. The accessions they cite go to
+/// stdout, one a line, so a deed store can be handed them on a pipe and the
+/// count does not join that list:
 ///
 ///   packset export --into bag/data/atoms | deedar export --into bag/data/deeds -
 ///
-/// Two streams because they have two destinations. Writing the accessions into
-/// the satchel would make this the thing that decides what a satchel needs,
-/// and that is the tracker's call: the pack only knows what its own atoms
-/// mention.
+/// A pack that cites nothing leaves stdout empty. The summary stays on
+/// stderr either way. Writing the accessions into the satchel would make
+/// this the thing that decides what a satchel needs, and that is the
+/// tracker's call: the pack only knows what its own atoms mention.
 fn export(args: &Args) -> anyhow::Result<()> {
     let into = args
         .value("--into")
