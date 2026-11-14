@@ -4,6 +4,21 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.18.1 (2026-11-14)
+
+- `packsetd` starts the query encoder when it begins listening, so the first search is not the one that loads the model.
+  `/health` does not wait on that load.
+  While it runs, `/v1/status` reports `embedder.remaining_ms`: the last cold start written to `load-ms` in the embed cache, minus the time already spent, or one second when that file is absent.
+  The one second is a ceiling, not a measurement of this seat. The next cold start that answers replaces it.
+  The field is left out once the encoder is answering, and when it is unavailable.
+  A missing binary starts nothing. A binary that does not answer is logged once, and search stays lexical.
+- A first run that cannot start names the cause and the next command.
+  A taken port names its occupant. A second writer names the process with the pack open. A home or a log directory that cannot be written names the path and `PACKSET_HOME` or `PACKSET_LOG`. A writer left from another home, or from another build, names `packset stop && packset ensure`. A search that matched nothing says so. `due` on the same day names the next review. A missing binary says `cargo build --release -p packset`.
+  The getting-started search is `ballots BM25`. `which fusion` matches neither claim. Install is `cargo install --locked packset`.
+- On macOS, a second writer names the process that has the pack open, and a taken port names that process. When the kernel will not say which process it is, the message stays the one that names another process and the next command.
+- The v0.18.0 tag points at a commit whose `Cargo.toml` still says 0.17.10, so its release and publish stopped at the version check and it has no release archives or crates.
+  0.18.1 is the first release with these changes.
+
 ## 0.17.10 (2026-11-13)
 
 - A search no longer keeps a copy of the pack.
