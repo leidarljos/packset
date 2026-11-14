@@ -128,7 +128,7 @@ Tomorrow:
 .. code:: console
 
    $ packset due demo
-   2026-09-13T08:54:37.394Z    3f9c... CombMNZ over RRF for fusing two ballots.
+   2026-09-13T08:54:37.394Z  3f9c...  CombMNZ over RRF for fusing two ballots.
    $ packset grade 3f9c... demo
    2026-09-15T08:54:37.394Z
 

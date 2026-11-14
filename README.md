@@ -61,10 +61,10 @@ answers without the encoder, and search stays lexical.
 
 ```console
 $ packset remember --workspace demo "BM25+ is the default lexical scorer. It beat BM25 by two points."
-3f9c...	lesson	due 2026-09-13T08:54:37.394Z
+3f9c...  lesson  due 2026-09-13T08:54:37.394Z
 $ packset search --workspace demo lexical scorer
 packset: workspace demo
-1.0000	lesson	3f9c...	BM25+ is the default lexical scorer. It beat BM25 by two points.
+1.0000  lesson  3f9c...  BM25+ is the default lexical scorer. It beat BM25 by two points.
 $ packset due demo       # the same day: nothing is due, and the next review
 $ packset island fusing two ballots     # the memories a task activates
 ```
