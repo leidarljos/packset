@@ -4,6 +4,10 @@
 //! same modules for the examples and the tests.
 #![allow(dead_code, unused_imports)]
 
+#[allow(dead_code)]
+#[path = "../../procfs.rs"]
+mod procfs;
+
 pub mod admit;
 pub mod auth;
 pub mod cards;

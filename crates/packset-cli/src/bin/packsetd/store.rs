@@ -3124,6 +3124,14 @@ fn process_comm(pid: u32) -> Option<String> {
     }
 }
 
+/// A second pack, beside the writer that already holds this home.
+fn second_pack_command() -> String {
+    format!(
+        "A second pack needs its own home and port: PACKSET_HOME=<directory> PACKSET_PORT={} packset ensure",
+        crate::procfs::suggest_port(0)
+    )
+}
+
 /// The lock is held. Name the process, and the command that starts again
 /// after that process is gone.
 fn lock_held(path: &Path) -> anyhow::Error {
@@ -3133,13 +3141,15 @@ fn lock_held(path: &Path) -> anyhow::Error {
                 .map(|name| format!(" ({name})"))
                 .unwrap_or_default();
             anyhow::anyhow!(
-                "{p} is already open by pid {pid}{name}; stop that process, then run packset ensure",
-                p = path.display()
+                "{p} is already open by pid {pid}{name}; stop that process, then run packset ensure. {next}",
+                p = path.display(),
+                next = second_pack_command(),
             )
         }
         None => anyhow::anyhow!(
-            "{p} is already open by another process; stop that writer, then run packset ensure",
-            p = path.display()
+            "{p} is already open by another process; stop that writer, then run packset ensure. {next}",
+            p = path.display(),
+            next = second_pack_command(),
         ),
     }
 }
@@ -3245,6 +3255,9 @@ mod tests {
                 err.contains("stop that process, then run packset ensure"),
                 "{err}"
             );
+            assert!(err.contains("PACKSET_HOME=<directory>"), "{err}");
+            assert!(err.contains("PACKSET_PORT="), "{err}");
+            assert!(err.contains("packset ensure"), "{err}");
             let name = process_comm(pid).expect("this process has no name");
             assert!(err.contains(&format!("({name})")), "{err}");
         }
@@ -3255,6 +3268,9 @@ mod tests {
                 err.contains("stop that writer, then run packset ensure"),
                 "{err}"
             );
+            assert!(err.contains("PACKSET_HOME=<directory>"), "{err}");
+            assert!(err.contains("PACKSET_PORT="), "{err}");
+            assert!(err.contains("packset ensure"), "{err}");
             assert!(!err.contains(&format!("pid {pid}")), "{err}");
         }
     }

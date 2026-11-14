@@ -441,6 +441,46 @@ pub fn authorize(request: ureq::Request) -> ureq::Request {
     }
 }
 
+/// `PACKSET_PORT=<free> packset ensure` for a pack that cannot use `url`'s port.
+///
+/// `packset stop` is not the command. From this home it stops the writer
+/// already listening there.
+fn second_port_command(url: &str) -> String {
+    let avoid = loopback_port(url).unwrap_or(DEFAULT_PORT);
+    format!("PACKSET_PORT={} packset ensure", suggest_port(avoid))
+}
+
+/// A port this process can bind, other than `avoid`.
+fn suggest_port(avoid: u16) -> u16 {
+    let mut candidate = if avoid > 1023 {
+        avoid.wrapping_add(1)
+    } else {
+        DEFAULT_PORT.wrapping_add(1)
+    };
+    if candidate == 0 {
+        candidate = DEFAULT_PORT.wrapping_add(1);
+    }
+    for _ in 0..64 {
+        if candidate != avoid && candidate != 0 && bindable(candidate) {
+            return candidate;
+        }
+        candidate = candidate.wrapping_add(1);
+        if candidate == 0 {
+            candidate = DEFAULT_PORT.wrapping_add(1);
+        }
+    }
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .ok()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|addr| addr.port())
+        .filter(|port| *port != 0 && *port != avoid)
+        .unwrap_or(DEFAULT_PORT.wrapping_add(1))
+}
+
+fn bindable(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
 /// The port of a loopback `url`, `None` for any other host.
 ///
 /// The foreign-listener check is Linux only. Starting a local writer uses
@@ -519,6 +559,9 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("bad response: {0}")]
     Bad(String),
+    /// The writer refused this seat. One sentence, with the next command.
+    #[error("{0}")]
+    Refused(String),
     /// The writer was down or busy for the whole budget. One sentence.
     #[error("{0}")]
     Unavailable(String),
@@ -575,10 +618,9 @@ fn refused(url: &str, e: Box<ureq::Error>) -> Error {
                 .unwrap_or(text);
             let reason = reason.trim();
             if code == 401 {
-                return Error::Bad(format!(
-                    "{url}: 401: {reason}; this seat's token does not match the writer's, \
-                     so it is another user's writer or PACKSET_HOME names another pack; \
-                     packset stop && packset ensure if the writer is yours, or set PACKSET_HOME to that pack"
+                return Error::Refused(format!(
+                    "{url}: 401: this pack's token was refused; the writer on this port belongs to another pack. A second pack needs its own port: {}",
+                    second_port_command(url)
                 ));
             }
             if reason.is_empty() {

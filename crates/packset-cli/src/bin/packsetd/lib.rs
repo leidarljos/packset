@@ -4,6 +4,10 @@
 //! isolated harness home does not get a private store. Cards stay files
 //! because a person edits them; atoms are a database because a program does.
 
+#[allow(dead_code)]
+#[path = "../../procfs.rs"]
+mod procfs;
+
 pub mod admit;
 pub mod auth;
 pub mod cards;

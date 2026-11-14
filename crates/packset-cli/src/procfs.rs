@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
@@ -191,6 +191,42 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     }
 }
 
+/// A port this process can bind, other than `avoid`.
+///
+/// The next port is the one named when it is free, so a writer on 8761
+/// yields `8762`, the port the getting-started page uses. A low port is
+/// not offered: binding it needs privileges this seat does not have.
+#[must_use]
+pub fn suggest_port(avoid: u16) -> u16 {
+    let mut candidate = if avoid > 1023 {
+        avoid.wrapping_add(1)
+    } else {
+        8762
+    };
+    if candidate == 0 {
+        candidate = 8762;
+    }
+    for _ in 0..64 {
+        if candidate != avoid && candidate != 0 && bindable(candidate) {
+            return candidate;
+        }
+        candidate = candidate.wrapping_add(1);
+        if candidate == 0 {
+            candidate = 8762;
+        }
+    }
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .ok()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|addr| addr.port())
+        .filter(|port| *port != 0 && *port != avoid)
+        .unwrap_or(8762)
+}
+
+fn bindable(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
 /// Whether the path names a file this user can execute.
 #[must_use]
 pub fn executable(path: &Path) -> bool {
@@ -241,5 +277,15 @@ mod tests {
             }
             assert!(process_name(std::process::id()).is_none());
         }
+    }
+
+    #[test]
+    fn a_suggested_port_is_not_the_one_to_avoid() {
+        let socket = support::bind();
+        let port = socket.local_addr().unwrap().port();
+        let suggested = suggest_port(port);
+        assert_ne!(suggested, port);
+        assert_ne!(suggested, 0);
+        assert!(suggest_port(0) > 1023);
     }
 }

@@ -652,24 +652,52 @@ fn build_mismatch(
     ))
 }
 
+/// Who is listening on `port`, for an error a person can act on.
+fn holder_on(port: u16) -> String {
+    match procfs::pid_on_port(port) {
+        Some(pid) => {
+            let name = procfs::process_name(pid)
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default();
+            format!("pid {pid}{name}")
+        }
+        None => "another process".to_string(),
+    }
+}
+
+/// The command that starts this pack on a port `avoid` is not using.
+fn second_port_command(avoid: u16) -> String {
+    format!(
+        "PACKSET_PORT={} packset ensure",
+        procfs::suggest_port(avoid)
+    )
+}
+
 /// The running writer's home against the one this client would open.
 fn home_mismatch_line(port: u16, theirs: &str, ours: &Path) -> Option<String> {
     if theirs.is_empty() || same_path(Path::new(theirs), ours) {
         return None;
     }
     Some(format!(
-        "writer on 127.0.0.1:{port} has home {theirs}; this client uses {}; packset stop && packset ensure starts a writer for this home, or set PACKSET_HOME={theirs}",
-        ours.display()
+        "writer on 127.0.0.1:{port} is {} for home {theirs}; this client uses {}. A second pack needs its own port: {}",
+        holder_on(port),
+        ours.display(),
+        second_port_command(port)
     ))
 }
 
 /// The token on this home was refused by the writer already on `port`.
+///
+/// `packset stop` is not the next command. It stops whatever writer is on
+/// `port`, which is the other pack.
 fn refused_token(port: u16) -> String {
     let home = packset_core::home::resolve()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "the default pack home".to_string());
     format!(
-        "writer on 127.0.0.1:{port} refused the token for {home}; it was started for another pack. packset stop && packset ensure starts a writer for this home, or set PACKSET_PORT to a free port"
+        "port {port} is held by {} for another pack; this client uses {home}, and the writer refused its token (401). A second pack needs its own port: {}",
+        holder_on(port),
+        second_port_command(port)
     )
 }
 
@@ -784,6 +812,18 @@ fn start(port: u16, owned: bool) -> anyhow::Result<Option<OwnedHold>> {
             };
         }
         if let Ok(Some(code)) = child.try_wait() {
+            // The home is already open by a writer on some other port.
+            // That writer will not bind this one, so the startup wait
+            // would only hold the error back.
+            if packset_core::home::resolve()
+                .is_some_and(|home| home_open_on_another_port(&home, port, &log))
+            {
+                anyhow::bail!(
+                    "packsetd exited {code}; see {}{}",
+                    log.display(),
+                    tail(&log)
+                );
+            }
             // Many seats run `ensure` at once when a herd starts; the losers
             // exit on the port or the store lock while the winner is coming
             // up. A writer listening on our port is the outcome asked for,
@@ -839,6 +879,24 @@ fn wait_healthy(port: u16) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     anyhow::bail!("127.0.0.1:{port} is bound but /health does not answer as packsetd")
+}
+
+/// The child lost the home lock, and the writer that holds the home is
+/// listening on a port other than `port`.
+fn home_open_on_another_port(home: &Path, port: u16, log: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(log) else {
+        return false;
+    };
+    if !text.contains("already open") {
+        return false;
+    }
+    let Ok(raw) = fs::read_to_string(home.join("port")) else {
+        return false;
+    };
+    let Some(other) = raw.trim().parse::<u16>().ok() else {
+        return false;
+    };
+    other != port && procfs::listening(other)
 }
 
 /// The last few log lines, for an error that would otherwise say only a path.
@@ -962,12 +1020,15 @@ fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
             client.base()
         ),
     };
-    println!("packset: up on {} ({})", client.base(), health.trim());
     if all && given.is_some() {
         anyhow::bail!("status: --all counts every workspace; drop the workspace or the flag");
     }
     let scope = if all { None } else { Some(workspace(given)?) };
+    // Print the up line only once this client can read the pack. A writer
+    // for another home answers /health and then refuses the token; saying
+    // up before that refusal looks like the pack opened.
     let detail = client.status(scope.as_deref())?;
+    println!("packset: up on {} ({})", client.base(), health.trim());
     println!("{}", serde_json::to_string_pretty(&detail)?);
     Ok(())
 }
@@ -1678,6 +1739,25 @@ mod tests {
     }
 
     #[test]
+    fn an_open_home_on_another_port_is_reported_without_the_sibling_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let log = home.join("log");
+        std::fs::write(&log, "the home is already open by pid 4\n").unwrap();
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let other = listener.local_addr().unwrap().port();
+        std::fs::write(home.join("port"), format!("{other}\n")).unwrap();
+        let asked = if other == 1 { 2 } else { other - 1 };
+        assert!(super::home_open_on_another_port(home, asked, &log));
+        assert!(!super::home_open_on_another_port(home, other, &log));
+        std::fs::write(&log, "cannot bind\n").unwrap();
+        assert!(!super::home_open_on_another_port(home, asked, &log));
+        drop(listener);
+        std::fs::write(&log, "already open\n").unwrap();
+        assert!(!super::home_open_on_another_port(home, asked, &log));
+    }
+
+    #[test]
     fn a_different_home_names_both_paths_and_the_next_command() {
         let line = super::home_mismatch_line(
             8761,
@@ -1687,8 +1767,12 @@ mod tests {
         .unwrap();
         assert!(line.contains("/tmp/other/pack"), "{line}");
         assert!(line.contains("/tmp/this/pack"), "{line}");
-        assert!(line.contains("packset stop && packset ensure"), "{line}");
-        assert!(line.contains("PACKSET_HOME=/tmp/other/pack"), "{line}");
+        assert!(line.contains("PACKSET_PORT="), "{line}");
+        assert!(line.contains("packset ensure"), "{line}");
+        assert!(
+            !line.contains("packset stop"),
+            "stopping would take the other pack down: {line}"
+        );
         assert!(super::home_mismatch_line(
             8761,
             "/tmp/this/pack",

@@ -35,14 +35,24 @@ and ``bin/packset`` runs that binary.
 
 ``packset ensure`` prints two assignment lines, and ``listening`` when it
 started the writer. Do not capture it with ``$(...)``. If a writer is already
-on 8761, set a free port and start again: ``PACKSET_PORT=8762 packset ensure``.
-The error names the process on 8761. The status line is followed by
-one JSON object. Read ``live_by_kind``. The object also names ``home``,
-``version`` and ``commit``. A writer whose version or commit is not this
-client's names ``packset stop && packset ensure``.
+on 8761, the error names that process and a free port:
 
-One process owns the store. A second ``packsetd`` on the same file refuses
-to start and names the process with the lock.
+.. code:: text
+
+   port 8761 is held by pid 1234 (packsetd) for another pack; this client uses /tmp/other-pack, and the writer refused its token (401). A second pack needs its own port: PACKSET_PORT=8762 packset ensure
+
+Run that command. It starts this pack beside the one already listening.
+``packset stop`` stops the writer on this shell's port, so with the port
+left at 8761 it stops the other pack.
+
+The status line is followed by one JSON object. Read ``live_by_kind``.
+The object also names ``home``, ``version`` and ``commit``. A writer whose
+version or commit is not this client's names ``packset stop && packset ensure``.
+
+One process owns the store. A second ``packsetd`` on the same files names
+the process that holds them, and the command for a second pack, which is
+another home and another port:
+``PACKSET_HOME=/tmp/other-pack PACKSET_PORT=8762 packset ensure``.
 
 2. Remember two claims
 ======================

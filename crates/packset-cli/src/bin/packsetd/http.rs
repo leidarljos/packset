@@ -190,6 +190,33 @@ impl Answer {
     }
 }
 
+/// Why `bind` failed, and the command that starts this pack on a free port.
+///
+/// A taken port names the process when the kernel will say, and never the
+/// raw `os error`. The next command is the one a second pack runs.
+fn bind_error(host: &str, port: u16, err: &std::io::Error) -> String {
+    if err.kind() != std::io::ErrorKind::AddrInUse {
+        return format!("cannot bind {host}:{port}: {err}");
+    }
+    let next = format!(
+        "PACKSET_PORT={} packset ensure",
+        crate::procfs::suggest_port(port)
+    );
+    match crate::procfs::pid_on_port(port) {
+        Some(pid) => {
+            let name = crate::procfs::process_name(pid)
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default();
+            format!(
+                "cannot bind {host}:{port}: port {port} is held by pid {pid}{name}. A second pack needs its own port: {next}"
+            )
+        }
+        None => format!(
+            "cannot bind {host}:{port}: port {port} is held by another process. A second pack needs its own port: {next}"
+        ),
+    }
+}
+
 /// Serve until the process is stopped.
 ///
 /// # Errors
@@ -208,7 +235,7 @@ pub fn serve(
         anyhow::bail!("packsetd listens on {LOOPBACK} only");
     }
     let listener = TcpListener::bind((host, port))
-        .map_err(|e| anyhow::anyhow!("cannot bind {host}:{port}: {e}"))?;
+        .map_err(|err| anyhow::anyhow!("{}", bind_error(host, port, &err)))?;
     // Port 0 asks the kernel to assign a free port (POSIX bind). The
     // listening line and the file beside the database carry the port
     // the kernel assigned.
@@ -1147,6 +1174,31 @@ fn write_listing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_taken_port_names_the_holder_and_a_free_port() {
+        let socket = std::net::TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let err = std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "Address already in use (os error 98)",
+        );
+        let line = bind_error(LOOPBACK, port, &err);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(
+            line.contains(&format!("pid {}", std::process::id())),
+            "{line}"
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert!(line.contains("another process"), "{line}");
+        assert!(line.contains("PACKSET_PORT="), "{line}");
+        assert!(line.contains("packset ensure"), "{line}");
+        assert!(!line.contains("os error"), "{line}");
+        assert!(!line.contains(&format!("PACKSET_PORT={port} ")), "{line}");
+        let other = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let line = bind_error(LOOPBACK, port, &other);
+        assert!(line.contains("denied"), "{line}");
+    }
 
     /// `--port 0` asks the kernel for a port. The writer writes that port
     /// and a client reaches it. The deadline is how long this test waits

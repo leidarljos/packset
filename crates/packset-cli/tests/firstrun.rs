@@ -74,6 +74,18 @@ fn serve(handler: impl Fn(&str) -> (u16, &'static str) + Send + 'static) -> u16 
     port
 }
 
+/// The port in `PACKSET_PORT=N packset ensure`.
+fn suggested_port(stderr: &str) -> u16 {
+    let rest = stderr
+        .split("PACKSET_PORT=")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no port command in {stderr}"));
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("port {digits:?} in {stderr}"))
+}
+
 fn answer(conn: TcpStream, handler: &impl Fn(&str) -> (u16, &'static str)) {
     let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
     let mut reader = BufReader::new(conn);
@@ -228,10 +240,14 @@ fn a_writer_for_another_home_names_both_homes_and_the_next_command() {
     assert!(!ok, "{stderr}");
     assert!(stderr.contains(&theirs.display().to_string()), "{stderr}");
     assert!(stderr.contains(&mine.display().to_string()), "{stderr}");
+    assert!(stderr.contains(&child.id().to_string()), "{stderr}");
+    assert!(stderr.contains("PACKSET_PORT="), "{stderr}");
+    assert!(stderr.contains("packset ensure"), "{stderr}");
     assert!(
-        stderr.contains("packset stop && packset ensure"),
-        "{stderr}"
+        !stderr.contains("packset stop"),
+        "stopping would take the other pack down: {stderr}"
     );
+    assert_ne!(suggested_port(&stderr), port, "{stderr}");
 }
 
 #[test]
@@ -268,11 +284,14 @@ fn a_refused_token_names_the_next_command() {
         output(packset(home.path(), port).args(["remember", "--workspace", "demo", "One claim."]));
     assert!(!ok, "{stderr}");
     assert!(stderr.contains("401"), "{stderr}");
+    assert!(stderr.contains("token"), "{stderr}");
+    assert!(stderr.contains("PACKSET_PORT="), "{stderr}");
+    assert!(stderr.contains("packset ensure"), "{stderr}");
     assert!(
-        stderr.contains("packset stop && packset ensure"),
-        "{stderr}"
+        !stderr.contains("packset stop"),
+        "stopping would take the other pack down: {stderr}"
     );
-    assert!(stderr.contains("PACKSET_HOME"), "{stderr}");
+    assert_ne!(suggested_port(&stderr), port, "{stderr}");
 }
 
 #[test]
@@ -352,4 +371,132 @@ fn the_checkout_wrapper_names_the_packset_package() {
         "{stderr}"
     );
     assert!(!stderr.contains("packset-cli"), "{stderr}");
+}
+
+#[test]
+fn a_second_home_is_told_a_free_port_and_that_command_leaves_the_first_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    let err_path = root.path().join("packsetd.err");
+    let (port, mut child) = common::with_port(|port| {
+        let err = std::fs::File::create(&err_path).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(&first)
+            .env("HOME", root.path())
+            .env_remove("PACKSET_HOME")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(err))
+            .spawn()
+            .unwrap();
+        wait_health(port, &mut child, &err_path);
+        (port, child)
+    });
+    let (ok, _, stderr) = output(
+        packset(root.path(), port)
+            .env("PACKSET_HOME", &second)
+            .arg("ensure"),
+    );
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains(&child.id().to_string()), "{stderr}");
+    assert!(stderr.contains(&second.display().to_string()), "{stderr}");
+    assert!(stderr.contains("401"), "{stderr}");
+    assert!(
+        !stderr.contains("packset stop"),
+        "stopping would take the other pack down: {stderr}"
+    );
+    let free = suggested_port(&stderr);
+    assert_ne!(free, port, "{stderr}");
+    let (ok, stdout, err) = output(
+        packset(root.path(), free)
+            .env("PACKSET_HOME", &second)
+            .arg("ensure"),
+    );
+    let health = ureq::get(&format!("http://127.0.0.1:{port}/health")).call();
+    let _ = output(
+        packset(root.path(), free)
+            .env("PACKSET_HOME", &second)
+            .arg("stop"),
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(ok, "{err}\nfrom: {stderr}");
+    assert!(stdout.contains(&format!("127.0.0.1:{free}")), "{stdout}");
+    assert!(health.is_ok(), "the first writer was stopped");
+}
+
+#[test]
+fn the_daemon_names_the_process_on_a_taken_port() {
+    let home = tempfile::tempdir().unwrap();
+    let socket = common::bind();
+    let port = socket.local_addr().unwrap().port();
+    let out = common::output(
+        Command::new(env!("CARGO_BIN_EXE_packsetd"))
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(home.path())
+            .env("HOME", home.path())
+            .env_remove("PACKSET_HOME")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    drop(socket);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains(&std::process::id().to_string()), "{stderr}");
+    assert!(stderr.contains("PACKSET_PORT="), "{stderr}");
+    assert!(stderr.contains("packset ensure"), "{stderr}");
+    assert!(!stderr.contains("os error"), "{stderr}");
+    assert_ne!(suggested_port(&stderr), port, "{stderr}");
+}
+
+#[test]
+fn a_second_port_on_an_open_home_names_a_new_home() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("pack");
+    std::fs::create_dir_all(&home).unwrap();
+    let err_path = root.path().join("err");
+    let (port, mut child) = common::with_port(|port| {
+        let err = std::fs::File::create(&err_path).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_packsetd"))
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(&home)
+            .env("HOME", root.path())
+            .env_remove("PACKSET_HOME")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(err))
+            .spawn()
+            .unwrap();
+        wait_health(port, &mut child, &err_path);
+        (port, child)
+    });
+    let other = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert_ne!(other, port);
+    let started = Instant::now();
+    let (ok, _, stderr) = output(
+        packset(root.path(), other)
+            .env("PACKSET_HOME", &home)
+            .arg("ensure"),
+    );
+    let elapsed = started.elapsed();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("already open"), "{stderr}");
+    assert!(stderr.contains(&child.id().to_string()), "{stderr}");
+    assert!(stderr.contains("PACKSET_HOME"), "{stderr}");
+    assert!(stderr.contains("PACKSET_PORT="), "{stderr}");
+    assert!(stderr.contains("packset ensure"), "{stderr}");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "ensure waited out startup with no extra news: {elapsed:?}\n{stderr}"
+    );
 }
