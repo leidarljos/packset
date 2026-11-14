@@ -184,6 +184,31 @@ fn a_clean_home_remembers_and_says_when_nothing_is_due() {
     assert!(stderr.contains("nothing is due in demo"), "{stderr}");
     assert!(stderr.contains("the next review is"), "{stderr}");
 
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args([
+        "island",
+        "--workspace",
+        "demo",
+        "no-such-token-zz",
+    ]));
+    assert!(ok, "{stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("nothing to show in demo"), "{stderr}");
+    assert!(stderr.contains("no claim matched"), "{stderr}");
+    assert!(stderr.contains("no-such-token-zz"), "{stderr}");
+
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args([
+        "island",
+        "--workspace",
+        "demo",
+        "lexical",
+        "default",
+    ]));
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("lexical default"), "{stdout}");
+    assert!(stdout.contains("seed"), "{stdout}");
+    assert!(!stderr.contains("nothing to show"), "{stderr}");
+
     let (ok, _, stderr) = output(packset(home.path(), port).arg("stop"));
     assert!(ok, "{stderr}");
     let (ok, _, stderr) = output(packset(home.path(), port).args(["status", "demo"]));

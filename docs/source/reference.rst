@@ -38,6 +38,8 @@ the working directory, else ``default``.
 once and does not start a writer. ``packset search`` with nothing listening
 returns at once with the same sentence as ``status``:
 ``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
+``packset island`` prints one row per activated claim. When none activated
+it prints one line, ``nothing to show``, and why.
 
 Every verb takes ``-h`` or ``--help``: it prints that verb's usage and runs
 nothing, wherever it appears before ``--``. A flag the verb does not take is

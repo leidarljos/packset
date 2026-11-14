@@ -1348,6 +1348,9 @@ fn fire(args: &Args) -> anyhow::Result<()> {
 }
 
 /// The memories a cue activates: activation, seed mark, id, text.
+///
+/// An empty island is one line on stderr: nothing to show, and why.
+/// Stdout stays the table, so a miss does not look like a row.
 fn island(args: &Args) -> anyhow::Result<()> {
     let firing = args.switch("--fire");
     let cue = args.positional.join(" ").trim().to_string();
@@ -1356,7 +1359,12 @@ fn island(args: &Args) -> anyhow::Result<()> {
     }
     let workspace = workspace(args.value("--workspace"))?;
     let body = client()?.activate(&workspace, &cue, 24, firing)?;
-    for atom in body["island"].as_array().into_iter().flatten() {
+    let rows = body["island"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if rows.is_empty() {
+        eprintln!("{}", island_empty_line(&workspace, &cue, &body));
+        return Ok(());
+    }
+    for atom in rows {
         println!(
             "{:.3}\t{}\t{}\t{}",
             atom["activation"].as_f64().unwrap_or(0.0),
@@ -1370,6 +1378,27 @@ fn island(args: &Args) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// One line when a cue activates nothing. The clause after the semicolon
+/// is why: no claim matched, the seeds were weak, or activation did not spread.
+fn island_empty_line(workspace: &str, cue: &str, body: &serde_json::Value) -> String {
+    let seeds = body
+        .get("seeds")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let why = if seeds == 0 {
+        format!("no claim matched {cue:?}")
+    } else if body
+        .get("weak")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        "no seed both scorers agreed on".to_string()
+    } else {
+        "activation did not spread".to_string()
+    };
+    format!("packset: nothing to show in {workspace}; {why}")
 }
 
 /// Grade one review: recalled unless `--lapsed`.
@@ -1795,6 +1824,38 @@ mod tests {
             std::path::Path::new("/tmp/this/pack")
         )
         .is_none());
+    }
+
+    #[test]
+    fn an_empty_island_is_one_line_that_says_why() {
+        let missed = super::island_empty_line(
+            "demo",
+            "fusing two ballots",
+            &serde_json::json!({"seeds": 0, "weak": true, "island": []}),
+        );
+        assert_eq!(
+            missed,
+            "packset: nothing to show in demo; no claim matched \"fusing two ballots\""
+        );
+        assert_eq!(missed.lines().count(), 1, "{missed}");
+        let weak = super::island_empty_line(
+            "demo",
+            "ballots",
+            &serde_json::json!({"seeds": 1, "weak": true, "island": []}),
+        );
+        assert_eq!(
+            weak,
+            "packset: nothing to show in demo; no seed both scorers agreed on"
+        );
+        let quiet = super::island_empty_line(
+            "demo",
+            "ballots",
+            &serde_json::json!({"seeds": 2, "weak": false, "island": []}),
+        );
+        assert_eq!(
+            quiet,
+            "packset: nothing to show in demo; activation did not spread"
+        );
     }
 
     #[test]

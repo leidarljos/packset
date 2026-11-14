@@ -31,6 +31,9 @@
 A workspace argument defaults to =PACKSET_WORKSPACE=, else the git remote of
 the working directory, else =default=.
 
+=packset island= prints one row per activated claim. When none activated
+it prints one line, =nothing to show=, and why.
+
 Every verb takes =-h= or =--help=: it prints that verb's usage and runs
 nothing, wherever it appears before =--=. A flag the verb does not take is
 refused rather than read as a workspace, an id or a word of the text. =--=

@@ -112,9 +112,11 @@ On a seat's own pack of thirty claims:
    0.732  seed  5a779f5aee06da68e95edc90c1bf3cf6  Trust rows over static trust config for the seat's c
 
 The first column is activation relative to the strongest; ``seed`` marks a
-claim search found itself, the rest were reached along links. Add ``--fire``
-when the seat goes on to use the island: the strongest eight fire together
-and their links gain weight, so the next such cue walks a heavier path.
+claim search found itself, the rest were reached along links. When the cue
+activates nothing, the command prints one line that says there is nothing
+to show and why. Add ``--fire`` when the seat goes on to use the island:
+the strongest eight fire together and their links gain weight, so the next
+such cue walks a heavier path.
 
 .. code:: console
 
