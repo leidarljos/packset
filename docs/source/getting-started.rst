@@ -65,8 +65,9 @@ Run that command. It starts this pack beside the one already listening.
 left at 8761 it stops the other pack.
 
 The status line is on stderr and the JSON object is on stdout, so
-``packset status demo | jq .live_by_kind`` reads the counts. Read ``live_by_kind``.
-The object also names ``home``, ``version`` and ``commit``. A writer whose
+``packset status demo | jq .live_by_kind`` reads the counts. The object
+starts with ``home``, ``version``, ``commit``, the workspace and the counts.
+``live_by_kind`` is one of those counts. A writer whose
 version or commit is not this client's names ``packset stop && packset ensure``.
 
 One process owns the store. A second ``packsetd`` on the same files names
@@ -88,10 +89,20 @@ dump is stored with the label ``flag:tool-dump``.
    $ packset status demo
    packset: up on http://127.0.0.1:8761 (packsetd ok)
    {
+     "home": "...",
+     "version": "...",
+     "commit": "...",
+     "workspace": "demo",
+     "set": "",
+     "live": 2,
+     "live_cap": 20000,
+     "tombstone": 0,
+     "expired": 0,
      "live_by_kind": {
        "lesson": 1,
        "preference": 1
-     }
+     },
+     ...
    }
 
 Sending the same lesson twice returns the stored atom. Sending a contrary
@@ -124,16 +135,22 @@ scan and BM25+ over an index, are fused by CombMNZ; see
 
 Every new claim is due for review after one day. The same day,
 ``packset due demo`` prints ``nothing is due in demo`` and the next review.
-Tomorrow:
+``packset grade`` takes the id the same day and moves that review; the
+claim does not have to be due.
+
+.. code:: console
+
+   $ packset grade 3f9c... demo
+   2026-09-15T08:54:37.394Z
+
+A recalled claim comes back later; ``--lapsed`` brings it back sooner.
+Left ungraded, tomorrow ``due`` lists the claim:
 
 .. code:: console
 
    $ packset due demo
    2026-09-13T08:54:37.394Z  3f9c...  CombMNZ over RRF for fusing two ballots.
-   $ packset grade 3f9c... demo
-   2026-09-15T08:54:37.394Z
 
-A recalled claim comes back later; ``--lapsed`` brings it back sooner.
 By default a claim you have not reviewed also sinks
 in the ranking as its retrievability falls.
 
@@ -148,7 +165,13 @@ in the ranking as its retrievability falls.
 That count is on stderr. Stdout is the cited accessions, one a line, and
 nothing else, so a pipe stays a list a deed store can read. These two
 claims cite none, and stdout is empty. The file is one JSON object a line,
-the same shape as the store's records.
+the same shape as the store's records. That file is the handover this
+install can make on its own.
+
+``deedar`` is a separate program. ``cargo install packset`` does not ship
+it. The deed store is documented at https://leidarljos.github.io/deedar/
+and the binary is ``cargo install --locked deedar-cli``. With it on
+``PATH``, the accessions on stdout are the list it reads:
 
 .. code:: console
 

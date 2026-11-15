@@ -67,7 +67,7 @@ $ packset search --workspace demo lexical scorer
 packset: workspace demo
 1.0000  lesson  3f9c...  BM25+ is the default lexical scorer. It beat BM25 by two points.
 $ packset due demo       # the same day: nothing is due, and the next review
-$ packset island fusing two ballots     # the memories a task activates
+$ packset island lexical scorer         # the memories a task activates
 ```
 
 The id is 32 hex digits. The transcript shortens it. The score is the

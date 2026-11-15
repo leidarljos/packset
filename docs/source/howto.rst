@@ -9,8 +9,13 @@ Each section is one task. Every command finds the writer on
 Name the workspace once
 =======================
 
-A workspace is the git remote of the directory you stand in, or ``default``.
-Set ``PACKSET_WORKSPACE`` to pin one for a shell:
+With nothing set, the workspace is the checkout's origin remote, normalized
+to ``git:host/owner/repo``. Standing in this repository, ``packset status``
+reports ``git:github.com/leidarljos/packset``.
+``https://github.com/leidarljos/packset.git`` and
+``git@github.com:leidarljos/packset.git`` are that same name. A directory
+with no origin is ``dir:`` and the absolute path.
+Set ``PACKSET_WORKSPACE`` to name one for a shell:
 
 .. code:: console
 
@@ -72,11 +77,22 @@ Follow the citations
 A claim that names a deed accession (``deed-...`` or ``sha256:...``) is joined
 to the deed store by that id and nothing else.
 
+``deedar`` is not part of the packset install. It is the deed store,
+documented at https://leidarljos.github.io/deedar/ and installed with
+``cargo install --locked deedar-cli``. Without it, the packset commands
+print the same lists:
+
+.. code:: console
+
+   $ packset accessions seat
+   $ packset citers deed-file-note seat
+
+With ``deedar`` on ``PATH``, the accession list answers the two checks:
+
 .. code:: console
 
    $ packset accessions seat | deedar evidence -    # the bytes are intact
    $ packset accessions seat | deedar current -     # still the tip
-   $ packset citers deed-file-note seat             # the claims standing on one deed
 
 Choose the panel
 ================
@@ -125,6 +141,10 @@ such cue walks a heavier path.
 
    $ packset island --fire settle a vote with learned trust
    $ packset fire 1bd8ee9e... e7574b84...     # or name the claims yourself
+
+``packset fire`` takes those ids. A unique prefix resolves, and a trailing
+``...`` is the shortening on the lines above. An id that matches nothing
+is an error.
 
 Turn on the dense scorer
 ========================
@@ -237,10 +257,19 @@ Export for a handover, import from one
 
 .. code:: console
 
-   $ packset export --into bag/data/atoms seat | deedar export --into bag/data/deeds -
+   $ packset export --into bag/data/atoms seat
 
 The count is on stderr. Stdout is the cited accessions, one a line, and
-nothing else, which is what the pipe reads. Import is one POST per line
+nothing else. That file is the handover packset writes on its own. The
+pipe needs ``deedar``, installed with ``cargo install --locked deedar-cli``
+(https://leidarljos.github.io/deedar/), which the packset install does not
+ship:
+
+.. code:: console
+
+   $ packset export --into bag/data/atoms seat | deedar export --into bag/data/deeds -
+
+Stdout of the packset half is what the pipe reads. Import is one POST per line
 of the ``.jsonl``; the seat's ``ljos receive`` with ``--import`` does that
 after checking the bag. Trust rows travel the same way.
 

@@ -192,3 +192,78 @@ fn code_and_command_examples_use_spaces() {
     }
     assert!(seen > 20, "the check scanned {seen} examples");
 }
+
+#[test]
+fn the_readme_island_cue_shares_a_word_with_the_claim() {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let remember = readme
+        .lines()
+        .find(|line| line.contains("packset remember"))
+        .unwrap();
+    let island = readme
+        .lines()
+        .find(|line| line.contains("packset island "))
+        .unwrap();
+    let claim = remember.split('"').nth(1).unwrap().to_ascii_lowercase();
+    let cue = island
+        .split("packset island ")
+        .nth(1)
+        .unwrap()
+        .split('#')
+        .next()
+        .unwrap();
+    let hit = cue.split_whitespace().any(|word| {
+        let word = word
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        !word.is_empty() && claim.contains(&word)
+    });
+    assert!(hit, "cue {cue:?} shares no word with {claim:?}");
+}
+
+#[test]
+fn the_first_run_pages_name_the_real_workspace_status_and_deedar() {
+    let root = repo_root();
+    for path in ["docs/source/howto.rst", "docs/orgmode/howto.org"] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        assert!(text.contains("git:github.com/leidarljos/packset"), "{path}");
+        assert!(!text.contains("or `default`"), "{path}");
+        assert!(!text.contains("or =default="), "{path}");
+        assert!(text.contains("deedar-cli"), "{path}");
+        assert!(
+            text.contains("https://leidarljos.github.io/deedar/"),
+            "{path}"
+        );
+        assert!(
+            text.contains("packset export --into bag/data/atoms seat"),
+            "{path}"
+        );
+        assert!(!text.contains("-p packset-cli"), "{path}");
+        assert!(text.contains("-p packset-daemon"), "{path}");
+        assert!(text.contains("-p packset-embed"), "{path}");
+    }
+    for path in [
+        "docs/source/getting-started.rst",
+        "docs/orgmode/getting-started.org",
+    ] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        let home = text.find("\"home\"").unwrap_or_else(|| panic!("{path}"));
+        let kinds = text
+            .find("\"live_by_kind\"")
+            .unwrap_or_else(|| panic!("{path}"));
+        assert!(home < kinds, "{path}");
+        assert!(text[kinds..].contains("..."), "{path}");
+        let grade = text
+            .find("packset grade")
+            .unwrap_or_else(|| panic!("{path}"));
+        let tomorrow = text.find("Tomorrow").or_else(|| text.find("tomorrow"));
+        if let Some(tomorrow) = tomorrow {
+            assert!(grade < tomorrow, "{path}: grade is still under tomorrow");
+        }
+        assert!(text.contains("deedar-cli"), "{path}");
+        assert!(
+            text.contains("does not ship"),
+            "{path} does not say the packset install omits deedar"
+        );
+    }
+}

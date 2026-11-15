@@ -53,4 +53,6 @@ The daemon inherits that copy. There is no Python writer.
 
 That is the pack's half of the two checks a citation is worth: pipe it into
 ``deedar evidence -`` for whether the bytes are intact, or ``deedar current -`` for
-whether the thing cited is still the tip.
+whether the thing cited is still the tip. ``deedar`` is a separate program
+(``cargo install --locked deedar-cli``, https://leidarljos.github.io/deedar/),
+not part of the packset install. Without it, ``packset accessions`` is the list.
