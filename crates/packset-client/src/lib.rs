@@ -1028,7 +1028,7 @@ impl PacksetClient {
         let url = format!("{}/v1/pin", self.base);
         Ok(send(
             authorize(ureq::put(&url)),
-            Some(&serde_json::json!({ "workspace": workspace, "name": name })),
+            Some(&serde_json::json!({ "workspace": workspace, "set": name, "name": name })),
             timeout(),
         )
         .map_err(|e| into_error(&url, e))?

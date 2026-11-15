@@ -712,9 +712,21 @@ fn route(
         (Method::Put, "/v1/pin") => match required(body, "workspace") {
             Err(a) => a,
             Ok(workspace) => {
-                let name = body.get("set").and_then(Value::as_str).unwrap_or("");
+                // `set` is the field this route stores. `name` is what
+                // `packset pin` sends. An empty value is skipped so a body
+                // that carries only `name` still pins, and a body with
+                // neither clears the pin.
+                let name = ["set", "name"]
+                    .into_iter()
+                    .find_map(|key| {
+                        body.get(key)
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
+                    .unwrap_or("");
                 match service.set_pin(&workspace, name) {
-                    Ok(pinned) => Answer::ok(json!({"workspace": workspace, "set": pinned})),
+                    Ok(_) => answer(service.pin_payload(&workspace)),
                     Err(e) => Answer::err(400, e),
                 }
             }
@@ -2746,5 +2758,43 @@ for line in sys.stdin:
         let bad = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
         assert_eq!(bad.code, 400, "{:?}", bad.body);
         assert_eq!(bad.body["error"], json!("rank must be fused or relevance"));
+    }
+
+    /// `packset pin review` posts `name`. The route used to read only `set`
+    /// and store an empty pin. The answer is the same object a later read
+    /// returns, including `instructions`.
+    #[test]
+    fn pin_by_name_sticks_and_the_answer_names_the_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let panel = packset_core::Panel::default();
+        let put = |body: Value| {
+            route(
+                &svc,
+                &panel,
+                &Method::Put,
+                "/v1/pin",
+                &HashMap::new(),
+                body.as_object().unwrap(),
+            )
+        };
+        let named = put(json!({"workspace": "demo", "name": "review"}));
+        assert_eq!(named.code, 200, "{:?}", named.body);
+        assert_eq!(
+            named.body,
+            json!({"workspace": "demo", "set": "review", "instructions": ""})
+        );
+        let again = put(json!({"workspace": "demo", "set": "review", "name": "review"}));
+        assert_eq!(again.body, named.body);
+        let mut query = HashMap::new();
+        query.insert("workspace".into(), "demo".into());
+        let got = route(&svc, &panel, &Method::Get, "/v1/pin", &query, &Map::new());
+        assert_eq!(got.body, named.body);
+        let cleared = put(json!({"workspace": "demo", "name": ""}));
+        assert_eq!(
+            cleared.body,
+            json!({"workspace": "demo", "set": "", "instructions": ""})
+        );
+        assert_eq!(svc.pin("demo"), "");
     }
 }

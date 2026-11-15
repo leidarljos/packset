@@ -26,9 +26,9 @@ reads and deduplication to it.
 
 #+begin_src console
 $ packset pin review
-{"instructions":"","set":"review","workspace":"demo"}
+{"workspace":"seat","set":"review","instructions":""}
 $ packset pin
-{"instructions":"","set":"review","workspace":"demo"}
+{"workspace":"seat","set":"review","instructions":""}
 #+end_src
 
 The binary prints a JSON object with =workspace=, =set=, and =instructions=.
