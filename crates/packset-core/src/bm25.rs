@@ -309,6 +309,37 @@ impl Index {
         scored
     }
 
+    /// One term's share of [`Self::score_weighted_by`] for `ordinal`.
+    ///
+    /// The same addend that function sums, so a caller can keep part of it.
+    #[must_use]
+    pub(crate) fn term_share(
+        &self,
+        scorer: Scorer,
+        ordinal: usize,
+        term: &str,
+        weight: f64,
+    ) -> f64 {
+        if weight <= 0.0 {
+            return 0.0;
+        }
+        let Some(postings) = self.postings.get(term) else {
+            return 0.0;
+        };
+        let Ok(at) = u32::try_from(ordinal) else {
+            return 0.0;
+        };
+        let pos = postings.partition_point(|(posted, _)| *posted < at);
+        let Some((_, count)) = postings
+            .get(pos)
+            .copied()
+            .filter(|(posted, _)| *posted == at)
+        else {
+            return 0.0;
+        };
+        weight * self.term_score_by(scorer, term, ordinal, count)
+    }
+
     /// RM3: the query expanded from its own first pass, with `alpha` of the
     /// weight kept on the original terms. Lavrenko and Croft,
     /// doi:10.1145/383952.383972; Lv and Zhai, doi:10.1145/1645953.1646259.

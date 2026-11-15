@@ -210,6 +210,46 @@ fn for_each_span(text: &str, mut each: impl FnMut(&str)) {
     }
 }
 
+/// One indexed word: the spelling, and the stem the postings store.
+struct Piece {
+    surface: String,
+    folded: String,
+}
+
+/// The words [`tokens`] returns, with the spelling kept beside the stem.
+///
+/// The index and the query are both built from [`Piece::folded`], so one
+/// form of a word finds the other. [`Piece::surface`] is what was written,
+/// and search uses it to keep that spelling above a stem-only hit.
+fn pieces(text: &str) -> Vec<Piece> {
+    let mut out = Vec::new();
+    for_each_span(text, |span| {
+        let parts = identifier_parts(span);
+        if parts.len() > 1 {
+            let joined = span.to_ascii_lowercase();
+            // The joined form is a name, so it is not stemmed.
+            if !STOP.contains(&joined.as_str()) {
+                out.push(Piece {
+                    folded: joined.clone(),
+                    surface: joined,
+                });
+            }
+        }
+        for part in parts {
+            let lower = part.to_ascii_lowercase();
+            // Stopwords are dropped before folding. The list is the words
+            // as written, and a stemmer would not leave them matching it.
+            if !STOP.contains(&lower.as_str()) {
+                out.push(Piece {
+                    folded: fold(&lower),
+                    surface: lower,
+                });
+            }
+        }
+    });
+    out
+}
+
 /// Lowercase tokens with the stopwords dropped.
 ///
 /// An identifier is kept whole and also split on `_`, `-`, `.`, `/`, a
@@ -221,26 +261,7 @@ fn for_each_span(text: &str, mut each: impl FnMut(&str)) {
 /// so an existing pack needs no rebuild.
 #[must_use]
 pub fn tokens(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for_each_span(text, |span| {
-        let parts = identifier_parts(span);
-        if parts.len() > 1 {
-            let joined = span.to_ascii_lowercase();
-            // The joined form is a name, so it is not stemmed.
-            if !STOP.contains(&joined.as_str()) {
-                out.push(joined);
-            }
-        }
-        for part in parts {
-            let lower = part.to_ascii_lowercase();
-            // Stopwords are dropped before folding. The list is the words
-            // as written, and a stemmer would not leave them matching it.
-            if !STOP.contains(&lower.as_str()) {
-                out.push(fold(&lower));
-            }
-        }
-    });
-    out
+    pieces(text).into_iter().map(|piece| piece.folded).collect()
 }
 
 /// Paragraphs, or lines when the text is one block.
@@ -375,6 +396,76 @@ pub fn tokens_score(query_tokens: &[String], hay: &[String]) -> f64 {
         .sum()
 }
 
+/// Share of a term's weight kept when the record carries another form of
+/// the word. The spelling that was asked for keeps the whole weight, so
+/// it ranks above the stem. A term the record does not carry adds nothing,
+/// and the terms it does carry still rank the record.
+const STEM_MATCH: f64 = 0.5;
+
+fn spelled_as_asked(piece: &Piece, have: &[Piece]) -> bool {
+    have.iter().any(|got| got.surface == piece.surface)
+}
+
+fn shares_stem(piece: &Piece, have: &[Piece]) -> bool {
+    have.iter().any(|got| got.folded == piece.folded)
+}
+
+/// Full weight for the asked spelling, a prefix, or an edit. Half weight
+/// when the record has the stem under a different spelling.
+fn scale_stem(score: f64, piece: &Piece, have: &[Piece]) -> f64 {
+    if score == 0.0 || spelled_as_asked(piece, have) {
+        return score;
+    }
+    if shares_stem(piece, have) {
+        return score * STEM_MATCH;
+    }
+    score
+}
+
+/// [`tokens_score`] with a stem-only hit at [`STEM_MATCH`].
+fn lexical_term_score(asked: &[Piece], hay: &[String], have: &[Piece]) -> f64 {
+    if hay.is_empty() {
+        return 0.0;
+    }
+    asked
+        .iter()
+        .map(|piece| {
+            let best = hay
+                .iter()
+                .map(|term| token_score(&piece.folded, term))
+                .fold(0.0f64, f64::max);
+            scale_stem(best, piece, have)
+        })
+        .sum()
+}
+
+/// The weighted query is the folded words of the question, each at weight one.
+/// An expanded query carries other weights and is left as the scorer wrote it.
+fn plain_word_query(asked: &[Piece], query: &[(String, f64)]) -> bool {
+    asked.len() == query.len()
+        && asked
+            .iter()
+            .zip(query)
+            .all(|(piece, (term, weight))| piece.folded == *term && *weight == 1.0)
+}
+
+/// Weight to take off a plain query for pieces that matched only by stem.
+fn stem_penalty(
+    have: &[Piece],
+    asked: &[Piece],
+    query: &[(String, f64)],
+    mut share_of: impl FnMut(&str, f64) -> f64,
+) -> f64 {
+    let mut penalty = 0.0;
+    for (piece, (term, weight)) in asked.iter().zip(query) {
+        if spelled_as_asked(piece, have) || !shares_stem(piece, have) {
+            continue;
+        }
+        penalty += (1.0 - STEM_MATCH) * share_of(term, *weight);
+    }
+    penalty
+}
+
 fn trust_of(atom: &Record) -> f64 {
     record::rank_trust(atom, 1.0)
 }
@@ -386,11 +477,13 @@ fn atom_in_set(atom: &Record, set: Option<&str>) -> bool {
     }
 }
 
-fn file_hits(field: &str, text: &str, qtoks: &[String], bias: f64) -> Vec<Value> {
+fn file_hits(field: &str, text: &str, asked: &[Piece], bias: f64) -> Vec<Value> {
     paragraphs(text)
         .into_iter()
         .filter_map(|para| {
-            let score = text_score(qtoks, &para);
+            let have = pieces(&para);
+            let hay: Vec<String> = have.iter().map(|piece| piece.folded.clone()).collect();
+            let score = lexical_term_score(asked, &hay, &have);
             (score != 0.0).then(|| {
                 // A card is a file the person edits, so its labels are read
                 // off the paragraph rather than stored beside it.
@@ -643,14 +736,14 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
         kind,
         now,
     } = *ask;
-    let qtoks = tokens(query);
-    if qtoks.is_empty() {
+    let asked = pieces(query);
+    if asked.is_empty() {
         return Vec::new();
     }
     // The seat card outranks the workspace card at equal relevance, because a
     // standing preference applies wherever the question came from.
-    let mut hits = file_hits("user", user, &qtoks, 0.5);
-    hits.extend(file_hits("memory", memory, &qtoks, 0.25));
+    let mut hits = file_hits("user", user, &asked, 0.5);
+    hits.extend(file_hits("memory", memory, &asked, 0.25));
 
     let mut best = TopK::new(limit);
     let mut owned: Vec<String>;
@@ -659,14 +752,15 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
         if !serves(atom, set, kind, now) {
             continue;
         }
+        let have = atom_pieces(atom);
         let hay: &[String] = match documents.get(ordinal) {
             Some(tokens) => tokens,
             None => {
-                owned = atom_tokens(atom);
+                owned = have.iter().map(|piece| piece.folded.clone()).collect();
                 &owned
             }
         };
-        let relevance = tokens_score(&qtoks, hay);
+        let relevance = lexical_term_score(&asked, hay, &have);
         let due = record::is_due(atom, now);
         if relevance == 0.0 {
             continue;
@@ -689,6 +783,20 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
     hits
 }
 
+fn atom_pieces(atom: &Record) -> Vec<Piece> {
+    let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+    let mut out = pieces(text);
+    if let Some(Value::Array(items)) = atom.get("entities") {
+        for item in items {
+            let name = item
+                .as_str()
+                .map_or_else(|| item.to_string(), str::to_string);
+            out.extend(pieces(&name));
+        }
+    }
+    out
+}
+
 /// The tokens one atom is searchable by: its text and its entities.
 ///
 /// Text and entities both go through [`tokens`], so an identifier in either
@@ -697,17 +805,10 @@ pub fn search_linear_with_ranked<R: Borrow<Record>>(
 /// counts have to agree about what a document is.
 #[must_use]
 pub fn atom_tokens(atom: &Record) -> Vec<String> {
-    let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
-    let mut out = tokens(text);
-    if let Some(Value::Array(items)) = atom.get("entities") {
-        for item in items {
-            let name = item
-                .as_str()
-                .map_or_else(|| item.to_string(), str::to_string);
-            out.extend(tokens(&name));
-        }
-    }
-    out
+    atom_pieces(atom)
+        .into_iter()
+        .map(|piece| piece.folded)
+        .collect()
 }
 
 /// The pack scored by BM25 over `index`, a second ballot beside the scan.
@@ -754,10 +855,13 @@ fn lexical_hits<R: Borrow<Record>>(
     scorer: crate::bm25::Scorer,
     rank: Rank,
 ) -> Vec<Value> {
-    let qtoks = tokens(ask.query);
     // Each word asked for once, which is the unweighted query written as a
-    // weighted one so both paths score through the same code.
-    let weighted: Vec<(String, f64)> = qtoks.into_iter().map(|term| (term, 1.0)).collect();
+    // weighted one so both paths score through the same code. The folded
+    // form is the posting; the spelling is read again when the hit is weighed.
+    let weighted: Vec<(String, f64)> = pieces(ask.query)
+        .into_iter()
+        .map(|piece| (piece.folded, 1.0))
+        .collect();
     bm25_hits(ask, index, &weighted, scorer, rank)
 }
 
@@ -823,6 +927,8 @@ fn bm25_hits<R: Borrow<Record>>(
     scorer: crate::bm25::Scorer,
     rank: Rank,
 ) -> Vec<Value> {
+    let asked = pieces(ask.query);
+    let plain = plain_word_query(&asked, query);
     let Ask {
         user,
         memory,
@@ -840,7 +946,15 @@ fn bm25_hits<R: Borrow<Record>>(
     let mut hits: Vec<Value> = Vec::new();
     for (field, text, bias) in [("user", user, 0.5), ("memory", memory, 0.25)] {
         for para in paragraphs(text) {
-            let relevance = index.score_foreign_weighted_by(scorer, query, &tokens(&para));
+            let doc = tokens(&para);
+            let mut relevance = index.score_foreign_weighted_by(scorer, query, &doc);
+            if plain && relevance > 0.0 {
+                let have = pieces(&para);
+                let penalty = stem_penalty(&have, &asked, query, |term, weight| {
+                    index.score_foreign_weighted_by(scorer, &[(term.to_string(), weight)], &doc)
+                });
+                relevance = (relevance - penalty).max(0.0);
+            }
             if relevance == 0.0 {
                 continue;
             }
@@ -857,12 +971,22 @@ fn bm25_hits<R: Borrow<Record>>(
     // Only the best `limit` atoms are built; nothing below them can reach the
     // final cut past the cards.
     let mut best = TopK::new(limit);
-    for (ordinal, relevance) in index.score_weighted_by(scorer, query) {
+    for (ordinal, mut relevance) in index.score_weighted_by(scorer, query) {
         let Some(atom) = atoms.get(ordinal) else {
             continue;
         };
         let atom: &Record = atom.borrow();
         if !serves(atom, set, kind, now) {
+            continue;
+        }
+        if plain {
+            let have = atom_pieces(atom);
+            let penalty = stem_penalty(&have, &asked, query, |term, weight| {
+                index.term_share(scorer, ordinal, term, weight)
+            });
+            relevance = (relevance - penalty).max(0.0);
+        }
+        if relevance == 0.0 {
             continue;
         }
         let ts = atom.get("ts").and_then(Value::as_str);
@@ -1405,6 +1529,129 @@ mod tests {
             if term == "manifest" || term == "parser" || term == "read" {
                 assert!(index.contains(&term), "{term} is not in {index:?}");
             }
+        }
+    }
+
+    fn form_pair() -> Vec<Record> {
+        let claim = |id, text| {
+            atom(json!({
+                "id": id,
+                "kind": "lesson",
+                "text": text,
+                "ts": NOW,
+                "trust": 1.0,
+            }))
+        };
+        // `a-stem` sorts ahead of `z-exact` when the scores tie, so a tie
+        // would report the stem as the winner.
+        vec![
+            claim("a-stem", "ridge narrated video"),
+            claim("z-exact", "ridge narration video"),
+            claim("m-none", "pottery wheel glaze"),
+        ]
+    }
+
+    fn lexical_orders(atoms: &[Record], query: &str) -> (Vec<Value>, Vec<Value>) {
+        let documents: Vec<Vec<String>> = atoms.iter().map(atom_tokens).collect();
+        let index = crate::bm25::Index::build(documents.iter().map(Vec::as_slice));
+        let asked = ask("", "", atoms, query, 10, None);
+        let linear = search_linear_with(&asked, &documents);
+        let terms = search_bm25(&asked, &index);
+        (linear, terms)
+    }
+
+    fn ids_of(hits: &[Value]) -> Vec<&str> {
+        hits.iter().filter_map(|hit| hit["id"].as_str()).collect()
+    }
+
+    fn score_of(hits: &[Value], id: &str) -> f64 {
+        hits.iter()
+            .find(|hit| hit["id"].as_str() == Some(id))
+            .and_then(|hit| hit["score"].as_f64())
+            .unwrap_or(0.0)
+    }
+
+    /// `narration` and `narrated` are one word. A query written as either
+    /// form returns the record stored as the other, and leaves out a record
+    /// that shares no word.
+    #[test]
+    fn a_query_for_one_form_finds_the_record_stored_as_another() {
+        assert_eq!(
+            fold("narration"),
+            fold("narrated"),
+            "narration and narrated share a stem"
+        );
+        let atoms = form_pair();
+        for query in ["narration", "narrated"] {
+            let (linear, terms) = lexical_orders(&atoms, query);
+            for (path, hits) in [("scan", &linear), ("bm25", &terms)] {
+                let ids = ids_of(hits);
+                assert!(
+                    ids.contains(&"z-exact"),
+                    "{path} {query} missed the narration record: {ids:?}"
+                );
+                assert!(
+                    ids.contains(&"a-stem"),
+                    "{path} {query} missed the narrated record: {ids:?}"
+                );
+                assert!(
+                    !ids.contains(&"m-none"),
+                    "{path} {query} kept an unrelated record: {ids:?}"
+                );
+            }
+        }
+    }
+
+    /// The record that spells the word as asked ranks above the other form.
+    /// The stem's id would win a tie, so this is the weight, not the id.
+    #[test]
+    fn an_exact_spelling_ranks_above_a_stem_only_match() {
+        let atoms = form_pair();
+        for (query, exact, stemmed) in [
+            ("narration", "z-exact", "a-stem"),
+            ("narrated", "a-stem", "z-exact"),
+        ] {
+            let (linear, terms) = lexical_orders(&atoms, query);
+            for (path, hits) in [("scan", &linear), ("bm25", &terms)] {
+                let ids = ids_of(hits);
+                assert_eq!(ids.first().copied(), Some(exact), "{path} {query}: {ids:?}");
+                assert!(
+                    score_of(hits, exact) > score_of(hits, stemmed),
+                    "{path} {query}: exact {} vs stem {}",
+                    score_of(hits, exact),
+                    score_of(hits, stemmed)
+                );
+            }
+        }
+    }
+
+    /// A query that shares some of its words, including another form of one
+    /// of them, keeps that record. A record that shares nothing stays out.
+    #[test]
+    fn a_partial_word_overlap_stays_ranked() {
+        let claim = |id, text| {
+            atom(json!({
+                "id": id,
+                "kind": "lesson",
+                "text": text,
+                "ts": NOW,
+                "trust": 1.0,
+            }))
+        };
+        let atoms = vec![
+            claim("a-one", "quarry stones"),
+            claim("b-some", "ridge narrated marker"),
+            claim("c-all", "ridge narration quarry"),
+            claim("d-none", "pottery wheel glaze"),
+        ];
+        let (linear, terms) = lexical_orders(&atoms, "ridge narration quarry");
+        for (path, hits) in [("scan", &linear), ("bm25", &terms)] {
+            let ids = ids_of(hits);
+            assert_eq!(
+                ids,
+                vec!["c-all", "b-some", "a-one"],
+                "{path} dropped a partial overlap: {ids:?}"
+            );
         }
     }
 
