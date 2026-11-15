@@ -722,3 +722,52 @@ fn search_with_nothing_listening_names_ensure_at_once() {
         "search started a writer"
     );
 }
+
+#[test]
+fn a_down_writer_names_ensure_at_once_for_a_write_and_a_read() {
+    let home = tempfile::tempdir().unwrap();
+    // Hold the port lock. `free_port` gives the number back, and another
+    // test's writer can bind it before these commands run.
+    common::with_port(|port| {
+        let verbs: &[&[&str]] = &[
+            &[
+                "remember",
+                "--workspace",
+                "demo",
+                "BM25+ is the lexical default.",
+            ],
+            &["due", "demo"],
+            &["island", "fusing two ballots"],
+            &["status", "demo"],
+            &["pin", "review"],
+        ];
+        for args in verbs {
+            let started = Instant::now();
+            let (ok, _, stderr) = output(
+                packset(home.path(), port)
+                    .env_remove("PACKSET_HOME")
+                    .env_remove("LJOS_HOME")
+                    .env_remove("LJOS_INSIDE_MEMORY_HOME")
+                    .env("PACKSET_TIMEOUT_MS", "30000")
+                    .args(*args),
+            );
+            let elapsed = started.elapsed();
+            assert!(!ok, "{args:?} {stderr}");
+            assert!(
+                stderr.contains(&format!(
+                    "writer is not running on 127.0.0.1:{port}; packset ensure starts it"
+                )),
+                "{args:?} {stderr}"
+            );
+            assert!(
+                elapsed < QUICK,
+                "{args:?} waited on a closed port: {elapsed:?} {stderr}"
+            );
+        }
+        let pack = home.path().join("pack");
+        assert!(
+            !pack.join("token").exists(),
+            "a down command started a writer in {pack:?}"
+        );
+    });
+}

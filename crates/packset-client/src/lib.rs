@@ -125,8 +125,9 @@ fn jitter_salt(asked: u32) -> u64 {
 
 /// What a refused connection means for this call.
 enum Refused {
-    /// Ask again inside the budget. The first refusal of a loopback writer
-    /// starts the local daemon once, when this seat has a home and a binary.
+    /// Ask again inside the budget when this call started the local writer,
+    /// or the refusal was not from loopback. A loopback writer this call
+    /// will not start is the answer at once. The sentence names `packset ensure`.
     Retry,
     /// The refusal is the answer. Search uses this: it must not wait out
     /// the budget, and it must not start a writer.
@@ -134,13 +135,15 @@ enum Refused {
 }
 
 /// Send `req`, with `body` when there is one, inside `budget`. A 429 or a
-/// 503 is asked again for every wait that fits in the budget, and so is a
-/// refused connection when `refused` is [`Refused::Retry`]. A 503 or 429
-/// that carries `Retry-After` waits at least that long. The waits that are
-/// charged are what the budget spends. A slow round trip does not drop an
-/// ask. The writer answers 503 before any of the request runs, so a write
-/// sent again is not stored twice. Each ask carries `X-Packset-Deadline`
-/// at the end of this budget.
+/// 503 is asked again for every wait that fits in the budget. A refused
+/// loopback connection is asked again only when this call started the local
+/// writer. Any other refusal is one sentence at once, and a refusal from a
+/// host other than loopback is asked again for every wait that fits. A 503
+/// or 429 that carries `Retry-After` waits at least that long. The waits
+/// that are charged are what the budget spends. A slow round trip does not
+/// drop an ask. The writer answers 503 before any of the request runs, so a
+/// write sent again is not stored twice. Each ask carries
+/// `X-Packset-Deadline` at the end of this budget.
 fn send(
     req: ureq::Request,
     body: Option<&serde_json::Value>,
@@ -196,11 +199,18 @@ fn dispatch(
                 if matches!(refused, Refused::Once) {
                     return Err(Attempt::Plain(not_running(req.url())));
                 }
+                if !started_daemon {
+                    started_daemon = autostart(req.url());
+                }
+                // Nothing on this port is going to appear. The budget would
+                // only hold the sentence back. A writer this call just
+                // spawned still gets the waits, and so does a refusal from
+                // a host other than loopback.
+                if !started_daemon && loopback_port(req.url()).is_some() {
+                    return Err(Attempt::Plain(not_running(req.url())));
+                }
                 match pause_for(wait, None, waited, budget, jitter_salt(asked)) {
                     Some(pause) => {
-                        if !started_daemon {
-                            started_daemon = autostart(req.url());
-                        }
                         std::thread::sleep(pause.sleep);
                         waited = waited.saturating_add(pause.charge);
                         wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
@@ -1635,7 +1645,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_connection_is_retried_and_then_one_sentence() {
+    fn a_refused_local_writer_that_will_not_start_is_one_sentence_at_once() {
         use std::time::Instant;
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("packset-down-{}", std::process::id()));
@@ -1654,7 +1664,7 @@ mod tests {
             env::remove_var("LJOS_HOME");
             env::remove_var("LJOS_INSIDE_MEMORY_HOME");
             env::remove_var("PACKSET_BIN");
-            env::set_var("PACKSET_TIMEOUT_MS", "250");
+            env::set_var("PACKSET_TIMEOUT_MS", "30000");
         }
         let port = support::free_port();
         let client = PacksetClient::new(format!("http://127.0.0.1:{port}"));
@@ -1668,8 +1678,10 @@ mod tests {
             format!("writer is not running on 127.0.0.1:{port}; packset ensure starts it"),
             "{err}"
         );
-        assert!(took >= Duration::from_millis(40), "no backoff: {took:?}");
-        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert!(
+            took < Duration::from_secs(2),
+            "a local writer that will not start waited out the budget: {took:?}"
+        );
     }
 
     #[test]

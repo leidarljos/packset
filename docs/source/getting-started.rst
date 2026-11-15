@@ -109,7 +109,7 @@ lesson closes the old one's validity window.
 The id is the one ``prefer`` or ``remember`` printed. Right after those two
 writes the lesson scores 2.0000 and the preference scores 1.0000; the
 number moves as the review clock runs. A question that shares no words
-prints ``no claims matched`` and the workspace. When no writer is listening, search returns at once
+prints ``no claims matched`` and the workspace. When no writer is listening, the command returns at once
 with ``writer is not running on 127.0.0.1:8761; packset ensure starts it``.
 ``packset stop`` with nothing listening says ``nothing of ours to stop``
 at once, and it does not start a writer.

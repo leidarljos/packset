@@ -34,6 +34,7 @@ The package in a checkout is `packset`, and its path is `crates/packset-cli`:
 
 ```console
 $ cargo install --locked --path crates/packset-cli
+$ packset ensure
 ```
 
 `cargo build --release -p packset` builds that same package in the tree, and `bin/packset` runs the binary.
@@ -72,7 +73,8 @@ $ packset island fusing two ballots     # the memories a task activates
 The id is 32 hex digits. The transcript shortens it. The score is the
 panel's; one fresh claim that shares the question's words scores 1.0000,
 and the number moves as the review clock runs. The same day, `due` names
-the next review instead of listing a claim.
+the next review instead of listing a claim. A down writer answers at once
+and names `packset ensure`.
 
 ## What holds
 

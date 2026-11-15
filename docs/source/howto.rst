@@ -280,13 +280,14 @@ The client sends ``X-Packset-Deadline``, the end of its budget. A request
 still waiting after that is not run. ``packset-client`` asks again after 503
 or 429. It waits at least ``Retry-After`` when the writer sends one, and
 otherwise 50 ms tripling up to five seconds, with jitter, for as long as
-the budget allows. A refused connection is asked the same way.
-``packset search`` and ``packset stop`` answer a refusal at once.
-Search names ``packset ensure``. Stop says ``nothing of ours to stop``
-and does not start a writer. When ``PACKSET_HOME`` names the pack and
-``packsetd`` is on ``PATH`` or ``PACKSET_BIN``, a command other than
-those two starts that writer once. The error after the budget is one
-sentence.
+the budget allows. A refused connection to the local writer is one sentence
+at once, ``writer is not running on 127.0.0.1:8761; packset ensure starts it``,
+unless this command just started that writer. ``packset search`` does not
+start a writer. ``packset stop`` says ``nothing of ours to stop`` and does
+not start one. When ``PACKSET_HOME`` names the pack and ``packsetd`` is on
+``PATH`` or ``PACKSET_BIN``, a command other than those two starts that
+writer once and waits out the budget for it to answer. The error after the
+budget is one sentence.
 
 ``packsetd --supervise`` starts the writer and starts it again when the
 process is killed or exits with an error. A stop signal ends the loop. The
