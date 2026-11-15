@@ -54,8 +54,9 @@ When that binary is beside =packset=, named by =PACKSET_EMBED=, or on
 =PATH=, the lexical clause is left off. Do not capture it with =$(...)=.
 If a writer is already
 on 8761, set a free port and start again: =PACKSET_PORT=8762 packset ensure=.
-The error names the process on 8761. The status line is followed by
-one JSON object. Read =live_by_kind=. The object also names =home=,
+The error names the process on 8761. The status line is on stderr and
+the JSON object is on stdout, so =packset status demo | jq .live_by_kind=
+reads the counts. Read =live_by_kind=. The object also names =home=,
 =version= and =commit=. A writer whose version or commit is not this
 client's names =packset stop && packset ensure=.
 

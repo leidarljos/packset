@@ -1128,7 +1128,9 @@ fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
     // for another home answers /health and then refuses the token; saying
     // up before that refusal looks like the pack opened.
     let detail = client.status(scope.as_deref())?;
-    println!("packset: up on {} ({})", client.base(), health.trim());
+    // The up line is for a person. Stdout stays the object, so
+    // `packset status seat | jq .embedder` reads it.
+    eprintln!("packset: up on {} ({})", client.base(), health.trim());
     println!("{}", serde_json::to_string_pretty(&detail)?);
     Ok(())
 }

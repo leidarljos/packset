@@ -181,7 +181,8 @@ files only, under ``user/e5-large-v2/``.
 The pack stays on the lexical ballots without the model files or the
 binary. ``/v1/status`` then reads ``embedder.available`` false. A sitting
 still opens: doctor reads that status, and recall, island and search run
-on the lexical ballots.
+on the lexical ballots. The up line is on stderr. The pipe reads the
+JSON object.
 
 .. code:: console
 

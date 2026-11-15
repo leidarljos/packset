@@ -64,7 +64,8 @@ Run that command. It starts this pack beside the one already listening.
 ``packset stop`` stops the writer on this shell's port, so with the port
 left at 8761 it stops the other pack.
 
-The status line is followed by one JSON object. Read ``live_by_kind``.
+The status line is on stderr and the JSON object is on stdout, so
+``packset status demo | jq .live_by_kind`` reads the counts. Read ``live_by_kind``.
 The object also names ``home``, ``version`` and ``commit``. A writer whose
 version or commit is not this client's names ``packset stop && packset ensure``.
 

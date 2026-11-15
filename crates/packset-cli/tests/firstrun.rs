@@ -771,3 +771,28 @@ fn a_down_writer_names_ensure_at_once_for_a_write_and_a_read() {
         );
     });
 }
+
+#[test]
+fn status_keeps_the_up_line_off_the_json_object() {
+    let home = tempfile::tempdir().unwrap();
+    let port = common::free_port();
+    let (ok, _, stderr) = output(packset(home.path(), port).arg("ensure"));
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args(["status", "demo"]));
+    let _ = output(packset(home.path(), port).arg("stop"));
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("packset: up on ")),
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains("packset:"),
+        "the up line joined the object: {stdout}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|err| panic!("{err}: {stdout}"));
+    assert!(body.get("live_by_kind").is_some(), "{body}");
+    assert!(body.get("embedder").is_some(), "{body}");
+}
