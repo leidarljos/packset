@@ -674,6 +674,15 @@ pub struct Hit {
     pub labels: Vec<String>,
 }
 
+/// One search. `rerank` and `rank` are the stage names the writer echoed.
+/// Either is absent when an older writer omits the field.
+#[derive(Debug, Clone)]
+pub struct SearchAnswer {
+    pub hits: Vec<Hit>,
+    pub rerank: Option<String>,
+    pub rank: Option<String>,
+}
+
 /// A refusal, carrying the reason the writer gave in its body.
 fn refused(url: &str, e: Box<ureq::Error>) -> Error {
     match *e {
@@ -932,7 +941,9 @@ impl PacksetClient {
         as_of: Option<&str>,
         rerank: bool,
     ) -> Result<Vec<Hit>, Error> {
-        self.search_ranked(workspace, q, limit, as_of, rerank, None)
+        Ok(self
+            .search_ranked(workspace, q, limit, as_of, rerank, None)?
+            .hits)
     }
 
     /// [`Self::search_opts`] with a rank. `Some("relevance")` asks for the
@@ -953,7 +964,7 @@ impl PacksetClient {
         as_of: Option<&str>,
         rerank: bool,
         rank: Option<&str>,
-    ) -> Result<Vec<Hit>, Error> {
+    ) -> Result<SearchAnswer, Error> {
         let url = format!("{}/v1/search", self.base);
         let budget = if rerank {
             Duration::from_secs(60).max(timeout())
@@ -980,7 +991,17 @@ impl PacksetClient {
             .get("hits")
             .cloned()
             .unwrap_or(serde_json::Value::Array(vec![]));
-        Ok(serde_json::from_value(hits)?)
+        let named = |key: &str| {
+            body.get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        Ok(SearchAnswer {
+            hits: serde_json::from_value(hits)?,
+            rerank: named("rerank"),
+            rank: named("rank"),
+        })
     }
 
     /// Seat home, atom counts by kind, pin, index and embedder.

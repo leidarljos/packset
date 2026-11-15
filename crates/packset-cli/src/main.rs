@@ -1272,7 +1272,7 @@ fn search(args: &Args) -> anyhow::Result<()> {
     }
     let workspace = workspace(args.value("--workspace"))?;
     eprintln!("packset: workspace {workspace}");
-    let hits = held.search_ranked(
+    let found = held.search_ranked(
         &workspace,
         &query,
         10,
@@ -1280,10 +1280,25 @@ fn search(args: &Args) -> anyhow::Result<()> {
         args.switch("--rerank"),
         args.value("--rank"),
     )?;
-    if hits.is_empty() {
+    // The stage is what the howto says this command reports. A search that
+    // did not ask for one keeps the workspace line and the rows.
+    if args.switch("--rerank") {
+        if let Some(stage) = found.rerank.as_deref().filter(|s| !s.is_empty()) {
+            eprintln!("packset: rerank: {stage}");
+        }
+    }
+    if args
+        .value("--rank")
+        .is_some_and(|rank| !rank.trim().is_empty())
+    {
+        if let Some(rank) = found.rank.as_deref().filter(|s| !s.is_empty()) {
+            eprintln!("packset: rank: {rank}");
+        }
+    }
+    if found.hits.is_empty() {
         eprintln!("packset: no claims matched {query:?} in {workspace}");
     }
-    for hit in hits {
+    for hit in found.hits {
         let id = hit.id.as_deref().unwrap_or("-");
         // The fifth column is the cross-encoder score, and only when the
         // stage scored this hit. A search without it keeps the four columns.

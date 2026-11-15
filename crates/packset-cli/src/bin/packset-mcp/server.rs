@@ -119,7 +119,7 @@ impl PacksetServer {
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<Vec<AtomRow>>, McpError> {
         let workspace = self.workspace_for(args.workspace.as_deref());
-        let hits = client(self.port)
+        let found = client(self.port)
             .search_ranked(
                 &workspace,
                 &args.query,
@@ -130,7 +130,9 @@ impl PacksetServer {
             )
             .map_err(down)?;
         Ok(Json(
-            hits.into_iter()
+            found
+                .hits
+                .into_iter()
                 .map(|hit| AtomRow {
                     id: hit.id,
                     text: hit.text,

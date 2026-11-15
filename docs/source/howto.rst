@@ -56,9 +56,12 @@ Retire a claim
 The pack tombstones; it does not erase. The record stays readable and stops
 being recalled.
 
+The writer answers its owner. The token is the file ``token`` in the pack
+home. With nothing else set, that home is ``~/.local/share/packset``.
+
 .. code:: console
 
-   $ curl -s $PACKSET_URL/v1/atoms/delete -d '{"workspace":"seat","id":"3f9c...","why":"deed-review-2026-09"}'
+   $ curl -s -H "Authorization: Bearer $(cat ~/.local/share/packset/token)" $PACKSET_URL/v1/atoms/delete -d '{"workspace":"seat","id":"3f9c...","why":"deed-review-2026-09"}'
 
 ``why`` names the deed that showed the claim wrong. The seat's ``ljos forget``
 does this with the same field.
@@ -201,10 +204,12 @@ the question's words then sits behind fresher lookalikes, and the cut at
 k never returns it. ``rank=relevance`` keeps the lexical, BM25 and cosine
 scores and leaves that decay off. The default is unchanged.
 
+``packset search --rank relevance`` prints ``packset: rank: relevance``.
+
 .. code:: console
 
    $ packset search --rank relevance --workspace seat fusion
-   $ curl -s "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rank=relevance" | jq '.rank'
+   $ curl -s -H "Authorization: Bearer $(cat ~/.local/share/packset/token)" "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rank=relevance" | jq '.rank'
 
 ``GET /v1/status`` lists ``search.ranks``. An older writer has no ``search``
 object, and a client should keep the default order then.
@@ -216,16 +221,16 @@ The cross-encoder rerank is measured and off by default. Ask for it per
 query with ``packset search --rerank``, ``GET /v1/search?rerank=1``, or set
 ``PACKSET_RERANK=1`` on the writer. The stage is a forward pass over the
 top 20. An absent or broken ``packset-embed`` leaves the first-stage
-order and reports ``rerank: absent``. A lone hit reports ``rerank:
-settled``: one candidate cannot be reordered, so the stage answers
-without a model call. A hit the stage scored carries ``rerank_score``,
+order and ``packset search --rerank`` prints ``packset: rerank: absent``.
+A lone hit prints ``packset: rerank: settled``: one candidate cannot be
+reordered, so the stage answers without a model call. A hit the stage scored carries ``rerank_score``,
 its cross-encoder number. The field is null when the stage did not
 score that hit, and the other fields are unchanged.
 
 .. code:: console
 
    $ packset search --rerank --workspace seat fusion
-   $ curl -s "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rerank=1" | jq '.rerank'
+   $ curl -s -H "Authorization: Bearer $(cat ~/.local/share/packset/token)" "$PACKSET_URL/v1/search?workspace=seat&q=fusion&rerank=1" | jq '.rerank'
 
 Export for a handover, import from one
 ======================================
