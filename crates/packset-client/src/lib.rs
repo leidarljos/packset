@@ -404,6 +404,30 @@ pub fn token() -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
+/// The `GET /v1/atoms` a status probe sends.
+///
+/// `token` is the bearer from [`token`]. With nothing else set, that file is
+/// `~/.local/share/packset/token`. A probe that omits it is refused, and a
+/// count of those refusals is not a count of listings.
+#[must_use]
+pub fn atoms_listing_request(workspace: &str, token: Option<&str>) -> String {
+    let mut out =
+        format!("GET /v1/atoms?workspace={workspace}&embedding=omit HTTP/1.1\r\nHost: x\r\n");
+    if let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) {
+        out.push_str("Authorization: Bearer ");
+        out.push_str(token);
+        out.push_str("\r\n");
+    }
+    out.push_str("Connection: close\r\n\r\n");
+    out
+}
+
+/// Whether `head` is a listing. A refusal starts `HTTP/1.1 401`.
+#[must_use]
+pub fn listing_answered(head: &[u8]) -> bool {
+    head.starts_with(b"HTTP/1.1 200")
+}
+
 /// Start the local writer once. `true` when a process was spawned.
 ///
 /// A home has to be named (`PACKSET_HOME` or an older alias). The binary is
@@ -626,6 +650,9 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("bad response: {0}")]
     Bad(String),
+    /// A sentence the writer already wrote for a person.
+    #[error("{0}")]
+    Sentence(String),
     /// The writer refused this seat. One sentence, with the next command.
     #[error("{0}")]
     Refused(String),
@@ -683,6 +710,26 @@ pub struct SearchAnswer {
     pub rank: Option<String>,
 }
 
+/// A status the writer answered, as the error a person reads.
+fn from_status(url: &str, code: u16, reason: &str) -> Error {
+    let reason = reason.trim();
+    if code == 401 {
+        return Error::Refused(format!(
+            "{url}: 401: this pack's token was refused; the writer on this port belongs to another pack. A second pack needs its own port: {}",
+            second_port_command(url)
+        ));
+    }
+    if reason.is_empty() {
+        return Error::Bad(format!("{url}: status code {code}"));
+    }
+    // `no current atom` is already the sentence. The URL and the status
+    // code are how the client got it, not something to print.
+    if reason.starts_with("no current atom") {
+        return Error::Sentence(reason.to_string());
+    }
+    Error::Bad(format!("{url}: {code}: {reason}"))
+}
+
 /// A refusal, carrying the reason the writer gave in its body.
 fn refused(url: &str, e: Box<ureq::Error>) -> Error {
     match *e {
@@ -692,18 +739,7 @@ fn refused(url: &str, e: Box<ureq::Error>) -> Error {
                 .ok()
                 .and_then(|v| v.get("error").and_then(|r| r.as_str()).map(str::to_string))
                 .unwrap_or(text);
-            let reason = reason.trim();
-            if code == 401 {
-                return Error::Refused(format!(
-                    "{url}: 401: this pack's token was refused; the writer on this port belongs to another pack. A second pack needs its own port: {}",
-                    second_port_command(url)
-                ));
-            }
-            if reason.is_empty() {
-                Error::Bad(format!("{url}: status code {code}"))
-            } else {
-                Error::Bad(format!("{url}: {code}: {reason}"))
-            }
+            from_status(url, code, &reason)
         }
         other => Error::Http(Box::new(other)),
     }
@@ -1411,6 +1447,40 @@ mod tests {
     // interleave one test's set-and-restore with the other's read, and
     // the suite fails one run in five on a polluted read.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_missing_atom_is_a_plain_sentence() {
+        let err = from_status(
+            "http://127.0.0.1:8761/v1/grade",
+            400,
+            "no current atom nope",
+        );
+        assert_eq!(err.to_string(), "no current atom nope");
+        assert!(!err.to_string().contains("bad response"), "{err}");
+        let other = from_status(
+            "http://127.0.0.1:8761/v1/grade",
+            400,
+            "as_of must be a timestamp",
+        );
+        assert!(other.to_string().starts_with("bad response:"), "{other}");
+        assert!(other.to_string().contains("400"), "{other}");
+    }
+
+    #[test]
+    fn a_status_probe_sends_the_bearer_and_does_not_count_a_refusal() {
+        let req = atoms_listing_request("hammer-1", Some("abcdef"));
+        assert!(req.starts_with("GET /v1/atoms?workspace=hammer-1&embedding=omit HTTP/1.1\r\n"));
+        assert!(req.contains("Authorization: Bearer abcdef\r\n"), "{req}");
+        assert!(req.ends_with("\r\n\r\n"), "{req}");
+        let bare = atoms_listing_request("hammer-1", None);
+        assert!(!bare.contains("Authorization"), "{bare}");
+        let blank = atoms_listing_request("hammer-1", Some("  "));
+        assert!(!blank.contains("Authorization"), "{blank}");
+        assert!(listing_answered(b"HTTP/1.1 200 OK\r\n"));
+        assert!(!listing_answered(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 3\r\n\r\nno\n"
+        ));
+    }
 
     #[test]
     fn only_a_loopback_url_has_a_port_to_check() {

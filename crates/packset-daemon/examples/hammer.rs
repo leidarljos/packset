@@ -12,7 +12,8 @@
 //! run ends by counting the live claims there against what was written.
 //! `HAMMER_RERANK=1` has every search ask for the cross-encoder. A probe asks
 //! for the listing a status line reads, waits 250 ms between asks, and counts
-//! the answers within 300 ms.
+//! the answers within 300 ms. It sends the bearer token from the pack home,
+//! so a refusal is not one of those answers.
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,15 +52,13 @@ fn ask_like_a_status_line(url: &str, workspace: &str) -> Option<Duration> {
     let addr = url.trim_start_matches("http://").parse().ok()?;
     let mut stream = std::net::TcpStream::connect_timeout(&addr, patience).ok()?;
     stream.set_read_timeout(Some(patience)).ok()?;
-    write!(
-        stream,
-        "GET /v1/atoms?workspace={workspace}&embedding=omit HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
+    let request =
+        packset_client::atoms_listing_request(workspace, packset_client::token().as_deref());
+    write!(stream, "{request}").ok()?;
     let mut answer = Vec::new();
     stream.read_to_end(&mut answer).ok()?;
     let took = started.elapsed();
-    (answer.starts_with(b"HTTP/1.1 200") && took <= patience).then_some(took)
+    (packset_client::listing_answered(&answer) && took <= patience).then_some(took)
 }
 
 fn main() -> anyhow::Result<()> {

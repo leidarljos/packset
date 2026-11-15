@@ -42,6 +42,9 @@ const STARTUP: Duration = Duration::from_secs(5);
 /// What `/health` says when the answer came from our own writer.
 const OURS: &[&str] = &["packsetd", "inside-memd"];
 
+/// Two spaces between the fields a command prints. The pages use the same gap.
+const FIELD: &str = "  ";
+
 fn main() -> std::process::ExitCode {
     // A closed pipe ends the run quietly, so `packset status | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
@@ -544,8 +547,8 @@ fn load_seat_env() {
 
 /// The workspace a command was given, or the one the environment names.
 /// The workspace a verb acts on: the argument, else `PACKSET_WORKSPACE`, else
-/// what the client derives from the working directory's git remote, else
-/// `default`. The same answer every other client gives.
+/// the normalized origin remote (`git:host/owner/repo`), else `dir:` and the
+/// absolute path. The same answer every other client gives.
 fn workspace(given: Option<&str>) -> anyhow::Result<String> {
     if let Some(w) = given
         .map(str::to_string)
@@ -1160,7 +1163,20 @@ fn citers(accession: Option<&str>, given: Option<&str>) -> anyhow::Result<()> {
     let accession =
         accession.ok_or_else(|| anyhow::anyhow!("name an accession: packset citers ACCESSION"))?;
     let workspace = workspace(given)?;
-    for atom in client()?.citers(&workspace, accession)? {
+    let held = client()?;
+    let found = held.citers(&workspace, accession)?;
+    if found.is_empty() {
+        let live = held
+            .status(Some(&workspace))?
+            .get("live")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if live == 0 {
+            eprintln!("{}", empty_pack_line(&workspace));
+        }
+        return Ok(());
+    }
+    for atom in found {
         let id = atom
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -1169,7 +1185,7 @@ fn citers(accession: Option<&str>, given: Option<&str>) -> anyhow::Result<()> {
             .get("text")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        println!("{id}\t{text}");
+        println!("{id}{FIELD}{text}");
     }
     Ok(())
 }
@@ -1243,7 +1259,7 @@ fn write(kind: &str, args: &Args) -> anyhow::Result<()> {
     });
     let stored = client()?.post_atom(&atom)?;
     println!(
-        "{}\t{}\tdue {}",
+        "{}{FIELD}{}{FIELD}due {}",
         stored["id"].as_str().unwrap_or("-"),
         kind,
         stored["due_at"].as_str().unwrap_or("-")
@@ -1307,15 +1323,18 @@ fn search(args: &Args) -> anyhow::Result<()> {
         // names: they are tokens, and the text stays the fourth field.
         let line = match hit.rerank_score {
             Some(rerank) => format!(
-                "{:.4}\t{}\t{}\t{}\t{:.4}",
+                "{:.4}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{:.4}",
                 hit.score, hit.kind, id, hit.text, rerank
             ),
-            None => format!("{:.4}\t{}\t{}\t{}", hit.score, hit.kind, id, hit.text),
+            None => format!(
+                "{:.4}{FIELD}{}{FIELD}{}{FIELD}{}",
+                hit.score, hit.kind, id, hit.text
+            ),
         };
         if hit.labels.is_empty() {
             println!("{line}");
         } else {
-            println!("{line}\t{}", hit.labels.join(","));
+            println!("{line}{FIELD}{}", hit.labels.join(","));
         }
     }
     Ok(())
@@ -1332,7 +1351,7 @@ fn sweep(given: Option<&str>) -> anyhow::Result<()> {
         report["forgotten"].as_u64().unwrap_or(0)
     );
     for id in report["forgotten_ids"].as_array().into_iter().flatten() {
-        println!("forgotten\t{}", id.as_str().unwrap_or("-"));
+        println!("forgotten{FIELD}{}", id.as_str().unwrap_or("-"));
     }
     Ok(())
 }
@@ -1371,7 +1390,7 @@ fn retract(args: &Args) -> anyhow::Result<()> {
     let workspace = workspace(args.value("--workspace"))?;
     let why = args.value("--why").map(str::trim).filter(|w| !w.is_empty());
     client()?.delete_atom(&workspace, id, why)?;
-    println!("{id}\tretracted\t{}", why.unwrap_or("-"));
+    println!("{id}{FIELD}retracted{FIELD}{}", why.unwrap_or("-"));
     Ok(())
 }
 
@@ -1405,7 +1424,7 @@ fn due(given: Option<&str>) -> anyhow::Result<()> {
     atoms.sort_by(|a, b| a["due_at"].as_str().cmp(&b["due_at"].as_str()));
     for atom in atoms {
         println!(
-            "{}\t{}\t{}",
+            "{}{FIELD}{}{FIELD}{}",
             atom["due_at"].as_str().unwrap_or(""),
             atom["id"].as_str().unwrap_or("-"),
             atom["text"].as_str().unwrap_or("")
@@ -1424,7 +1443,7 @@ fn hubs(given: Option<&str>) -> anyhow::Result<()> {
     let body = client()?.hubs(&workspace, 10)?;
     for hub in body["hubs"].as_array().into_iter().flatten() {
         println!(
-            "{:.4}\t{}\t{}\t{}",
+            "{:.4}{FIELD}{}{FIELD}{}{FIELD}{}",
             hub["score"].as_f64().unwrap_or(0.0),
             hub["links"].as_u64().unwrap_or(0),
             hub["id"].as_str().unwrap_or("-"),
@@ -1437,11 +1456,59 @@ fn hubs(given: Option<&str>) -> anyhow::Result<()> {
 fn islands(given: Option<&str>) -> anyhow::Result<()> {
     let workspace = workspace(given)?;
     let body = client()?.islands(&workspace)?;
-    for island in body["islands"].as_array().into_iter().flatten() {
+    let rows = body
+        .get("islands")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if rows.is_empty() {
+        if body
+            .get("atoms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        {
+            eprintln!("{}", empty_pack_line(&workspace));
+        }
+        return Ok(());
+    }
+    for island in rows {
         let first = island["atoms"][0]["text"].as_str().unwrap_or("");
-        println!("{}\t{}", island["size"], first);
+        println!("{}{FIELD}{}", island["size"], first);
     }
     Ok(())
+}
+
+/// One line when a workspace has no live claim. The same shape as an empty island.
+fn empty_pack_line(workspace: &str) -> String {
+    format!("packset: nothing to show in {workspace}; the workspace has nothing yet")
+}
+
+/// Resolve one fired id the way git resolves a commit: an exact id wins, and
+/// otherwise a unique prefix. A trailing `...` is the shortening the pages use.
+fn resolve_fired_id<'a>(raw: &str, live: &[&'a str]) -> Result<&'a str, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("fire: an id is empty".to_string());
+    }
+    if let Some(exact) = live.iter().copied().find(|id| *id == raw) {
+        return Ok(exact);
+    }
+    let key = raw.strip_suffix("...").unwrap_or(raw);
+    if key.is_empty() {
+        return Err(format!("fire: {raw} matches no claim"));
+    }
+    if let Some(exact) = live.iter().copied().find(|id| *id == key) {
+        return Ok(exact);
+    }
+    let mut found = live.iter().copied().filter(|id| id.starts_with(key));
+    let Some(first) = found.next() else {
+        return Err(format!("fire: {raw} matches no claim"));
+    };
+    if found.next().is_some() {
+        return Err(format!("fire: {raw} matches more than one claim"));
+    }
+    Ok(first)
 }
 
 /// Two or more claims fired together.
@@ -1451,7 +1518,21 @@ fn fire(args: &Args) -> anyhow::Result<()> {
         anyhow::bail!("fire: pass two or more claim ids that fired together");
     }
     let workspace = workspace(args.value("--workspace"))?;
-    let body = client()?.fire(&workspace, ids)?;
+    let held = client()?;
+    let live = held.atoms_without_vectors(&workspace, None)?;
+    let known: Vec<&str> = live
+        .iter()
+        .filter_map(|atom| atom.get("id").and_then(serde_json::Value::as_str))
+        .collect();
+    let mut resolved = Vec::with_capacity(ids.len());
+    for id in ids {
+        resolved.push(
+            resolve_fired_id(id, &known)
+                .map_err(anyhow::Error::msg)?
+                .to_string(),
+        );
+    }
+    let body = held.fire(&workspace, &resolved)?;
     println!("{} fired, {} changed", body["fired"], body["changed"]);
     Ok(())
 }
@@ -1475,7 +1556,7 @@ fn island(args: &Args) -> anyhow::Result<()> {
     }
     for atom in rows {
         println!(
-            "{:.3}\t{}\t{}\t{}",
+            "{:.3}{FIELD}{}{FIELD}{}{FIELD}{}",
             atom["activation"].as_f64().unwrap_or(0.0),
             if atom["seed"].as_bool().unwrap_or(false) {
                 "seed"
@@ -1538,11 +1619,23 @@ fn export_file_name(workspace: &str) -> String {
     format!("{flat}.jsonl")
 }
 
+/// One line when `--as-of` finds no claim whose window contained `ts`.
+fn nothing_live_line(ts: &str) -> String {
+    format!("packset: nothing was live at {ts}")
+}
+
 /// Live-now atoms, or those live at `--as-of`, one JSON object a line.
 fn atoms(args: &Args) -> anyhow::Result<()> {
     let workspace = workspace(args.first())?;
+    let as_of = args.value("--as-of");
     eprintln!("packset: workspace {workspace}");
-    for atom in client()?.atoms_as_of(&workspace, args.value("--as-of"))? {
+    let found = client()?.atoms_as_of(&workspace, as_of)?;
+    if found.is_empty() {
+        if let Some(ts) = as_of.filter(|ts| !ts.is_empty()) {
+            eprintln!("{}", nothing_live_line(ts));
+        }
+    }
+    for atom in found {
         println!("{}", serde_json::to_string(&atom)?);
     }
     Ok(())
@@ -2030,6 +2123,57 @@ mod tests {
             quiet,
             "packset: nothing to show in demo; activation did not spread"
         );
+    }
+
+    #[test]
+    fn an_empty_workspace_says_it_has_nothing_yet() {
+        let line = super::empty_pack_line("demo");
+        assert_eq!(
+            line,
+            "packset: nothing to show in demo; the workspace has nothing yet"
+        );
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    #[test]
+    fn an_as_of_with_nothing_live_says_so() {
+        let line = super::nothing_live_line("2026-08-01T00:00:00Z");
+        assert_eq!(line, "packset: nothing was live at 2026-08-01T00:00:00Z");
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    #[test]
+    fn printed_fields_are_two_spaces_apart() {
+        assert_eq!(super::FIELD, "  ");
+        assert!(!super::FIELD.contains('\t'));
+    }
+
+    #[test]
+    fn a_fired_id_resolves_a_unique_prefix_and_the_page_shortening() {
+        let live = [
+            "1bd8ee9e370dc5d1b6eb86aca804b15a",
+            "e7574b841812abff43b3c83e6a704d5e",
+            "abcdef01000000000000000000000000",
+            "abcdef02000000000000000000000000",
+        ];
+        assert_eq!(
+            super::resolve_fired_id("1bd8ee9e...", &live).unwrap(),
+            live[0]
+        );
+        assert_eq!(super::resolve_fired_id("e7574b84", &live).unwrap(), live[1]);
+        assert_eq!(super::resolve_fired_id(live[0], &live).unwrap(), live[0]);
+        let missed = super::resolve_fired_id("ffff...", &live).unwrap_err();
+        assert_eq!(missed, "fire: ffff... matches no claim");
+        let vague = super::resolve_fired_id("abcdef...", &live).unwrap_err();
+        assert_eq!(vague, "fire: abcdef... matches more than one claim");
+        assert_eq!(
+            super::resolve_fired_id("...", &live).unwrap_err(),
+            "fire: ... matches no claim"
+        );
+        // An exact id wins when it is also a prefix of another.
+        let nested = ["abc", "abcd"];
+        assert_eq!(super::resolve_fired_id("abc", &nested).unwrap(), "abc");
+        assert_eq!(super::resolve_fired_id("abc...", &nested).unwrap(), "abc");
     }
 
     #[test]

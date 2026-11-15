@@ -773,6 +773,82 @@ fn a_down_writer_names_ensure_at_once_for_a_write_and_a_read() {
 }
 
 #[test]
+fn an_empty_read_says_what_is_missing_and_a_prefix_fires() {
+    let home = tempfile::tempdir().unwrap();
+    let port = serve(|path| {
+        if path.starts_with("/v1/islands") {
+            (200, r#"{"islands":[],"atoms":0}"#)
+        } else if path.starts_with("/v1/citers") {
+            (200, r#"{"atoms":[]}"#)
+        } else if path.starts_with("/v1/status") {
+            (200, r#"{"live":0}"#)
+        } else if path.starts_with("/v1/atoms") && path.contains("as_of=") {
+            (200, r#"{"atoms":[]}"#)
+        } else if path.starts_with("/v1/atoms") {
+            (
+                200,
+                r#"{"atoms":[{"id":"1bd8ee9e370dc5d1b6eb86aca804b15a"},{"id":"e7574b841812abff43b3c83e6a704d5e"}]}"#,
+            )
+        } else if path.starts_with("/v1/grade") {
+            (400, r#"{"error":"no current atom nope"}"#)
+        } else if path.starts_with("/v1/fire") {
+            (200, r#"{"fired":2,"changed":2}"#)
+        } else {
+            (404, "no")
+        }
+    });
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args(["islands", "demo"]));
+    assert!(ok, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("nothing to show in demo; the workspace has nothing yet"),
+        "{stderr}"
+    );
+    let (ok, stdout, stderr) =
+        output(packset(home.path(), port).args(["citers", "deed-file-note", "demo"]));
+    assert!(ok, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("the workspace has nothing yet"), "{stderr}");
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args([
+        "atoms",
+        "--as-of",
+        "2020-01-01T00:00:00Z",
+        "demo",
+    ]));
+    assert!(ok, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("packset: workspace demo"), "{stderr}");
+    assert!(
+        stderr.contains("nothing was live at 2020-01-01T00:00:00Z"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = output(packset(home.path(), port).args(["grade", "nope", "demo"]));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("no current atom nope"), "{stderr}");
+    assert!(!stderr.contains("bad response"), "{stderr}");
+    assert!(!stderr.contains("400"), "{stderr}");
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args([
+        "fire",
+        "--workspace",
+        "demo",
+        "1bd8ee9e...",
+        "e7574b84...",
+    ]));
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.trim(), "2 fired, 2 changed");
+    let (ok, stdout, stderr) = output(packset(home.path(), port).args([
+        "fire",
+        "--workspace",
+        "demo",
+        "ffff...",
+        "0000...",
+    ]));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("ffff... matches no claim"), "{stderr}");
+    assert!(!stdout.contains("fired"), "{stdout}");
+}
+
+#[test]
 fn status_keeps_the_up_line_off_the_json_object() {
     let home = tempfile::tempdir().unwrap();
     let port = common::free_port();

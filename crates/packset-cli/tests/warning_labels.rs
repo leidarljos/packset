@@ -94,6 +94,21 @@ fn stderr_of(out: &Output) -> String {
 }
 
 /// The one stdout line, without its trailing newline.
+fn split_fields(line: &str, n: usize) -> Vec<&str> {
+    let mut out = Vec::with_capacity(n);
+    let mut rest = line;
+    for _ in 1..n {
+        let Some((head, tail)) = rest.split_once("  ") else {
+            out.push(rest);
+            return out;
+        };
+        out.push(head);
+        rest = tail;
+    }
+    out.push(rest);
+    out
+}
+
 fn one_line(stdout: &str) -> &str {
     assert!(stdout.ends_with('\n'), "stdout {stdout:?}");
     assert_eq!(stdout.matches('\n').count(), 1, "stdout {stdout:?}");
@@ -121,7 +136,7 @@ fn a_credential_shaped_remember_warns_and_search_shows_the_label() {
     assert!(wrote.status.success(), "{}", stderr_of(&wrote));
     let stdout = stdout_of(&wrote);
     let line = one_line(&stdout);
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields = split_fields(line, 3);
     assert_eq!(fields.len(), 3, "{line}");
     assert!(!fields[0].is_empty() && fields[0] != "-", "{line}");
     assert_eq!(fields[1], "lesson");
@@ -140,7 +155,7 @@ fn a_credential_shaped_remember_warns_and_search_shows_the_label() {
     assert_eq!(stderr_of(&found), "packset: workspace flagged\n");
     let found_stdout = stdout_of(&found);
     let hit = one_line(&found_stdout);
-    let cols: Vec<&str> = hit.split('\t').collect();
+    let cols = split_fields(hit, 5);
     assert_eq!(cols.len(), 5, "{hit}");
     assert!(is_score(cols[0]), "{hit}");
     assert_eq!(cols[1], "lesson");
@@ -156,7 +171,7 @@ fn a_credential_shaped_prefer_prints_the_same_warning() {
     assert!(wrote.status.success(), "{}", stderr_of(&wrote));
     let wrote_stdout = stdout_of(&wrote);
     let line = one_line(&wrote_stdout);
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields = split_fields(line, 3);
     assert_eq!(fields.len(), 3, "{line}");
     assert_eq!(fields[1], "preference");
     assert!(fields[2].starts_with("due "), "{line}");
@@ -172,7 +187,7 @@ fn a_plain_remember_and_search_keep_the_unlabelled_lines() {
     assert_eq!(stderr_of(&wrote), "");
     let wrote_stdout = stdout_of(&wrote);
     let line = one_line(&wrote_stdout);
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields = split_fields(line, 3);
     assert_eq!(fields.len(), 3, "{line}");
     assert_eq!(fields[1], "lesson");
     assert!(
@@ -188,7 +203,7 @@ fn a_plain_remember_and_search_keep_the_unlabelled_lines() {
     assert_eq!(stderr_of(&found), "packset: workspace plain\n");
     let found_stdout = stdout_of(&found);
     let hit = one_line(&found_stdout);
-    let cols: Vec<&str> = hit.split('\t').collect();
+    let cols = split_fields(hit, 4);
     assert_eq!(cols.len(), 4, "{hit}");
     assert!(is_score(cols[0]), "{hit}");
     assert_eq!(cols[1], "lesson");

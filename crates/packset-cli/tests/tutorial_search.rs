@@ -116,13 +116,29 @@ fn is_score(field: &str) -> bool {
         && frac.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The first `n - 1` fields split on two spaces; the last field keeps the rest.
+fn split_fields(line: &str, n: usize) -> Vec<&str> {
+    let mut out = Vec::with_capacity(n);
+    let mut rest = line;
+    for _ in 1..n {
+        let Some((head, tail)) = rest.split_once("  ") else {
+            out.push(rest);
+            return out;
+        };
+        out.push(head);
+        rest = tail;
+    }
+    out.push(rest);
+    out
+}
+
 /// Score, kind, text. The id in the third column is this run's.
 fn printed(stdout: &str) -> Vec<(String, String, String)> {
     stdout
         .lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
-            let cols: Vec<&str> = line.split('\t').collect();
+            let cols = split_fields(line, 4);
             assert_eq!(cols.len(), 4, "{line}");
             assert!(is_score(cols[0]), "{line}");
             assert_eq!(cols[2].len(), 32, "{line}");

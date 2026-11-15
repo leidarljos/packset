@@ -113,7 +113,7 @@ fn retract_drops_the_claim_from_search_and_keeps_it_as_of_before() {
     let remembered = packset(&writer, &["remember", CLAIM]);
     assert!(remembered.status.success(), "{}", text(&remembered));
     let id = stdout(&remembered)
-        .split('\t')
+        .split("  ")
         .next()
         .unwrap_or("")
         .trim()
@@ -148,7 +148,7 @@ fn retract_drops_the_claim_from_search_and_keeps_it_as_of_before() {
     assert!(retracted.status.success(), "{}", text(&retracted));
     assert_eq!(
         stdout(&retracted).trim(),
-        format!("{id}\tretracted\tdeed-test-x")
+        format!("{id}  retracted  deed-test-x")
     );
 
     let after = packset(&writer, &["search", "night", "crane"]);
