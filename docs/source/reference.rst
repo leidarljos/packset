@@ -65,7 +65,7 @@ The writer listens on ``127.0.0.1`` only. Bodies are JSON.
 +---------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Request                                                                         | Does                                                                                                                                                                                                                                                                                                                      |
 +=================================================================================+===========================================================================================================================================================================================================================================================================================================================+
-| ``GET /health``                                                                 | ``packsetd ok``, or ``packsetd ok, busy`` when work is waiting. No token                                                                                                                                                                                                                                                  |
+| ``GET /health``                                                                 | ``packsetd ok`` when the encoder has answered, gave up, or is absent. ``packsetd ok, busy`` when work is waiting and nothing is loading. ``packsetd warming`` while the encoder or the search index loads, with ``loading`` and ``eta_s`` when a previous load timed it. No token                                         |
 +---------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``GET /stats``                                                                  | queue depth, shed counts and the current limits. ``line`` is ``ok``, or ``busy, retrying`` when work is waiting. No token                                                                                                                                                                                                 |
 +---------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -119,6 +119,28 @@ The writer listens on ``127.0.0.1`` only. Bodies are JSON.
 +---------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``GET/POST /v1/proposals``, ``POST /v1/proposals/accept``, ``POST /v1/compact`` | proposals a person accepts into claims                                                                                                                                                                                                                                                                                    |
 +---------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+``packsetd`` starts the query encoder when the listener is bound, on its
+own thread, so ``GET /health`` does not wait for the model. While that
+load runs, ``GET /health`` says ``packsetd warming`` and names ``embedder``.
+A missing search index is built on its own thread the same way, and
+``loading`` names ``index`` while that build runs. ``eta_s`` is the seconds a
+previous encoder load still suggests, and it is left out until a load
+has been timed. The first search is ranked by words until the encoder
+answers, and the answer carries ``warming`` while either load is running.
+``packsetd ok`` means the encoder has answered, it gave up, or this seat
+has no encoder. When work is waiting and nothing is loading, the line
+is ``packsetd ok, busy``. ``embedder.remaining_ms``
+is the milliseconds the writer still expects the load to take. The budget
+is the last cold start that answered: the time from spawning
+``packset-embed`` to its first vector, written as one integer to ``load-ms``
+in the embed cache (``PACKSET_EMBED_CACHE``, else
+``$XDG_CACHE_HOME/packset/embed``, else ``~/.cache/packset/embed``). The
+estimate is that budget minus the time already spent, and zero when the
+budget is spent and the load is still running. Until a cold start has
+been recorded, the budget is one second. That one second is a ceiling,
+not a measurement of this seat. A missing binary starts nothing. A binary
+that does not answer is logged once, and search stays lexical.
 
 A refusal is a 4xx with ``error`` as one line: the reason a claim was not
 stored, quoted back.

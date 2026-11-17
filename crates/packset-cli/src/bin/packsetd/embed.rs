@@ -651,6 +651,12 @@ pub fn last_dense() -> Option<bool> {
     }
 }
 
+/// The model has answered, so a search may ask it for a dense ballot.
+#[must_use]
+pub fn model_ready() -> bool {
+    last_dense() == Some(true)
+}
+
 fn encode_now(texts: &[String], query: bool) -> Option<Vec<Vec<f32>>> {
     let binary = binary()?;
     touch_embed();
@@ -914,6 +920,25 @@ pub fn remaining_ms() -> Option<u64> {
     Some(estimate_remaining(load_budget_ms(), elapsed))
 }
 
+/// The encoder is loading and has not answered or given up.
+#[must_use]
+pub fn embedder_loading() -> bool {
+    remaining_ms().is_some()
+}
+
+/// Seconds left on the encoder load, from a previous load's duration.
+///
+/// `None` when no load is running, and when the only budget is the
+/// unmeasured one second ceiling. A previous load records its milliseconds
+/// in `load-ms` under the embed cache.
+#[must_use]
+pub fn embedder_eta_s() -> Option<u64> {
+    if !embedder_loading() || read_load_file().is_none() {
+        return None;
+    }
+    Some(remaining_ms()?.div_ceil(1000))
+}
+
 /// Start the query encoder now that the listener is bound.
 ///
 /// Returns at once. The model load runs on `packset-embed-start`, so the
@@ -928,24 +953,40 @@ pub fn warm_at_listen() {
     warm_in_background();
 }
 
+fn start_thread() -> &'static Mutex<Option<std::thread::JoinHandle<()>>> {
+    static HELD: OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(None))
+}
+
 /// Start the encoder off the request that asked. One start at a time.
 /// A failure stays recorded, so the next search does not spawn again.
 fn warm_in_background() {
     if STARTING.swap(true, Ordering::AcqRel) {
         return;
     }
+    if binary().is_none() {
+        STARTING.store(false, Ordering::Release);
+        return;
+    }
+    // Stamp the load before the thread is scheduled, so the search that
+    // started it, and `/health`, already see it.
+    mark_loading();
+    let mut slot = start_thread().lock().unwrap_or_else(|err| err.into_inner());
+    // The previous start has finished: `STARTING` was clear. Dropping the
+    // handle detaches that finished thread.
+    drop(slot.take());
     let spawned = std::thread::Builder::new()
         .name("packset-embed-start".into())
         .spawn(|| {
             let _done = StopWarm;
-            if binary().is_none() {
-                return;
-            }
-            mark_loading();
             let _ = encode_now(std::slice::from_ref(&".".to_string()), true);
         });
-    if spawned.is_err() {
-        STARTING.store(false, Ordering::Release);
+    match spawned {
+        Ok(handle) => *slot = Some(handle),
+        Err(_) => {
+            LOAD_STARTED_MS.store(0, Ordering::Release);
+            STARTING.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -1283,6 +1324,13 @@ pub fn rerank(question: &str, candidates: &[String]) -> Option<Vec<f32>> {
 
 #[cfg(test)]
 pub fn reset_for_test() {
+    if let Some(handle) = start_thread()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        let _ = handle.join();
+    }
     LAST_DENSE.store(0, Ordering::Relaxed);
     LOAD_STARTED_MS.store(0, Ordering::Relaxed);
     LOAD_BUDGET_MS.store(0, Ordering::Relaxed);

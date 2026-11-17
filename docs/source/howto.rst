@@ -207,6 +207,16 @@ still opens: doctor reads that status, and recall, island and search run
 on the lexical ballots. The up line is on stderr. The pipe reads the
 JSON object.
 
+With a binary, ``packsetd`` starts it when the listener is bound. ``/health``
+answers at once with ``packsetd warming`` and names ``embedder`` while that
+load runs. Until the encoder answers, search is ranked by words and
+``embedder.remaining_ms`` estimates how long is left, from the last cold
+start in ``load-ms`` (see the reference) or one second when that file is
+not there yet. ``eta_s`` on ``/health`` is that estimate in seconds, and it
+is left out until a load has been timed. The field is absent once the
+encoder is answering or unavailable. A binary that does not answer is
+logged once.
+
 .. code:: console
 
    $ packset stop && packset ensure

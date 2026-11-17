@@ -132,7 +132,9 @@ for line in sys.stdin:
         .unwrap()
         .into_string()
         .unwrap();
-    assert_eq!(health, "packsetd ok");
+    assert!(health.starts_with("packsetd warming\n"), "{health}");
+    assert!(health.contains("loading: embedder"), "{health}");
+    assert!(health.contains("eta_s: "), "{health}");
     assert!(
         health_ms < Duration::from_millis(1500),
         "health waited on the encoder: {health_ms:?}"
@@ -167,6 +169,12 @@ for line in sys.stdin:
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    let ready = ureq::get(&format!("{}/health", writer.url))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    assert_eq!(ready, "packsetd ok");
     let ms = saw.expect("status never showed a load in progress");
     assert!(
         ms > 1_000,

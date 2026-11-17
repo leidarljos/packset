@@ -2799,15 +2799,31 @@ impl Service {
         // attempt. A down or busy encoder is not waited on: this request
         // is ranked by words, and a child that is not already up is started
         // aside rather than in the request.
-        let projection_may_count =
+        //
+        // A missing projection is built on its own thread. This search
+        // answers from the word and BM25 ballots while that build runs,
+        // and reads the projection once it is on disk.
+        let want_projection =
             as_of.is_none() && (crate::milli::named() || crate::embed::binary().is_some());
+        if want_projection {
+            crate::milli::begin_index_warm(
+                &dir,
+                workspace,
+                &user,
+                &memory,
+                std::sync::Arc::clone(&atoms),
+            );
+        }
+        let projection_may_count =
+            want_projection && !crate::milli::index_warming() && crate::milli::index_ready(&dir);
         let (ranked_meaning, projected_early) = std::thread::scope(|scope_| {
             let projecting = projection_may_count.then(|| {
                 scope_.spawn(|| crate::milli::search(corpus, query, first_limit, &dir, scope, kind))
             });
             // The dense ballot is the encoder's, when one is already up
             // and free. `INSIDE_EMBED=off` and `--no-embed` leave it out.
-            // A miss leaves the two word rankings.
+            // A miss leaves the two word rankings. A cold encoder is
+            // started aside, so this request does not wait out the load.
             let meaning = if crate::embed::enabled() {
                 crate::embed::try_encode_query(query)
                     .map(|vector| {
@@ -2908,13 +2924,24 @@ impl Service {
         }
         // Due is the clock (`/v1/due`, `ljos due`). Mixing it into search
         // put 212 due personas at score 3.1 on every query.
-        Ok(json!({
+        let mut body = json!({
             "hits": ranked,
             "engine": engine,
             "as_of": as_of,
             "rerank": stage,
             "rank": rank.as_str(),
-        }))
+        });
+        let mut warming = Vec::new();
+        if crate::embed::embedder_loading() {
+            warming.push("embedder");
+        }
+        if crate::milli::index_warming() {
+            warming.push("index");
+        }
+        if !warming.is_empty() {
+            body["warming"] = json!(warming);
+        }
+        Ok(body)
     }
 
     /// Mine one archived day into proposals.

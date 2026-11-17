@@ -270,12 +270,7 @@ pub fn serve(
         if request.method == Method::Get {
             let path = request.target.split('?').next().unwrap_or(&request.target);
             if path == "/health" {
-                let text = if gate.busy() {
-                    "packsetd ok, busy"
-                } else {
-                    "packsetd ok"
-                };
-                return wire::Response::text(200, text);
+                return wire::Response::text(200, &health_text(gate.busy()));
             }
             if path == "/stats" || path == "/metrics" {
                 let mut body = gate.snapshot().json();
@@ -314,7 +309,7 @@ fn handle(
 ) -> wire::Response {
     let (path, query) = split_query(&request.target);
     if request.method == Method::Get && path == "/health" {
-        return wire::Response::text(200, "packsetd ok");
+        return wire::Response::text(200, &health_text(false));
     }
     if let Some(refusal) = refuse_unauthorized(token, request) {
         return refusal;
@@ -329,6 +324,40 @@ fn handle(
     };
     let answer = route(service, panel, &request.method, path, &query, &body);
     encode(answer)
+}
+
+/// What `GET /health` returns.
+///
+/// `packsetd ok` is the ready line: the encoder has answered, it gave up,
+/// or this seat has no encoder. `packsetd warming` names what is still
+/// loading. `eta_s` is present when a previous encoder load timed it.
+/// `busy` is the line for work that is waiting when nothing is loading,
+/// and it rides on the warming line when both are true.
+fn health_text(busy: bool) -> String {
+    let mut loading = Vec::new();
+    if crate::embed::embedder_loading() {
+        loading.push("embedder");
+    }
+    if crate::milli::index_warming() {
+        loading.push("index");
+    }
+    if loading.is_empty() {
+        return if busy {
+            "packsetd ok, busy".to_string()
+        } else {
+            "packsetd ok".to_string()
+        };
+    }
+    let mut body = if busy {
+        "packsetd warming, busy\n".to_string()
+    } else {
+        "packsetd warming\n".to_string()
+    };
+    body.push_str(&format!("loading: {}\n", loading.join(" ")));
+    if let Some(eta) = crate::embed::embedder_eta_s() {
+        body.push_str(&format!("eta_s: {eta}\n"));
+    }
+    body
 }
 
 /// A 401 for a request without the writer's token; `None` lets it through.
@@ -1287,7 +1316,14 @@ mod tests {
             .unwrap()
             .into_string()
             .unwrap();
-        assert_eq!(health, "packsetd ok");
+        // This process is shared with the search tests, which load an
+        // encoder or an index on their own threads. A quiet writer says
+        // `packsetd ok`. A load those tests started says `packsetd warming`.
+        if crate::embed::embedder_loading() || crate::milli::index_warming() {
+            assert!(health.starts_with("packsetd warming\n"), "{health}");
+        } else {
+            assert_eq!(health, "packsetd ok");
+        }
         let stats: serde_json::Value = ureq::get(&format!("http://{LOOPBACK}:{port}/stats"))
             .call()
             .unwrap()
@@ -2740,6 +2776,326 @@ for line in sys.stdin:
             "{:?} vs {:?}",
             on.body,
             off.body
+        );
+    }
+
+    /// A cold encoder and a missing projection load off the request.
+    /// The first search answers from the word and BM25 ballots, and
+    /// `/health` names what is still loading.
+    #[test]
+    fn a_search_answers_while_the_encoder_and_the_index_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        let cache = dir.path().join("embed-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("load-ms"), "5000\n").unwrap();
+        svc.add(
+            json!({
+                "workspace": "w",
+                "text": "packsetd restart warm up starting busy",
+                "kind": "voice",
+                "embedding": [1.0, 0.0],
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::embed::reset_for_test();
+        crate::milli::reset_index_warm_for_test();
+        let embed = write_embed_stub(
+            r#"#!/usr/bin/env python3
+import json, sys, time
+time.sleep(0.6)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    print(json.dumps({"id": "0", "v": [1.0, 0.0]}), flush=True)
+"#,
+        );
+        let old_embed = std::env::var_os("PACKSET_EMBED");
+        let old_cache = std::env::var_os("PACKSET_EMBED_CACHE");
+        let old_inside = std::env::var_os("INSIDE_EMBED");
+        // SAFETY: EMBED is held, so no other test reads these variables.
+        unsafe {
+            std::env::set_var("PACKSET_EMBED", &embed.1);
+            std::env::set_var("PACKSET_EMBED_CACHE", &cache);
+            std::env::set_var("INSIDE_EMBED", "on");
+        }
+        let started = std::time::Instant::now();
+        let mut q = HashMap::new();
+        q.insert("workspace".into(), "w".into());
+        q.insert("q".into(), "packsetd restart warm up starting busy".into());
+        let first = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        let waited = started.elapsed();
+        let later = health_text(false);
+        // The slow child is still loading. Join it before the fast stub,
+        // so the next search is the one that has a vector.
+        crate::embed::reset_for_test();
+        crate::embed::set_dense_for_test(None);
+        let fast = write_embed_stub(
+            r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    print(json.dumps({"v": [1.0, 0.0]}), flush=True)
+"#,
+        );
+        unsafe { std::env::set_var("PACKSET_EMBED", &fast.1) };
+        let mut primed = None;
+        let mut second = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        // Other tests share this process's encoder. A down flag makes the
+        // next search skip the dense ballot, so keep priming until one
+        // search records it.
+        for _ in 0..20 {
+            if second.body["hits"]
+                .get(0)
+                .and_then(|hit| hit.get("dense_rank"))
+                .is_some()
+            {
+                break;
+            }
+            crate::embed::set_dense_for_test(None);
+            primed = crate::embed::encode_query("packsetd restart warm up starting busy");
+            if primed.is_some() {
+                crate::embed::set_dense_for_test(Some(true));
+            }
+            second = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        }
+        let ready = health_text(false);
+        unsafe {
+            match old_embed {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+            match old_cache {
+                Some(value) => std::env::set_var("PACKSET_EMBED_CACHE", value),
+                None => std::env::remove_var("PACKSET_EMBED_CACHE"),
+            }
+            match old_inside {
+                Some(value) => std::env::set_var("INSIDE_EMBED", value),
+                None => std::env::remove_var("INSIDE_EMBED"),
+            }
+        }
+        crate::embed::reset_for_test();
+        crate::milli::reset_index_warm_for_test();
+        drop(_guard);
+        assert!(
+            waited < std::time::Duration::from_millis(400),
+            "search waited {waited:?} for the load"
+        );
+        assert_eq!(first.code, 200, "{:?}", first.body);
+        assert_eq!(
+            first.body["warming"],
+            json!(["embedder"]),
+            "{:?}",
+            first.body
+        );
+        assert!(
+            first.body["hits"][0].get("dense_rank").is_none(),
+            "{:?}",
+            first.body
+        );
+        assert_eq!(
+            first.body["hits"][0]["text"],
+            "packsetd restart warm up starting busy"
+        );
+        assert!(later.starts_with("packsetd warming\n"), "{later}");
+        assert!(later.contains("loading: "), "{later}");
+        assert!(later.contains("embedder"), "{later}");
+        assert!(later.contains("eta_s: "), "{later}");
+        assert!(primed.is_some(), "the encoder did not answer");
+        assert_eq!(second.code, 200, "{:?}", second.body);
+        assert!(
+            second.body["hits"][0].get("dense_rank").is_some(),
+            "{:?}",
+            second.body
+        );
+        // An index build started by another test in this process is
+        // still named. The encoder has answered, so it is not.
+        if let Some(warming) = second.body.get("warming") {
+            let names = warming.as_array().unwrap();
+            assert!(names.iter().all(|name| name == "index"), "{names:?}");
+        }
+        if crate::milli::index_warming() {
+            assert!(ready.starts_with("packsetd warming\n"), "{ready}");
+            assert!(ready.contains("index"), "{ready}");
+            assert!(!ready.contains("embedder"), "{ready}");
+        } else {
+            assert_eq!(ready, "packsetd ok");
+        }
+    }
+
+    /// A missing projection is built off the request. The search answers
+    /// from BM25 while that build runs.
+    #[test]
+    fn a_search_answers_while_the_index_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        svc.add(
+            json!({
+                "workspace": "w",
+                "text": "packsetd restart warm up starting busy",
+                "kind": "voice",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        svc.flush_projection();
+        // A binary already on PATH may have written the projection during
+        // the flush. The search under test is the one that finds it missing.
+        let _ = std::fs::remove_dir_all(svc.home().milli_dir());
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::embed::reset_for_test();
+        crate::milli::reset_index_warm_for_test();
+        let index = write_embed_stub(
+            r#"#!/usr/bin/env python3
+import sys, time
+time.sleep(0.6)
+sys.stdin.read()
+print('{"hits":[]}', flush=True)
+"#,
+        );
+        let old_milli = std::env::var_os("PACKSET_MILLI");
+        let old_inside = std::env::var_os("INSIDE_EMBED");
+        // SAFETY: EMBED is held, so no other test reads these variables.
+        unsafe {
+            std::env::set_var("PACKSET_MILLI", &index.1);
+            std::env::set_var("INSIDE_EMBED", "off");
+        }
+        let started = std::time::Instant::now();
+        let mut q = HashMap::new();
+        q.insert("workspace".into(), "w".into());
+        q.insert("q".into(), "packsetd restart".into());
+        let first = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        let waited = started.elapsed();
+        let health = health_text(false);
+        unsafe {
+            match old_milli {
+                Some(value) => std::env::set_var("PACKSET_MILLI", value),
+                None => std::env::remove_var("PACKSET_MILLI"),
+            }
+            match old_inside {
+                Some(value) => std::env::set_var("INSIDE_EMBED", value),
+                None => std::env::remove_var("INSIDE_EMBED"),
+            }
+        }
+        crate::milli::reset_index_warm_for_test();
+        drop(_guard);
+        assert!(
+            waited < std::time::Duration::from_millis(400),
+            "search waited {waited:?} for the index"
+        );
+        assert_eq!(first.code, 200, "{:?}", first.body);
+        assert_eq!(first.body["warming"], json!(["index"]), "{:?}", first.body);
+        assert!(health.contains("index"), "{health}");
+        assert!(
+            !first.body["hits"].as_array().unwrap().is_empty(),
+            "{:?}",
+            first.body
+        );
+    }
+
+    /// While the encoder is still loading, fused order is the word and
+    /// BM25 ballots. The record that spells the query word as asked leads
+    /// the other form of that word. `a-stem` would lead a tie, so this is
+    /// the weight.
+    #[test]
+    fn an_exact_spelling_leads_fused_order_while_the_encoder_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::open(crate::home::Home::new(dir.path())).unwrap();
+        for (id, text) in [
+            ("a-stem", "ridge narrated video"),
+            ("z-exact", "ridge narration video"),
+            ("m-none", "pottery wheel glaze"),
+        ] {
+            svc.add(
+                json!({
+                    "workspace": "w",
+                    "id": id,
+                    "text": text,
+                    "kind": "lesson",
+                    "trust": 1.0,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .unwrap();
+        }
+        let panel = packset_core::Panel::default();
+        let _guard = crate::embed::EMBED
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        crate::embed::reset_for_test();
+        crate::milli::reset_index_warm_for_test();
+        let embed = write_embed_stub(
+            r#"#!/usr/bin/env python3
+import sys, time
+time.sleep(0.6)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    print('{"v": [1.0, 0.0]}', flush=True)
+"#,
+        );
+        let cache = dir.path().join("embed-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let old_embed = std::env::var_os("PACKSET_EMBED");
+        let old_cache = std::env::var_os("PACKSET_EMBED_CACHE");
+        unsafe {
+            std::env::set_var("PACKSET_EMBED", &embed.1);
+            std::env::set_var("PACKSET_EMBED_CACHE", &cache);
+        }
+        let started = std::time::Instant::now();
+        let mut q = HashMap::new();
+        q.insert("workspace".into(), "w".into());
+        q.insert("q".into(), "narration".into());
+        let first = route(&svc, &panel, &Method::Get, "/v1/search", &q, &Map::new());
+        let waited = started.elapsed();
+        unsafe {
+            match old_embed {
+                Some(value) => std::env::set_var("PACKSET_EMBED", value),
+                None => std::env::remove_var("PACKSET_EMBED"),
+            }
+            match old_cache {
+                Some(value) => std::env::set_var("PACKSET_EMBED_CACHE", value),
+                None => std::env::remove_var("PACKSET_EMBED_CACHE"),
+            }
+        }
+        crate::embed::reset_for_test();
+        crate::milli::reset_index_warm_for_test();
+        drop(_guard);
+        assert!(
+            waited < std::time::Duration::from_millis(400),
+            "search waited {waited:?} for the load"
+        );
+        assert_eq!(first.code, 200, "{:?}", first.body);
+        let hits = first.body["hits"].as_array().unwrap();
+        let ids: Vec<&str> = hits.iter().filter_map(|hit| hit["id"].as_str()).collect();
+        assert_eq!(ids.first().copied(), Some("z-exact"), "{ids:?}");
+        assert!(ids.contains(&"a-stem"), "{ids:?}");
+        assert!(!ids.contains(&"m-none"), "{ids:?}");
+        assert!(hits[0].get("dense_rank").is_none(), "{:?}", hits[0]);
+        assert_eq!(first.body["rank"], json!("fused"), "{:?}", first.body);
+        let warming = first.body["warming"].as_array().unwrap();
+        assert!(
+            warming.iter().any(|name| name == "embedder"),
+            "{:?}",
+            first.body
         );
     }
 

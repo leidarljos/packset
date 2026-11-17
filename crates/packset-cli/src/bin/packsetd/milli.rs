@@ -514,6 +514,97 @@ pub fn index_ready(dir: &Path) -> bool {
     dir.join("data.mdb").exists()
 }
 
+/// 0 idle, 1 building, 2 the build has returned.
+static INDEX_WARM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn index_thread() -> &'static std::sync::Mutex<Option<std::thread::JoinHandle<()>>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// The projection is being built off the request that asked for it.
+#[must_use]
+pub fn index_warming() -> bool {
+    INDEX_WARM.load(std::sync::atomic::Ordering::Relaxed) == 1
+}
+
+/// Wait for a background build started in this process, then clear it.
+/// Tests call this so the next one starts from idle.
+#[cfg(test)]
+pub fn reset_index_warm_for_test() {
+    if let Some(handle) = index_thread()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        let _ = handle.join();
+    }
+    INDEX_WARM.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Clears a build that ended, including one that panicked, so a later
+/// search can try again when the projection is still missing.
+struct FinishIndex;
+
+impl Drop for FinishIndex {
+    fn drop(&mut self) {
+        INDEX_WARM.store(2, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Build `dir` from `atoms` on a background thread when the projection is
+/// missing. A search answers from BM25 while that build runs. A second call
+/// while one is running does nothing, and a projection already on disk is
+/// left where it is. A build that finished without leaving a projection
+/// can run again on a later search.
+pub fn begin_index_warm(
+    dir: &Path,
+    workspace: &str,
+    user: &str,
+    memory: &str,
+    atoms: std::sync::Arc<Vec<std::sync::Arc<Record>>>,
+) {
+    if binary().is_none() || index_ready(dir) {
+        return;
+    }
+    let phase = INDEX_WARM.load(std::sync::atomic::Ordering::Relaxed);
+    if phase == 1
+        || INDEX_WARM
+            .compare_exchange(
+                phase,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+    {
+        return;
+    }
+    let mut slot = index_thread().lock().unwrap_or_else(|err| err.into_inner());
+    drop(slot.take());
+    let dir = dir.to_path_buf();
+    let workspace = workspace.to_string();
+    let user = user.to_string();
+    let memory = memory.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("packset-index-warm".into())
+        .spawn(move || {
+            let _done = FinishIndex;
+            let corpus = Corpus {
+                workspace: &workspace,
+                user: &user,
+                memory: &memory,
+                atoms: atoms.as_slice(),
+            };
+            let _ = replace(corpus, &dir);
+        });
+    match spawned {
+        Ok(handle) => *slot = Some(handle),
+        Err(_) => INDEX_WARM.store(0, std::sync::atomic::Ordering::Release),
+    }
+}
+
 /// Keep the atom hits the pack still says are live and in scope.
 ///
 /// The pack decides membership, not the index: a stale projection that
