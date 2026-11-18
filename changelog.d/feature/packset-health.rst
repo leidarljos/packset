@@ -1,0 +1,1 @@
+``packset health`` prints the writer ``GET /health`` answer, the same probe ``packset status`` uses in its up line.

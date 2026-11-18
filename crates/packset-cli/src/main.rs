@@ -150,6 +150,7 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
         "stop" => stop(port),
+        "health" => health(port),
         "status" => status(port, args.switch("--all"), args.first()),
         "port" => {
             println!("{port}");
@@ -222,7 +223,7 @@ fn spec(verb: &str) -> Option<Spec> {
             switches: &["--owned"],
             ..NOTHING
         },
-        "stop" | "port" | "url" | "which" | "migrate-home" => NOTHING,
+        "stop" | "health" | "port" | "url" | "which" | "migrate-home" => NOTHING,
         "status" => Spec {
             switches: &["--all"],
             ..ONE_WORKSPACE
@@ -445,6 +446,7 @@ fn usage() -> String {
          retract ID [--workspace WS] [--why ACCESSION]  withdraw one claim; the deed that showed it wrong, or none\n\
          start [--owned]        the writer alone. With --owned this process stays, and the writer exits when it does\n\
          stop                   stop the writer\n\
+         health                 print GET /health for the writer URL\n\
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
          migrate-home           move ~/.ljos/memory to $XDG_DATA_HOME/packset; the writer must be stopped\n\
@@ -1100,6 +1102,38 @@ fn embed_switched_off(raw: &str) -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "0" | "off" | "none" | "false" | "no"
     )
+}
+
+fn unknown_command_hint(verb: &str) -> Option<&'static str> {
+    match verb {
+        "health" => Some("use packset health, or packset status for counts"),
+        "doctor" => Some("ljos doctor checks the seat; packset status checks the writer"),
+        "consolidate" => Some("consolidate is POST /v1/consolidate on the writer"),
+        _ => None,
+    }
+}
+
+/// `GET /health` for the writer this client dials.
+fn health(port: u16) -> anyhow::Result<()> {
+    let client = client()?;
+    if client.base() == format!("http://127.0.0.1:{port}") {
+        if !procfs::listening(port) {
+            anyhow::bail!("{}", writer_down(port));
+        }
+        if !is_ours(port) {
+            anyhow::bail!("{}", held_by(port));
+        }
+    }
+    let body = client.health()?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "writer at {} did not answer /health; check PACKSET_URL, or packset ensure when it is the local writer",
+            client.base()
+        );
+    }
+    println!("{trimmed}");
+    Ok(())
 }
 
 fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
