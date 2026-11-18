@@ -1,0 +1,1 @@
+``packset grade`` with a workspace name in the id slot, or with id and workspace reversed, prints how the arguments are ordered before calling the writer.

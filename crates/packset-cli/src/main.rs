@@ -1627,12 +1627,36 @@ fn island_empty_line(workspace: &str, cue: &str, body: &serde_json::Value) -> St
     format!("packset: nothing to show in {workspace}; {why}")
 }
 
+/// True when `raw` looks like an atom id: 32 hex digits or a unique hex prefix.
+fn looks_like_atom_id(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = raw.strip_suffix("...") {
+        return !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    raw.len() == 32 && raw.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Grade one review: recalled unless `--lapsed`.
 fn grade(args: &Args) -> anyhow::Result<()> {
     let lapsed = args.switch("--lapsed");
     let id = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("grade needs an atom id"))?;
+    if let Some(second) = args.second() {
+        if !looks_like_atom_id(id) && looks_like_atom_id(second) {
+            anyhow::bail!(
+                "grade takes an atom id first, then an optional workspace; try packset grade {second} {id}"
+            );
+        }
+    }
+    if !looks_like_atom_id(id) && (id == "demo" || id.contains(':') || id.starts_with("dir:")) {
+        anyhow::bail!(
+            "grade takes an atom id first; {id} is a workspace name. List ids with packset search --workspace {id} QUERY"
+        );
+    }
     let workspace = workspace(args.second())?;
     let graded = client()?.grade(&workspace, id, !lapsed)?;
     println!("{}", graded["due_at"].as_str().unwrap_or("graded"));
