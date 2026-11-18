@@ -882,3 +882,26 @@ fn status_keeps_the_up_line_off_the_json_object() {
     assert!(body.get("live_by_kind").is_some(), "{body}");
     assert!(body.get("embedder").is_some(), "{body}");
 }
+
+#[test]
+fn health_prints_the_writer_answer() {
+    let home = tempfile::tempdir().unwrap();
+    let (port, ok, stdout, stderr) = common::with_port(|port| {
+        let (ok, _, stderr) = output(packset(home.path(), port).arg("ensure"));
+        assert!(ok, "{stderr}");
+        let (ok, stdout, stderr) = output(packset(home.path(), port).arg("health"));
+        (port, ok, stdout, stderr)
+    });
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.trim(), "packsetd ok", "{stdout}");
+    let _ = output(packset(home.path(), port).arg("stop"));
+}
+
+#[test]
+fn an_unknown_verb_names_a_fix_for_consolidate() {
+    let home = tempfile::tempdir().unwrap();
+    let (ok, _, stderr) = output(packset(home.path(), 8790).arg("consolidate"));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("unknown command: consolidate"), "{stderr}");
+    assert!(stderr.contains("POST /v1/consolidate"), "{stderr}");
+}

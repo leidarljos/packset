@@ -1,0 +1,1 @@
+An unknown command of ``consolidate``, ``doctor``, or ``health`` prints one line on what to run instead.

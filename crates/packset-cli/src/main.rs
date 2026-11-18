@@ -87,7 +87,10 @@ fn run() -> anyhow::Result<()> {
         _ => {}
     }
     let Some(takes) = spec(verb) else {
-        anyhow::bail!("unknown command: {verb}\n\n{}", usage());
+        let hint = unknown_command_hint(verb)
+            .map(|line| format!("\npackset: {line}"))
+            .unwrap_or_default();
+        anyhow::bail!("unknown command: {verb}{hint}\n\n{}", usage());
     };
     // Every verb's arguments go through one parser before anything runs, so
     // `packset forget --help` prints help rather than forgetting a workspace
