@@ -3640,6 +3640,73 @@ mod tests {
         );
     }
 
+    /// Startup visits the mapped database in bounded steps. The cursor
+    /// returned by each visit proves that no visit reads the complete pack
+    /// into one buffer.
+    #[test]
+    fn startup_reads_the_mapped_pack_in_bounded_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = 40;
+        let text = "x".repeat(64 * 1024);
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .write(|wtxn| {
+                    for n in 0..records {
+                        let row = json!({
+                            "id": format!("a{n:02}"),
+                            "workspace": "w",
+                            "text": text,
+                            "ts": "2026-10-18T19:31:19.444Z"
+                        });
+                        let key = atom_key("w", row["id"].as_str().unwrap());
+                        store.db.put(wtxn, &key, &serde_json::to_vec(&row)?)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let store = Store::open(dir.path()).unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            pack_is_shared_map(&dir.path().join("memory.lmdb").join("data.mdb")),
+            1,
+            "the pack is not a shared map"
+        );
+
+        let mut after = None;
+        let mut visits = Vec::new();
+        loop {
+            let mut count = 0;
+            let mut bytes = 0;
+            let next = store
+                .each_unstamped(after.as_deref(), |_, len| {
+                    count += 1;
+                    bytes += len;
+                })
+                .unwrap();
+            visits.push((count, bytes));
+            match next {
+                Some(key) => after = Some(key),
+                None => break,
+            }
+        }
+
+        assert!(visits.len() > 1, "the pack was read in one visit");
+        assert_eq!(
+            visits.iter().map(|(count, _)| count).sum::<usize>(),
+            records
+        );
+        assert!(
+            visits
+                .iter()
+                .all(|(_, bytes)| *bytes <= STAMP_STEP_BYTES + text.len() + 1024),
+            "a visit exceeded one step: {visits:?}"
+        );
+        assert_eq!(store.restore_created().unwrap(), records);
+    }
+
     #[test]
     fn a_scan_is_scoped_to_one_workspace() {
         let (_dir, store) = store();
