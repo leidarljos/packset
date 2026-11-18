@@ -61,13 +61,17 @@ answers without the encoder, and search stays lexical.
 ## First minute
 
 ```console
+$ packset ensure
+$ packset health
+packsetd ok
 $ packset remember --workspace demo "BM25+ is the default lexical scorer. It beat BM25 by two points."
 3f9c...  lesson  due 2026-09-13T08:54:37.394Z
 $ packset search --workspace demo lexical scorer
 packset: workspace demo
 1.0000  lesson  3f9c...  BM25+ is the default lexical scorer. It beat BM25 by two points.
 $ packset due demo       # the same day: nothing is due, and the next review
-$ packset island lexical scorer         # the memories a task activates
+$ packset island --workspace demo lexical scorer         # the memories a task activates
+$ packset stop
 ```
 
 The id is 32 hex digits. The transcript shortens it. The score is the
