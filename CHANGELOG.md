@@ -4,6 +4,157 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 <!-- towncrier release notes start -->
 
+## 0.18.3 (2026-11-18)
+
+- A release tag builds packset, packsetd, packset-mcp and packset-embed.
+  Hosts are aarch64-apple-darwin and x86_64-apple-darwin.
+  Linux hosts are aarch64-unknown-linux-gnu and x86_64-unknown-linux-gnu.
+  The archive is `packset-v<version>-<target>.tar.gz`.
+  A `.sha256` file sits beside it.
+  `cargo binstall packset` downloads that archive.
+  The release publishes the tag only after CI succeeded on that commit.
+- Equal search scores now rank the newer record first, then by field and id, on every search path.
+- The writer stores a claim or card that looks like a credential, an instruction to the model, or invisible unicode.
+  It used to refuse it.
+  The record carries `flag:credential-shaped`, `flag:instruction-shaped` or `flag:invisible-unicode` in `labels`.
+  Search and recall show the label beside the hit, and the write answers one `warning` line.
+  The label does not hide the text, so rotate a credential that reached the pack.
+- The writer stores an agent's or a hook's claim that is past the prose limit, as it already stored a person's.
+  It used to refuse it, so a lesson of three sentences or of a 30-word sentence was lost.
+  The answer carries the reason in `prose.warning`, and search finds the claim at once.
+- `packset retract ID [--workspace WS] [--why ACCESSION]` withdraws one claim from the shell.
+  Search stops listing it.
+  `packset atoms --as-of` from before the retraction still lists it.
+
+- A command whose local writer is not listening, and which will not start one, returns at once.
+  The sentence names `packset ensure`.
+  When `PACKSET_HOME` names the pack and `packsetd` is available, a command other than `search` and `stop` still starts that writer once and waits for it.
+- A forgotten record keeps only its labels, times and reason, and cold rule lookups skip it.
+  A retraction keeps its text.
+- A memory-pressure refusal says `packsetd is busy` once, then what to do next.
+  A read or paused maintenance says to wait and run the command again. A large write says to wait or send a smaller one. A full append log says to wait for it to drain, then run the command again.
+- A pack no longer stops taking writes when it reaches 1 GiB.
+  The map now opens at twice the pack's size on disk.
+  It doubles when a write needs room, and that includes the upgrade pass.
+- A post that names a retired id keeps its unknown-origin or soft-cap warning.
+  The retired-id line is joined onto it, so the caller sees both.
+- A retraction whose reason is plain text is stored, with the reason on the tombstone as `why_text` and one warning line.
+  A post that names a deleted id is stored under a fresh id, with a warning that names the retired id.
+  The tombstone keeps the old id.
+- A second pack on a port another writer already uses is told that process and a free port: `PACKSET_PORT=<port> packset ensure`.
+  That command starts this pack beside the one already listening. `packset stop` is not that command: it stops the writer on the port this shell is using.
+  A home another process already has open names that process, and a new `PACKSET_HOME` with its own port. `packset ensure` reports that as soon as it can see the holder listening on a different port.
+- An expired claim leaves the live set, so the same words are stored again and the cap skips it.
+- An update that would raise `origin` or `source.basis` keeps the floor and stores the rest of the edit.
+  A post over a live id does the same.
+  The answer carries one `warning` line.
+  It used to refuse the whole write, so the text that rode with the higher origin was lost.
+- Commit 80e0c4e gave the large-folio start peaks as 20, 31 and 35 MiB over a 6 MiB base, for packs of 11, 47 and 95 MiB.
+  Those are the absolute peaks, truncated to whole MiB, and measured again over the base they are 15200, 25564 and 29548 KiB.
+  The same commit dropped the map-growth entry, and 4fb290e restored it unchanged in its own fragment, so the entry appears once.
+- Lexical search ranks the spelling that was asked for above another form of the word.
+  `narration` finds a record stored as `narrated`.
+  A record that shares some of the query words stays in the ranking.
+- On macOS, packset stop now finds the writer on its port and stops it.
+  It used to report the holder as not visible and leave the writer running.
+- Opening and dropping a store many times no longer runs out of thread keys.
+  A dropped store no longer leaves its home locked while a forked child runs.
+- Starting packsetd on an older pack upgrades it one step at a time.
+  On 4 KiB pages its peak memory is 16 MiB over a 791 MiB pack, against 799 MiB before.
+  Where the kernel maps large folios whole, the peak grows slowly with the pack, to 35 MiB over 95 MiB.
+- Storing a message that contains the one-dot leader (U+2024) no longer crashes the writer.
+- The first `packset ensure` on a new home names that directory.
+  With no `packset-embed` binary it also says search is lexical (no embeddings). A later ensure, or one that finds the embed component, does not repeat the lexical clause.
+- The first open after an upgrade no longer blocks ensure while it updates old records.
+  A full disk no longer kills the writer during that pass.
+- The packsetd tests compile on macOS again.
+- The status up line goes to stderr. Stdout is the JSON object, so `packset status seat | jq .embedder` reads it.
+- The writer stores a claim whose origin is outside the five known ones, instead of refusing it.
+  It also stores text past 500 characters.
+  An unknown origin is stored as unknown, with the label flag:unknown-origin and a warning that names the value sent.
+  Text past the cap is stored whole and labelled flag:over-soft-cap, and its warning gives the length and the cap.
+- The writer stores a tool dump and labels it `flag:tool-dump`.
+  It used to refuse the write, so a claim that quotes one line of output was lost.
+  The write answers one `warning` line, and an update that removes the dump drops the label.
+  Search finds the claim at once.
+  Blank text is still `atom text is required`.
+- With embedding off, packsetd starts no encoder and search answers on the lexical ballots.
+  A writer on port 0 prints the port it got and writes it to the pack home.
+- `packset island` prints the claims a cue activates.
+  When none do, it prints one line: nothing to show, and why. A cue that matches no claim says so. Weak seeds, and a cue whose activation did not spread, each say that instead.
+- `packset islands` and `packset citers` on an empty workspace say the workspace has nothing yet.
+  `packset atoms --as-of` says when nothing was live at that time.
+  `packset fire` resolves a unique id prefix, including the `...` shortening, and an id that matches nothing is an error.
+  `packset grade` of an unknown id prints `no current atom`, without the response wrapper.
+  Printed fields are separated by two spaces, the gap the pages show.
+  The hammer's status probe sends the bearer token from the pack home, so a listing counted within 300 ms is a 200.
+- `packset pin NAME` stores that set. The write used to send `name` while the route read `set`, so the pin was cleared.
+  The answer names `workspace`, `set` and `instructions`, the same object a later read returns.
+- `packset remember` and `packset prefer` print a write's warning on stderr, and stdout stays the one id line.
+  `packset search` prints a hit's labels in a trailing column when the hit has any.
+  A `packset-mcp` search row carries them.
+  An unlabelled line is unchanged.
+- `packset search --rerank` prints the stage: `absent`, `settled`, or `cross-encoder`.
+  `packset search --rank relevance` prints `rank: relevance`.
+  The howto curls send the pack token, so `jq` reads `.rank` and `.rerank` instead of an authorization error.
+- `packset stop` with nothing listening returns at once and does not start a writer.
+  `packset search` with nothing listening returns at once and names `packset ensure`, the same sentence `status` uses.
+  A refused connection on those two commands is not retried for the whole client budget.
+- `packset` and `packset-embed` now build with rustls 0.23.46, rustls-webpki 0.103.16 and webpki-roots 1.0.11, which fix RUSTSEC-2026-0346 to 0349, 0381 and 0382.
+  `packset-embed` also takes webpki-root-certs 1.0.11 (RUSTSEC-2026-0383).
+  `packset` builds with tokio 1.54.1 (RUSTSEC-2026-0386), and every crate with pulldown-cmark 0.13.6 (RUSTSEC-2026-0414 and 0433).
+  The writer's Lightning Memory-Mapped Database (LMDB) layer no longer pulls in the unmaintained bincode.
+- packset ensure and start take `--owned`, and the writer then syncs and exits when the calling process goes away.
+
+- Code and command examples use spaces. A test rejects a tab in one.
+- Getting started said a claim was at most twenty-five words and that anything longer was refused.
+  It now says two sentences of at most twenty-nine words each read best.
+  A longer claim is stored with the reason in `prose.warning`.
+  Getting started also says a tool dump gets the label `flag:tool-dump`.
+- The checkout install is `cargo install --locked --path crates/packset-cli`.
+  `cargo install --locked packset` reaches crates.io and does not build this checkout. `cargo build --release -p packset` is that same package, and `bin/packset` runs the binary.
+- The getting-started search lists the lesson first. Right after the two writes its score is 2.0000 and the preference's is 1.0000.
+- The howto names the default workspace: `git:github.com/leidarljos/packset` in this checkout, `dir:` and the path when there is no origin.
+  Getting started shows the status object, and grades a claim the same day.
+  The README island cue shares words with the claim just stored.
+  The handover pipes say deedar is `cargo install --locked deedar-cli`, and the packset-only export needs no deedar.
+- `packset export` prints the atom count on stderr. Stdout is the cited accessions, one a line, so a pipe stays that list.
+
+- `PACKSET_HOLD_AGENT_WRITES` is ignored.
+  An agent or hook write is stored and searchable at once, and the proposals list does not gain it.
+  A writer that still finds the variable set prints one line at start saying so.
+  An admission proposal already on file is still accepted, and that accept stores its atom.
+
+- A slow machine no longer fails the client's busy-retry test.
+  The retry waits are unchanged.
+- A write reads the live claims of its own set, which the writer patches as claims are added, updated and deleted.
+  It used to walk every live claim in the workspace under the lock, and that walk grew with the workspace.
+  On a pack of 20,000 live claims the steady dedup stage fell from 23 ms to 10 ms.
+  The first write at 20,000 claims rose from about 240 ms to about 360 ms, which is the index copy.
+- A write walks the live set for an expired claim only once the soonest `valid_to` in that workspace has passed.
+  It used to walk every claim on every write.
+  On a pack of 20,000 live claims the snapshot stage median fell from 2.60 ms with that walk to 0.00 ms with the soonest `valid_to` cached.
+- CI runs `cargo deny check` in full, for advisories, bans, licenses and sources, on every push and pull request and each Monday on main and develop.
+  `just check` runs clippy on each writer crate alone, as CI does.
+- Comments now give the reason for each packsetd writer cap and wait, and every default is unchanged.
+- Continuous integration (CI) on macOS runs the same two clippy steps as the Linux job, before the tests.
+- Local builds and CI use the same Rust 1.97.1, and CI now runs the suite on macOS.
+  A build in a linked worktree reports the commit of that worktree.
+- The bench example builds on its own again, with `cargo run -p packset-daemon --example bench`.
+  CI now runs clippy on each writer crate alone as well as on the workspace, so a target that compiles only on another crate's features fails there.
+- The docs workflow builds and checks on a push to develop, and it uploads and deploys only from main.
+- The release actions are pinned to the commits of specific v4.x release tags.
+  Only the release job can write the tag or its attestations.
+  The CI wait stops after 60 minutes.
+- The start test measures what one fault maps of the pack before each start, so its bound on ext4 is 2836 KiB where it was 26848 KiB.
+  Its start child pins glibc's trim threshold and warms up over a copy of the pack.
+  The warm-up stops when the test binary's resident pages stop growing, or at most one start past the binary's page count.
+  `measurements/start.txt` records the test's runs before and after the fix, interleaved draw by draw, with their raw logs.
+- `cargo deny check` fails a `*` version on a registry crate.
+  It also fails a crate from a registry other than crates.io, and a git source other than milli, heed and lmdb-rs.
+  A path or git requirement in an unpublished crate is still allowed, which is the pinned milli dependency.
+  Duplicate versions stay a warning, because denying them fails on the older releases milli v0.41.3 keeps.
+
 ## 0.18.2 (2026-11-14)
 
 - A search with no encoder splits an identifier on `_`, `-`, `.` and `/`, on a letter next to a digit, and on a camelCase boundary, and it keeps the joined form.
