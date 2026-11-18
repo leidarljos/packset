@@ -9,6 +9,8 @@ ignore = [
     { id = "RUSTSEC-2026-0215", reason = "2026-11-03: smallstr, used by milli v0.41.3" },
     { id = "RUSTSEC-2026-0249", reason = "2026-11-03: smartstring, used by milli v0.41.3" },
     { id = "RUSTSEC-2024-0436", reason = "2026-11-03: paste, a build-time macro crate that tokenizers 0.23.2 requires; fastembed 7.5.0, the latest, still uses that tokenizers" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono, through rmcp 3.9.0 and its schemars 1.2.2 feature; every version is affected and no fixed release exists; review on 2027-02-18" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime, through archived milli v0.41.3 and lindera 0.23.1; every version is affected and no fixed release exists; review on 2027-02-18" },
 ]
 
 # Licenses the workspace is allowed to depend on.
