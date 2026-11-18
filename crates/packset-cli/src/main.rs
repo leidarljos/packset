@@ -116,6 +116,8 @@ fn run() -> anyhow::Result<()> {
                     eprintln!(
                         "packset: a writer is already listening on 127.0.0.1:{port}; --owned leaves it running"
                     );
+                } else if is_ours(port) {
+                    eprintln!("packset: already listening on 127.0.0.1:{port}");
                 }
                 None
             } else {

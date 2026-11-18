@@ -206,6 +206,10 @@ fn the_first_ensure_names_the_home_and_says_when_search_is_lexical() {
     }
     let (ok, _, again) = output(packset(home.path(), port).arg("ensure"));
     assert!(ok, "{again}");
+    assert!(
+        again.contains(&format!("already listening on 127.0.0.1:{port}")),
+        "{again}"
+    );
     assert!(!again.contains("home is"), "{again}");
     assert!(!again.contains("lexical"), "{again}");
     let _ = output(packset(home.path(), port).arg("stop"));
