@@ -831,10 +831,7 @@ fn an_empty_read_says_what_is_missing_and_a_prefix_fires() {
     assert!(stderr.contains("no current atom nope"), "{stderr}");
     let (ok, _, stderr) = output(packset(home.path(), port).args(["grade", "demo", "nope"]));
     assert!(!ok, "{stderr}");
-    assert!(
-        stderr.contains("grade takes an atom id first"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("grade takes an atom id first"), "{stderr}");
     assert!(!stderr.contains("bad response"), "{stderr}");
     assert!(!stderr.contains("400"), "{stderr}");
     let (ok, stdout, stderr) = output(packset(home.path(), port).args([
