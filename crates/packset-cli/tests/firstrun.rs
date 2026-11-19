@@ -206,6 +206,10 @@ fn the_first_ensure_names_the_home_and_says_when_search_is_lexical() {
     }
     let (ok, _, again) = output(packset(home.path(), port).arg("ensure"));
     assert!(ok, "{again}");
+    assert!(
+        again.contains(&format!("already listening on 127.0.0.1:{port}")),
+        "{again}"
+    );
     assert!(!again.contains("home is"), "{again}");
     assert!(!again.contains("lexical"), "{again}");
     let _ = output(packset(home.path(), port).arg("stop"));
@@ -824,7 +828,19 @@ fn an_empty_read_says_what_is_missing_and_a_prefix_fires() {
     );
     let (ok, _, stderr) = output(packset(home.path(), port).args(["grade", "nope", "demo"]));
     assert!(!ok, "{stderr}");
-    assert!(stderr.contains("no current atom nope"), "{stderr}");
+    assert!(stderr.contains("grade takes an atom id first"), "{stderr}");
+    assert!(!stderr.contains("no current atom nope"), "{stderr}");
+    let (ok, _, stderr) = output(packset(home.path(), port).args(["grade", "first"]));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("grade takes an atom id first"), "{stderr}");
+    assert!(!stderr.contains("no current atom first"), "{stderr}");
+    let (ok, _, stderr) = output(packset(home.path(), port).args(["grade", "notes"]));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("grade takes an atom id first"), "{stderr}");
+    assert!(!stderr.contains("no current atom notes"), "{stderr}");
+    let (ok, _, stderr) = output(packset(home.path(), port).args(["grade", "demo", "nope"]));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("grade takes an atom id first"), "{stderr}");
     assert!(!stderr.contains("bad response"), "{stderr}");
     assert!(!stderr.contains("400"), "{stderr}");
     let (ok, stdout, stderr) = output(packset(home.path(), port).args([
@@ -871,4 +887,190 @@ fn status_keeps_the_up_line_off_the_json_object() {
         serde_json::from_str(stdout.trim()).unwrap_or_else(|err| panic!("{err}: {stdout}"));
     assert!(body.get("live_by_kind").is_some(), "{body}");
     assert!(body.get("embedder").is_some(), "{body}");
+}
+
+#[test]
+fn health_prints_the_writer_answer() {
+    let home = tempfile::tempdir().unwrap();
+    let (port, ok, stdout, stderr) = common::with_port(|port| {
+        let (ok, _, stderr) = output(packset(home.path(), port).arg("ensure"));
+        assert!(ok, "{stderr}");
+        let (ok, stdout, stderr) = output(packset(home.path(), port).arg("health"));
+        (port, ok, stdout, stderr)
+    });
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.trim(), "packsetd ok", "{stdout}");
+    let _ = output(packset(home.path(), port).arg("stop"));
+}
+
+#[test]
+fn health_with_a_dead_url_says_not_answering_and_starts_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let port = common::free_port();
+    let url = format!("http://127.0.0.1:{port}");
+    let started = Instant::now();
+    let (ok, stdout, stderr) = output(
+        packset(home.path(), port)
+            .env("PACKSET_URL", &url)
+            .env("PACKSET_TIMEOUT_MS", "30000")
+            .arg("health"),
+    );
+    let elapsed = started.elapsed();
+    assert!(!ok, "{stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+    assert!(
+        stderr.contains(&format!("writer is not answering at {url}")),
+        "{stderr}"
+    );
+    assert!(
+        elapsed < QUICK,
+        "health waited out the client budget: {elapsed:?} {stderr}"
+    );
+    let pack = home.path().join("pack");
+    assert!(!pack.join("token").exists(), "health started a writer");
+    assert!(!pack.join("port").exists(), "health wrote a port file");
+    assert!(!pack.join("memory.lmdb").exists(), "health opened a store");
+}
+
+#[test]
+fn health_times_out_in_seconds_when_the_remote_is_not_answering() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = common::bind();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let _held = stream;
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let started = Instant::now();
+    let (ok, _, stderr) = output(
+        packset(home.path(), port)
+            .env("PACKSET_URL", &url)
+            .env("PACKSET_TIMEOUT_MS", "30000")
+            .arg("health"),
+    );
+    let elapsed = started.elapsed();
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains(&format!("writer is not answering at {url}")),
+        "{stderr}"
+    );
+    assert!(
+        elapsed < QUICK,
+        "health did not fail fast: {elapsed:?} {stderr}"
+    );
+}
+
+/// A status the writer answers at once. The count is requests, not connections.
+fn serve_status(code: u16) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let seen = std::sync::Arc::new(AtomicUsize::new(0));
+    let count = std::sync::Arc::clone(&seen);
+    let listener = common::bind();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            answer(conn, &|_path: &str| {
+                count.fetch_add(1, Ordering::SeqCst);
+                (code, "busy")
+            });
+        }
+    });
+    (port, seen)
+}
+
+#[test]
+fn health_sends_one_request_when_the_writer_is_busy_or_rate_limited() {
+    use std::sync::atomic::Ordering;
+    for code in [503, 429] {
+        let home = tempfile::tempdir().unwrap();
+        let (port, seen) = serve_status(code);
+        let url = format!("http://127.0.0.1:{port}");
+        let started = Instant::now();
+        let (ok, stdout, stderr) = output(
+            packset(home.path(), port)
+                .env("PACKSET_URL", &url)
+                .env("PACKSET_TIMEOUT_MS", "30000")
+                .arg("health"),
+        );
+        let elapsed = started.elapsed();
+        assert!(!ok, "status {code}: {stderr}");
+        assert!(stdout.trim().is_empty(), "{code}: {stdout}");
+        assert!(
+            stderr.contains(&format!("writer is not answering at {url}")),
+            "{code}: {stderr}"
+        );
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "health sent more than one request for {code}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "health did not fail fast on {code}: {elapsed:?} {stderr}"
+        );
+    }
+}
+
+#[test]
+fn the_readme_first_minute_runs_on_a_non_default_port() {
+    let home = tempfile::tempdir().unwrap();
+    let (port, ok, ensure_out, ensure_err) = common::with_port(|port| {
+        let (ok, stdout, stderr) = output(packset(home.path(), port).arg("ensure"));
+        (port, ok, stdout, stderr)
+    });
+    assert!(ok, "{ensure_err}");
+    assert!(
+        ensure_out.contains(&format!("PACKSET_URL=http://127.0.0.1:{port}")),
+        "{ensure_out}"
+    );
+    let (ok, health_out, health_err) = output(packset(home.path(), port).arg("health"));
+    assert!(ok, "{health_err}");
+    assert_eq!(health_out.trim(), "packsetd ok", "{health_out}");
+    let (ok, remember_out, remember_err) = output(packset(home.path(), port).args([
+        "remember",
+        "--workspace",
+        "demo",
+        "BM25+ is the default lexical scorer. It beat BM25 by two points.",
+    ]));
+    assert!(ok, "{remember_err}");
+    assert!(remember_out.contains("lesson"), "{remember_out}");
+    let (ok, search_out, search_err) = output(packset(home.path(), port).args([
+        "search",
+        "--workspace",
+        "demo",
+        "lexical scorer",
+    ]));
+    assert!(ok, "{search_err}");
+    assert!(
+        search_err.contains("packset: workspace demo"),
+        "{search_err}"
+    );
+    assert!(
+        search_out.contains("BM25+ is the default lexical scorer"),
+        "{search_out}"
+    );
+    let (ok, _, due_err) = output(packset(home.path(), port).args(["due", "demo"]));
+    assert!(ok, "{due_err}");
+    let (ok, island_out, island_err) = output(packset(home.path(), port).args([
+        "island",
+        "--workspace",
+        "demo",
+        "lexical scorer",
+    ]));
+    assert!(ok, "{island_err}");
+    assert!(!island_out.trim().is_empty(), "{island_out}");
+    let (ok, _, stop_err) = output(packset(home.path(), port).arg("stop"));
+    assert!(ok, "{stop_err}");
+}
+
+#[test]
+fn an_unknown_verb_names_a_fix_for_consolidate() {
+    let home = tempfile::tempdir().unwrap();
+    let (ok, _, stderr) = output(packset(home.path(), 8790).arg("consolidate"));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("unknown command: consolidate"), "{stderr}");
+    assert!(stderr.contains("POST /v1/consolidate"), "{stderr}");
 }

@@ -152,6 +152,25 @@ fn send(
     dispatch(req, body, budget, Refused::Retry)
 }
 
+/// One request inside `budget`. A status, including 429 and 503, is the
+/// answer, and so is a refused connection. This does not ask again and does
+/// not start a writer.
+fn probe(req: ureq::Request, budget: Duration) -> Result<ureq::Response, Attempt> {
+    let deadline = std::time::SystemTime::now() + budget;
+    let deadline_ms = deadline
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().to_string())
+        .unwrap_or_default();
+    let mut attempt = req.clone().timeout(budget.max(Duration::from_millis(1)));
+    if !deadline_ms.is_empty() {
+        attempt = attempt.set("X-Packset-Deadline", &deadline_ms);
+    }
+    match attempt.call() {
+        Err(err) if connect_refused(&err) => Err(Attempt::Plain(not_running(req.url()))),
+        other => other.map_err(|err| Attempt::Ureq(Box::new(err))),
+    }
+}
+
 fn dispatch(
     req: ureq::Request,
     body: Option<&serde_json::Value>,
@@ -839,14 +858,29 @@ impl PacksetClient {
     }
 
     /// One `/health` probe. A refused connection is the answer: this does
-    /// not retry it and does not start a writer. `packset stop` uses it.
+    /// not retry it and does not start a writer. A status, including 429 and
+    /// 503, is also the answer: this sends one request and does not ask again.
+    /// `packset stop` uses it.
     ///
     /// # Errors
     ///
     /// The request's, including a writer that is not listening.
     pub fn health_once(&self) -> Result<String, Error> {
         let url = format!("{}/health", self.base);
-        let body = dispatch(authorize(ureq::get(&url)), None, timeout(), Refused::Once)
+        let body = probe(authorize(ureq::get(&url)), timeout())
+            .map_err(|e| into_error(&url, e))?
+            .into_string()?;
+        Ok(body)
+    }
+
+    /// One `/health` probe with an explicit budget.
+    ///
+    /// A refused connection is the answer: this does not retry it and does not
+    /// start a writer. A status, including 429 and 503, is also the answer:
+    /// this sends one request and does not ask again.
+    pub fn health_once_with_timeout(&self, budget: Duration) -> Result<String, Error> {
+        let url = format!("{}/health", self.base);
+        let body = probe(authorize(ureq::get(&url)), budget)
             .map_err(|e| into_error(&url, e))?
             .into_string()?;
         Ok(body)
