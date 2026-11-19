@@ -38,6 +38,8 @@ use packset_client::PacksetClient;
 
 /// How long `start` waits for the daemon to bind.
 const STARTUP: Duration = Duration::from_secs(5);
+/// How long `health` waits for one `/health` answer before giving up.
+const HEALTH_ONCE: Duration = Duration::from_secs(3);
 
 /// What `/health` says when the answer came from our own writer.
 const OURS: &[&str] = &["packsetd", "inside-memd"];
@@ -87,7 +89,10 @@ fn run() -> anyhow::Result<()> {
         _ => {}
     }
     let Some(takes) = spec(verb) else {
-        anyhow::bail!("unknown command: {verb}\n\n{}", usage());
+        let hint = unknown_command_hint(verb)
+            .map(|line| format!("\npackset: {line}"))
+            .unwrap_or_default();
+        anyhow::bail!("unknown command: {verb}{hint}\n\n{}", usage());
     };
     // Every verb's arguments go through one parser before anything runs, so
     // `packset forget --help` prints help rather than forgetting a workspace
@@ -116,6 +121,8 @@ fn run() -> anyhow::Result<()> {
                     eprintln!(
                         "packset: a writer is already listening on 127.0.0.1:{port}; --owned leaves it running"
                     );
+                } else if is_ours(port) {
+                    eprintln!("packset: already listening on 127.0.0.1:{port}");
                 }
                 None
             } else {
@@ -148,6 +155,7 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
         "stop" => stop(port),
+        "health" => health(port),
         "status" => status(port, args.switch("--all"), args.first()),
         "port" => {
             println!("{port}");
@@ -220,7 +228,7 @@ fn spec(verb: &str) -> Option<Spec> {
             switches: &["--owned"],
             ..NOTHING
         },
-        "stop" | "port" | "url" | "which" | "migrate-home" => NOTHING,
+        "stop" | "health" | "port" | "url" | "which" | "migrate-home" => NOTHING,
         "status" => Spec {
             switches: &["--all"],
             ..ONE_WORKSPACE
@@ -443,6 +451,7 @@ fn usage() -> String {
          retract ID [--workspace WS] [--why ACCESSION]  withdraw one claim; the deed that showed it wrong, or none\n\
          start [--owned]        the writer alone. With --owned this process stays, and the writer exits when it does\n\
          stop                   stop the writer\n\
+         health                 print GET /health for the writer URL\n\
          status [--all | WORKSPACE]  counts by kind, pin, index; --all over every workspace\n\
          port | url | which\n\
          migrate-home           move ~/.ljos/memory to $XDG_DATA_HOME/packset; the writer must be stopped\n\
@@ -1100,6 +1109,31 @@ fn embed_switched_off(raw: &str) -> bool {
     )
 }
 
+fn unknown_command_hint(verb: &str) -> Option<&'static str> {
+    match verb {
+        "doctor" => Some("ljos doctor checks the seat; packset status checks the writer"),
+        "consolidate" => Some("consolidate is POST /v1/consolidate on the writer"),
+        _ => None,
+    }
+}
+
+/// One `GET /health` for the writer this client dials.
+///
+/// One request. A 429 or a 503 is not asked again, and a writer is not started.
+fn health(port: u16) -> anyhow::Result<()> {
+    let client = client()?;
+    let _ = port;
+    let body = client
+        .health_once_with_timeout(HEALTH_ONCE)
+        .map_err(|_| anyhow::anyhow!("writer is not answering at {}", client.base()))?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("writer is not answering at {}", client.base());
+    }
+    println!("{trimmed}");
+    Ok(())
+}
+
 fn status(port: u16, all: bool, given: Option<&str>) -> anyhow::Result<()> {
     let client = client()?;
     // A named PACKSET_URL points the read at that writer; the loopback
@@ -1591,12 +1625,36 @@ fn island_empty_line(workspace: &str, cue: &str, body: &serde_json::Value) -> St
     format!("packset: nothing to show in {workspace}; {why}")
 }
 
+/// True when `raw` looks like an atom id: 32 hex digits or a unique hex prefix.
+fn looks_like_atom_id(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = raw.strip_suffix("...") {
+        return !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    raw.len() == 32 && raw.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Grade one review: recalled unless `--lapsed`.
 fn grade(args: &Args) -> anyhow::Result<()> {
     let lapsed = args.switch("--lapsed");
     let id = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("grade needs an atom id"))?;
+    if let Some(second) = args.second() {
+        if !looks_like_atom_id(id) && looks_like_atom_id(second) {
+            anyhow::bail!(
+                "grade takes an atom id first, then an optional workspace; try packset grade {second} {id}"
+            );
+        }
+    }
+    if !looks_like_atom_id(id) {
+        anyhow::bail!(
+            "grade takes an atom id first; {id} is a workspace name. List ids with packset search --workspace {id} QUERY"
+        );
+    }
     let workspace = workspace(args.second())?;
     let graded = client()?.grade(&workspace, id, !lapsed)?;
     println!("{}", graded["due_at"].as_str().unwrap_or("graded"));

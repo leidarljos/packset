@@ -198,12 +198,16 @@ fn the_readme_island_cue_shares_a_word_with_the_claim() {
     let readme = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
     let remember = readme
         .lines()
-        .find(|line| line.contains("packset remember"))
+        .find(|line| line.contains("packset remember --workspace demo"))
         .unwrap();
     let island = readme
         .lines()
         .find(|line| line.contains("packset island "))
         .unwrap();
+    assert!(
+        island.contains("--workspace demo"),
+        "island must use the same scratch workspace as remember: {island}"
+    );
     let claim = remember.split('"').nth(1).unwrap().to_ascii_lowercase();
     let cue = island
         .split("packset island ")

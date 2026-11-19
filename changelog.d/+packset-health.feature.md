@@ -1,0 +1,1 @@
+`packset health` now sends one request with a short timeout and does not start a writer or ask again on 429 or 503; when the request fails it exits nonzero and prints `writer is not answering at URL`.
