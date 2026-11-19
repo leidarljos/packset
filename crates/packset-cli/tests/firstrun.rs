@@ -1074,3 +1074,15 @@ fn an_unknown_verb_names_a_fix_for_consolidate() {
     assert!(stderr.contains("unknown command: consolidate"), "{stderr}");
     assert!(stderr.contains("POST /v1/consolidate"), "{stderr}");
 }
+
+#[test]
+fn an_unknown_verb_names_a_fix_for_doctor() {
+    let home = tempfile::tempdir().unwrap();
+    let (ok, _, stderr) = output(packset(home.path(), 8790).arg("doctor"));
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("unknown command: doctor"), "{stderr}");
+    assert!(
+        stderr.contains("ljos doctor checks the seat; packset status checks the writer"),
+        "{stderr}"
+    );
+}
