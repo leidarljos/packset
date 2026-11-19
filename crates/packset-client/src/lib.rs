@@ -852,6 +852,18 @@ impl PacksetClient {
         Ok(body)
     }
 
+    /// One `/health` probe with an explicit budget.
+    ///
+    /// A refused connection is the answer: this does not retry it and does not
+    /// start a writer.
+    pub fn health_once_with_timeout(&self, budget: Duration) -> Result<String, Error> {
+        let url = format!("{}/health", self.base);
+        let body = dispatch(authorize(ureq::get(&url)), None, budget, Refused::Once)
+            .map_err(|e| into_error(&url, e))?
+            .into_string()?;
+        Ok(body)
+    }
+
     /// Queue depth, shed counts and the current limits. `line` is `ok`, or
     /// `busy, retrying` when work is waiting.
     ///
